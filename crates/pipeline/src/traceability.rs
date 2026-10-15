@@ -315,3 +315,7 @@ pub fn update_traceability_matrix(
 ) -> TraceabilityMatrix {
     todo!("See docs/spec/interfaces/advanced-features.md §Traceability Matrix")
 }
+
+#[cfg(test)]
+#[path = "traceability_tests.rs"]
+mod tests;

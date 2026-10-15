@@ -1,0 +1,12 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4e1e08cd46a00591610c74afc3d5f4c32eb1683a4103383050df24b52f1308a4 # shrinks to row_specs = [], entry_specs = [], stage_idx = 0
+cc 3407204610fc25b37063b2ef157575d7df5f0d8fc011c625598becd883732cb8 # shrinks to row_specs = [], entry_specs = [], stage_idx = 0
+cc eb048223bc26407797aff73fc276b0179b021de1e1fe5c15db4a2a65efc14d9a # shrinks to row_specs = [], entry_specs = [], stage_idx = 0
+cc 952f21b31abaf9f54096cbdef1857d47029fd755575bb45a13712f6ba4840681 # shrinks to digit_groups = ["1"], descriptions = ["0"]
+cc 6f882f037465c273ba82d46264b5ed6e9d4a7a25391221f41d249eb1662fdf69 # shrinks to body = ""
+cc 718e586e5c9006d007cfd3957595783d4c68f3545640aaa895675ecb7253eaa3 # shrinks to body = ""
