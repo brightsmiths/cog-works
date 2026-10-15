@@ -234,8 +234,73 @@ pub struct TraceabilityMatrix {
 /// ```
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §extract_requirements.
-pub fn extract_requirements(_work_item_body: &str) -> Vec<Requirement> {
-    todo!("See docs/spec/interfaces/advanced-features.md §Traceability Matrix")
+pub fn extract_requirements(work_item_body: &str) -> Vec<Requirement> {
+    work_item_body
+        .lines()
+        .filter_map(find_first_requirement_in_line)
+        .collect()
+}
+
+/// Scans a single line for the first `REQ-<digits>:` tag and, if found,
+/// builds the corresponding [`Requirement`].
+///
+/// Matching is case-insensitive on the `REQ` prefix, but the `id` field
+/// preserves the exact bytes matched in `line` (verbatim case). Matching is
+/// byte-oriented over ASCII delimiters only (`R`, `E`, `Q`, `-`, ASCII
+/// digits, `:`), so it never slices on a non-UTF-8-boundary: every slice
+/// point returned by [`match_tag_at`] immediately follows one of those
+/// single-byte ASCII characters, which is always a valid `char` boundary.
+fn find_first_requirement_in_line(line: &str) -> Option<Requirement> {
+    let bytes = line.as_bytes();
+    for start in 0..bytes.len() {
+        if let Some(colon_idx) = match_tag_at(bytes, start) {
+            let id = line[start..colon_idx].to_string();
+            let description = line[colon_idx + 1..].trim().to_string();
+            return Some(Requirement {
+                id,
+                description,
+                source_work_item: WorkItemId::new(0),
+            });
+        }
+    }
+    None
+}
+
+/// Attempts to match a `REQ-<digits>:` tag starting at byte offset `start`
+/// in `bytes`. Returns the byte offset of the matching `:` on success.
+///
+/// Runs in `O(1)` amortised time per call site: the prefix check fails fast
+/// on the first mismatched byte, so scanning a whole line is `O(n)` with no
+/// backtracking — this is a hand-rolled bounded matcher, not a backtracking
+/// regex engine, so pathological inputs (e.g. long runs of `"REQ-"`) cannot
+/// cause super-linear behaviour.
+fn match_tag_at(bytes: &[u8], start: usize) -> Option<usize> {
+    const PREFIX_LEN: usize = 4; // "REQ-"
+    if start + PREFIX_LEN > bytes.len() {
+        return None;
+    }
+    let prefix_matches = bytes[start].eq_ignore_ascii_case(&b'R')
+        && bytes[start + 1].eq_ignore_ascii_case(&b'E')
+        && bytes[start + 2].eq_ignore_ascii_case(&b'Q')
+        && bytes[start + 3] == b'-';
+    if !prefix_matches {
+        return None;
+    }
+
+    let digits_start = start + PREFIX_LEN;
+    let mut idx = digits_start;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        idx += 1;
+    }
+    if idx == digits_start {
+        return None; // no digits
+    }
+
+    if idx < bytes.len() && bytes[idx] == b':' {
+        Some(idx)
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
