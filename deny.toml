@@ -39,20 +39,15 @@ ignore = [
     # uses ASCII-safe credential values. Risk: low.
     # Revisit when azure_messaging_servicebus drops http-types.
     { id = "RUSTSEC-2026-0174" },
-    # RUSTSEC-2026-0194: quick-xml quadratic run time on duplicate attribute names
-    # Source: quick-xml 0.39.4 <- queue-runtime 0.2.0 <- listener 0.1.0
-    # queue-runtime pins quick-xml ^0.39.2; no compatible fix version is available
-    # without updating queue-runtime. CogWorks does not construct adversarial XML
-    # with duplicate attributes; the listener only parses Azure Service Bus messages
-    # which are well-formed. Risk: low in our threat model.
-    # Revisit when queue-runtime upgrades its quick-xml dependency.
-    { id = "RUSTSEC-2026-0194" },
-    # RUSTSEC-2026-0195: quick-xml unbounded namespace-declaration allocation in NsReader
-    # Source: quick-xml 0.39.4 <- queue-runtime 0.2.0 <- listener 0.1.0
-    # Same constraint as RUSTSEC-2026-0194 above. CogWorks does not parse untrusted
-    # XML with namespace declarations; the listener receives Azure Service Bus messages
-    # which are internal and bounded. Risk: low.
-    { id = "RUSTSEC-2026-0195" },
+    # RUSTSEC-2026-0275: legacy azure_core writes the authorization header value to logs
+    # Source: azure_core 0.21.0 <- azure_messaging_servicebus 0.21.0 <- queue-runtime 0.2.2
+    # azure_messaging_servicebus has no release newer than 0.21.0; the legacy branch of
+    # azure-sdk-for-rust is unsupported and MSRC declined to treat this as a
+    # servicing-criteria vulnerability (see https://github.com/Azure/azure-sdk-for-rust/issues/5074).
+    # The listener does not run with debug/trace logging enabled in production, so the
+    # affected log statements are not emitted. Risk: low.
+    # Revisit when queue-runtime migrates to a Service Bus client built on azure_core >=1.0.0.
+    { id = "RUSTSEC-2026-0275" },
 ]
 
 [licenses]
