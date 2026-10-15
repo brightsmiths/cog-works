@@ -81,7 +81,7 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install cargo-audit
-        uses: taiki-e/install-action@1e5b504babf6dd4ddc575390a31ec4102910d7d4 # cargo-audit
+        uses: taiki-e/install-action@977cdbe2e748fc9d5798e3098868c4c4463bf31b # cargo-audit
 
       - name: Run security audit
         run: cargo audit
