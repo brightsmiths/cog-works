@@ -374,11 +374,37 @@ fn match_tag_at(bytes: &[u8], start: usize) -> Option<usize> {
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §update_traceability_matrix.
 pub fn update_traceability_matrix(
-    _matrix: TraceabilityMatrix,
-    _stage: TraceabilityStage,
-    _entries: &[TraceabilityEntry],
+    mut matrix: TraceabilityMatrix,
+    stage: TraceabilityStage,
+    entries: &[TraceabilityEntry],
 ) -> TraceabilityMatrix {
-    todo!("See docs/spec/interfaces/advanced-features.md §Traceability Matrix")
+    for entry in entries {
+        for row in &mut matrix.rows {
+            if row.requirement.id == entry.requirement_ref {
+                set_stage_covered(row, stage);
+            }
+        }
+    }
+
+    for row in &mut matrix.rows {
+        row.status = row.compute_status();
+    }
+    matrix.complete = matrix
+        .rows
+        .iter()
+        .all(|row| row.status == TraceabilityStatus::Complete);
+
+    matrix
+}
+
+/// Sets the coverage flag on `row` that corresponds to `stage`.
+fn set_stage_covered(row: &mut RequirementRow, stage: TraceabilityStage) {
+    match stage {
+        TraceabilityStage::Architecture => row.architecture_covered = true,
+        TraceabilityStage::Interface => row.interface_covered = true,
+        TraceabilityStage::SubWorkItem => row.sub_work_item_covered = true,
+        TraceabilityStage::Code => row.code_covered = true,
+    }
 }
 
 #[cfg(test)]
