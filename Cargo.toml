@@ -45,7 +45,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 opentelemetry = "0.32"
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "trace"] }
 opentelemetry-otlp = { version = "0.27", features = ["tonic"] }
-tracing-opentelemetry = "0.33"
+tracing-opentelemetry = "0.34"
 
 # Constant-time comparison (used by listener for HMAC-SHA256 webhook verification)
 # Required to prevent timing-oracle attacks when comparing HMAC digests.
