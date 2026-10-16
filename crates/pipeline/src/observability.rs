@@ -193,3 +193,7 @@ pub fn record_rework(
 ) {
     todo!("See docs/spec/interfaces/advanced-features.md §Observability Hooks")
 }
+
+#[cfg(test)]
+#[path = "observability_tests.rs"]
+mod tests;
