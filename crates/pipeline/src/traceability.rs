@@ -269,6 +269,13 @@ fn find_first_requirement_in_line(line: &str) -> Option<Requirement> {
 /// Attempts to match a `REQ-<digits>:` tag starting at byte offset `start`
 /// in `bytes`. Returns the byte offset of the matching `:` on success.
 ///
+/// Enforces a left word-boundary: the match is rejected unless `start == 0`
+/// or the byte immediately before `start` is not an ASCII alphanumeric
+/// character. This prevents the tag from matching in the middle of a longer
+/// token (e.g. the `REQ-12` substring inside `"PREREQ-12:"`), while still
+/// allowing it to match immediately after whitespace, punctuation, or
+/// Markdown markers such as `*` or `-`.
+///
 /// Runs in `O(1)` amortised time per call site: the prefix check fails fast
 /// on the first mismatched byte, so scanning a whole line is `O(n)` with no
 /// backtracking — this is a hand-rolled bounded matcher, not a backtracking
@@ -277,6 +284,9 @@ fn find_first_requirement_in_line(line: &str) -> Option<Requirement> {
 fn match_tag_at(bytes: &[u8], start: usize) -> Option<usize> {
     const PREFIX_LEN: usize = 4; // "REQ-"
     if start + PREFIX_LEN > bytes.len() {
+        return None;
+    }
+    if start > 0 && bytes[start - 1].is_ascii_alphanumeric() {
         return None;
     }
     let prefix_matches = bytes[start].eq_ignore_ascii_case(&b'R')
@@ -309,8 +319,12 @@ fn match_tag_at(bytes: &[u8], start: usize) -> Option<usize> {
 /// coverage flags in the traceability matrix.
 ///
 /// For each [`TraceabilityEntry`] in `entries`, matches `requirement_ref`
-/// against the `id` field of each row in `matrix.rows`. When a match is found
-/// the corresponding stage coverage flag is set to `true`.
+/// against the `id` field of each row in `matrix.rows`. The comparison is
+/// case-insensitive (ASCII), since [`extract_requirements`] preserves the
+/// `REQ` prefix's case verbatim in `id`, but alignment checks may report
+/// `requirement_ref` in a different case. The row's `id` field is never
+/// mutated by this comparison — only the matching stage coverage flag is set
+/// to `true`.
 ///
 /// After updating flags, recomputes each row's `status` field and the
 /// matrix-level `complete` flag.
@@ -380,7 +394,11 @@ pub fn update_traceability_matrix(
 ) -> TraceabilityMatrix {
     for entry in entries {
         for row in &mut matrix.rows {
-            if row.requirement.id == entry.requirement_ref {
+            if row
+                .requirement
+                .id
+                .eq_ignore_ascii_case(&entry.requirement_ref)
+            {
                 set_stage_covered(row, stage);
             }
         }
