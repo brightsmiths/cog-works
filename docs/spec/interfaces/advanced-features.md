@@ -455,9 +455,14 @@ pub fn record_node_complete(
 Emits structured fields:
 
 - `pipeline.run_id`, `pipeline.node_id`, `pipeline.event` = `"node_complete"`
-- `pipeline.token_cost.input` = input token count
-- `pipeline.token_cost.output` = output token count
 - `pipeline.token_cost.total_usd` = total cost in USD
+
+> **Note**: Earlier revisions of this spec also listed `pipeline.token_cost.input`
+> and `pipeline.token_cost.output` fields. `TokenCost` (`crates/pipeline/src/types.rs`)
+> is a monetary-only type (USD, `f64`) with no input/output token-count
+> breakdown, so the implementation does not emit these two fields. Adding a
+> token-count breakdown would require widening `TokenCost` (or introducing a
+> separate type) and is tracked as a follow-up, not part of this change.
 
 #### `fn record_retry`
 

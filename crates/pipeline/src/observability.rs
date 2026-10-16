@@ -111,9 +111,12 @@ pub fn record_node_start(run_id: &PipelineRunId, node: &NodeId, span: &tracing::
 /// | `pipeline.run_id` | `run_id` as string |
 /// | `pipeline.node_id` | `node` as string |
 /// | `pipeline.event` | `"node_complete"` |
-/// | `pipeline.token_cost.input` | input token count |
-/// | `pipeline.token_cost.output` | output token count |
 /// | `pipeline.token_cost.total_usd` | total cost in USD |
+///
+/// Note: [`TokenCost`] is a monetary-only type (USD) with no input/output
+/// token-count breakdown, so no `pipeline.token_cost.input` /
+/// `pipeline.token_cost.output` fields are emitted. See
+/// `docs/spec/interfaces/advanced-features.md` §record_node_complete.
 ///
 /// # Arguments
 ///
