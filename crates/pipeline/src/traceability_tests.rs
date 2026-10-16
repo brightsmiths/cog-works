@@ -16,12 +16,21 @@
 //! | Target | Tier 1 (spec) | Tier 2 (adversarial) | Tier 3 (proptest) |
 //! |---|---|---|---|
 //! | Contract: `compute_status` / `Display` | 9 | - | - |
-//! | `extract_requirements` | 12 | 16 | 3 |
-//! | `update_traceability_matrix` | 13 | 10 | 4 |
+//! | `extract_requirements` | 12 | 20 | 3 |
+//! | `update_traceability_matrix` | 13 | 13 | 4 |
 //!
-//! Both `extract_requirements` and `update_traceability_matrix` are `todo!()`
-//! stubs as of this writing. Every test below compiles (GREEN) but panics at
-//! runtime (RED) until the implementation is written.
+//! `extract_requirements` and `update_traceability_matrix` are fully
+//! implemented and all tests above this point in the file pass against the
+//! current implementation. Four tests added as regressions for a code-review
+//! finding of two Medium-severity bugs — word-boundary-unaware tag matching
+//! in `extract_requirements`, and case-sensitive `requirement_ref` lookup in
+//! `update_traceability_matrix` — are expected to FAIL (RED) until the
+//! corresponding fixes land; see
+//! `test_extract_requirements_tag_embedded_in_longer_word_is_not_matched`,
+//! `test_extract_requirements_tag_preceded_by_letter_is_not_matched`,
+//! `test_extract_requirements_tag_preceded_by_digit_is_not_matched`, and
+//! `test_update_traceability_matrix_case_insensitive_requirement_ref_still_matches`
+//! (plus its two companions).
 //!
 //! ## Spec gaps noted (see task report for the Tester's full write-up)
 //!
@@ -161,7 +170,8 @@ fn test_extract_requirements_single_match_extracts_id_and_description() {
 
 #[test]
 fn test_extract_requirements_multiple_matches_returns_all_in_order() {
-    let body = "## Requirements\nREQ-001: System must validate inputs\nREQ-002: Errors must be logged";
+    let body =
+        "## Requirements\nREQ-001: System must validate inputs\nREQ-002: Errors must be logged";
     let reqs = extract_requirements(body);
     assert_eq!(reqs.len(), 2);
     assert_eq!(reqs[0].id, "REQ-001");
@@ -311,7 +321,8 @@ fn test_extract_requirements_duplicate_ids_produce_separate_rows() {
 
 #[test]
 fn test_extract_requirements_description_does_not_span_multiple_lines() {
-    let body = "REQ-001: first line of description\nthis continuation line is not part of the description";
+    let body =
+        "REQ-001: first line of description\nthis continuation line is not part of the description";
     let reqs = extract_requirements(body);
     assert_eq!(reqs.len(), 1);
     assert_eq!(reqs[0].description, "first line of description");
@@ -359,6 +370,49 @@ fn test_extract_requirements_unmatched_req_fragments_ignored_without_panic() {
     let reqs = extract_requirements(body);
     // "REQ-001" has no trailing colon on this line, so it must not match either.
     assert!(reqs.is_empty());
+}
+
+#[test]
+fn test_extract_requirements_tag_embedded_in_longer_word_is_not_matched() {
+    // Regression for Medium-severity review finding: `match_tag_at` has no
+    // left-boundary check, so it currently matches the `REQ-12:` substring
+    // inside "PREREQ-12:" even though the tag does not start a new token.
+    // Once the fix lands, the byte immediately before the matched `R` must
+    // be checked and, if it is an ASCII alphanumeric character, the match
+    // must be rejected.
+    let reqs = extract_requirements("PREREQ-12: some text");
+    assert!(reqs.is_empty());
+}
+
+#[test]
+fn test_extract_requirements_tag_preceded_by_letter_is_not_matched() {
+    // Companion case to the "PREREQ" regression above, with a single
+    // preceding letter rather than a multi-letter prefix word — confirms
+    // the boundary check is not merely a hardcoded exclusion for "PRE".
+    let reqs = extract_requirements("xREQ-5: some text");
+    assert!(reqs.is_empty());
+}
+
+#[test]
+fn test_extract_requirements_tag_preceded_by_digit_is_not_matched() {
+    // The spec for the fix says the disqualifying predecessor is "an ASCII
+    // alphanumeric character", not merely "a letter" — this covers the
+    // digit half of that predicate so a letter-only check cannot sneak
+    // through review.
+    let reqs = extract_requirements("5REQ-6: some text");
+    assert!(reqs.is_empty());
+}
+
+#[test]
+fn test_extract_requirements_tag_preceded_by_punctuation_without_space_still_matches() {
+    // Positive control for the Bug 1 fix: the boundary check must reject
+    // only ASCII-alphanumeric predecessors, not punctuation. A Markdown
+    // bold-emphasis marker immediately before the tag (no intervening
+    // space) must still allow the match, so the fix does not overcorrect
+    // into requiring whitespace or line-start.
+    let reqs = extract_requirements("*REQ-001: emphasized tag");
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].id, "REQ-001");
 }
 
 #[test]
@@ -515,7 +569,11 @@ fn test_update_traceability_matrix_full_four_stage_progression_reaches_complete(
     assert_eq!(m.rows[0].status, TraceabilityStatus::Partial);
     assert!(!m.complete);
 
-    m = update_traceability_matrix(m, TraceabilityStage::Interface, &[make_entry("REQ-001", "b")]);
+    m = update_traceability_matrix(
+        m,
+        TraceabilityStage::Interface,
+        &[make_entry("REQ-001", "b")],
+    );
     assert_eq!(m.rows[0].status, TraceabilityStatus::Partial);
 
     m = update_traceability_matrix(
@@ -565,7 +623,7 @@ fn test_update_traceability_matrix_empty_rows_complete_is_vacuously_true() {
 
 #[test]
 fn test_update_traceability_matrix_empty_entries_is_noop_for_coverage_flags_but_recomputes_status()
- {
+{
     let rows = vec![make_row("REQ-001", true, false, false, false)];
     let m = make_matrix(rows);
     let updated = update_traceability_matrix(m, TraceabilityStage::Architecture, &[]);
@@ -723,6 +781,52 @@ fn test_update_traceability_matrix_does_not_hardcode_complete_false_for_all_comp
     let m = make_matrix(rows);
     let updated = update_traceability_matrix(m, TraceabilityStage::Code, &[]);
     assert!(updated.complete);
+}
+
+#[test]
+fn test_update_traceability_matrix_case_insensitive_requirement_ref_still_matches() {
+    // Regression for Medium-severity review finding: `extract_requirements`
+    // preserves the `REQ` prefix's case verbatim (e.g. a lowercase source
+    // line "req-001: ..." produces `id == "req-001"`), but
+    // `update_traceability_matrix` currently compares `row.requirement.id
+    // == entry.requirement_ref` with case-sensitive `==`. When an
+    // LLM-semantic alignment check reports `requirement_ref: "REQ-001"`
+    // for a row whose id is `"req-001"`, the entry is silently dropped and
+    // the coverage flag never gets set. The fix must compare
+    // case-insensitively.
+    let rows = vec![make_row("req-001", false, false, false, false)];
+    let m = make_matrix(rows);
+    let entries = vec![make_entry("REQ-001", "docs/architecture.md#foo")];
+    let updated = update_traceability_matrix(m, TraceabilityStage::Architecture, &entries);
+    assert!(updated.rows[0].architecture_covered);
+}
+
+#[test]
+fn test_update_traceability_matrix_case_insensitive_requirement_ref_matches_reverse_case() {
+    // Distinct second input for the Bug 2 regression above: this time the
+    // row id is uppercase and the incoming `requirement_ref` is lowercase,
+    // confirming the fix is a genuine case-insensitive comparison rather
+    // than a one-directional special case for lowercase row ids.
+    let rows = vec![make_row("REQ-002", false, false, false, false)];
+    let m = make_matrix(rows);
+    let entries = vec![make_entry("req-002", "docs/interfaces/foo.md")];
+    let updated = update_traceability_matrix(m, TraceabilityStage::Interface, &entries);
+    assert!(updated.rows[0].interface_covered);
+}
+
+#[test]
+fn test_update_traceability_matrix_case_insensitive_match_does_not_mutate_row_id_case() {
+    // The case-insensitive comparison fix must not normalise the row's
+    // `id` field as a side effect — `extract_requirements`'s verbatim-case
+    // contract is locked in elsewhere, and this test guards that
+    // `update_traceability_matrix` does not quietly "fix" the case while
+    // setting the coverage flag.
+    let rows = vec![make_row("req-003", false, false, false, false)];
+    let m = make_matrix(rows);
+    let entries = vec![make_entry("REQ-003", "src/lib.rs")];
+    let updated = update_traceability_matrix(m, TraceabilityStage::Code, &entries);
+    assert!(updated.rows[0].code_covered);
+    assert_eq!(updated.rows[0].requirement.id, "req-003");
 }
 
 #[test]
