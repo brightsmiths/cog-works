@@ -26,7 +26,7 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Install cargo binstall
         uses: cargo-bins/cargo-binstall@e00d2c94cc0067b77737821097a62d91c0301baa # main
@@ -148,7 +148,7 @@ jobs:
         with:
           tool: cargo-llvm-cov@0.6.10
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Generate code coverage
         run: |
@@ -170,7 +170,7 @@ jobs:
       - name: Install Rust
         run: rustup update stable
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Run doc-tests
         run: cargo test --doc --all-features --workspace

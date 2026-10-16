@@ -23,7 +23,7 @@ jobs:
           toolchain: nightly
           override: true
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Build documentation
         uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1
