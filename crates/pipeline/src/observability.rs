@@ -24,6 +24,60 @@
 //! this module only populates fields. Callers are expected to have entered the
 //! relevant span before calling.
 //!
+//! **Fields must be pre-declared at span-creation time.** `tracing::Span::record`
+//! only populates fields that were declared when the span was created — for
+//! example via `tracing::field::Empty` placeholders in a `tracing::info_span!`
+//! call, or the equivalent in an `#[instrument]` attribute. Recording a field
+//! name that was **not** declared on the span is a **silent no-op**: no panic,
+//! no error, no log line — `tracing` simply drops the value. There is no way
+//! to detect this from within this module; `span.record()` returns `()`.
+//!
+//! The consequence is blunt: if the caller's span does not declare a field
+//! this module writes, that attribute will never appear on the exported span,
+//! and there is no visible failure anywhere in the pipeline. The `OTel`
+//! exporter sends nothing for that attribute, and the dashboard panel built on
+//! it will simply show no data — silently, with no error, no warning, and
+//! nothing to alert on.
+//!
+//! Each function below requires the caller's span to have pre-declared the
+//! following field names before the function is called:
+//!
+//! | Function | Required pre-declared fields |
+//! |----------|-------------------------------|
+//! | [`record_node_start`] | `pipeline.run_id`, `pipeline.node_id`, `pipeline.event` |
+//! | [`record_node_complete`] | `pipeline.run_id`, `pipeline.node_id`, `pipeline.event`, `pipeline.token_cost.total_usd` |
+//! | [`record_retry`] | `pipeline.run_id`, `pipeline.node_id`, `pipeline.event`, `pipeline.retry.root_cause` |
+//! | [`record_rework`] | `pipeline.run_id`, `pipeline.node_id`, `pipeline.event`, `pipeline.rework.misalignment_type` |
+//!
+//! A `tracing` span's field set is fixed at creation and cannot be extended
+//! afterwards. A caller that wants a single span to represent a node's whole
+//! lifecycle — start, completion, and any retries/reworks in between — must
+//! therefore declare the union of all six possible fields up front:
+//!
+//! ```rust
+//! let span = tracing::info_span!(
+//!     "pipeline_node_execution",
+//!     pipeline.run_id = tracing::field::Empty,
+//!     pipeline.node_id = tracing::field::Empty,
+//!     pipeline.event = tracing::field::Empty,
+//!     pipeline.token_cost.total_usd = tracing::field::Empty,
+//!     pipeline.retry.root_cause = tracing::field::Empty,
+//!     pipeline.rework.misalignment_type = tracing::field::Empty,
+//! );
+//! ```
+//!
+//! Only declared fields can ever be populated by `record_node_start`,
+//! `record_node_complete`, `record_retry`, or `record_rework` when passed this
+//! `span` — any of the six names omitted from the `info_span!` call above
+//! would be silently dropped by whichever function tries to record it.
+//!
+//! This module deliberately does **not** provide a helper or macro that
+//! declares these fields automatically. Span creation belongs to the caller
+//! (see "Span Ownership" above), and this module's scope is limited to
+//! populating fields on a span it is handed — it is not the owner of span
+//! creation. Whoever wires these hooks into the pipeline executor (#57) is
+//! better positioned to decide whether such a helper belongs there.
+//!
 //! ## Specification
 //!
 //! See `docs/spec/interfaces/advanced-features.md` §Observability Hooks for
@@ -115,8 +169,9 @@ pub fn record_node_start(run_id: &PipelineRunId, node: &NodeId, span: &tracing::
 ///
 /// Note: [`TokenCost`] is a monetary-only type (USD) with no input/output
 /// token-count breakdown, so no `pipeline.token_cost.input` /
-/// `pipeline.token_cost.output` fields are emitted. See
-/// `docs/spec/interfaces/advanced-features.md` §`record_node_complete`.
+/// `pipeline.token_cost.output` fields are emitted. Adding that breakdown is
+/// tracked as issue #162. See `docs/spec/interfaces/advanced-features.md`
+/// §`record_node_complete`.
 ///
 /// # Arguments
 ///
