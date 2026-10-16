@@ -234,8 +234,83 @@ pub struct TraceabilityMatrix {
 /// ```
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §extract_requirements.
-pub fn extract_requirements(_work_item_body: &str) -> Vec<Requirement> {
-    todo!("See docs/spec/interfaces/advanced-features.md §Traceability Matrix")
+pub fn extract_requirements(work_item_body: &str) -> Vec<Requirement> {
+    work_item_body
+        .lines()
+        .filter_map(find_first_requirement_in_line)
+        .collect()
+}
+
+/// Scans a single line for the first `REQ-<digits>:` tag and, if found,
+/// builds the corresponding [`Requirement`].
+///
+/// Matching is case-insensitive on the `REQ` prefix, but the `id` field
+/// preserves the exact bytes matched in `line` (verbatim case). Matching is
+/// byte-oriented over ASCII delimiters only (`R`, `E`, `Q`, `-`, ASCII
+/// digits, `:`), so it never slices on a non-UTF-8-boundary: every slice
+/// point returned by [`match_tag_at`] immediately follows one of those
+/// single-byte ASCII characters, which is always a valid `char` boundary.
+fn find_first_requirement_in_line(line: &str) -> Option<Requirement> {
+    let bytes = line.as_bytes();
+    for start in 0..bytes.len() {
+        if let Some(colon_idx) = match_tag_at(bytes, start) {
+            let id = line[start..colon_idx].to_string();
+            let description = line[colon_idx + 1..].trim().to_string();
+            return Some(Requirement {
+                id,
+                description,
+                source_work_item: WorkItemId::new(0),
+            });
+        }
+    }
+    None
+}
+
+/// Attempts to match a `REQ-<digits>:` tag starting at byte offset `start`
+/// in `bytes`. Returns the byte offset of the matching `:` on success.
+///
+/// Enforces a left word-boundary: the match is rejected unless `start == 0`
+/// or the byte immediately before `start` is not an ASCII alphanumeric
+/// character. This prevents the tag from matching in the middle of a longer
+/// token (e.g. the `REQ-12` substring inside `"PREREQ-12:"`), while still
+/// allowing it to match immediately after whitespace, punctuation, or
+/// Markdown markers such as `*` or `-`.
+///
+/// Runs in `O(1)` amortised time per call site: the prefix check fails fast
+/// on the first mismatched byte, so scanning a whole line is `O(n)` with no
+/// backtracking — this is a hand-rolled bounded matcher, not a backtracking
+/// regex engine, so pathological inputs (e.g. long runs of `"REQ-"`) cannot
+/// cause super-linear behaviour.
+fn match_tag_at(bytes: &[u8], start: usize) -> Option<usize> {
+    const PREFIX_LEN: usize = 4; // "REQ-"
+    if start + PREFIX_LEN > bytes.len() {
+        return None;
+    }
+    if start > 0 && bytes[start - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    let prefix_matches = bytes[start].eq_ignore_ascii_case(&b'R')
+        && bytes[start + 1].eq_ignore_ascii_case(&b'E')
+        && bytes[start + 2].eq_ignore_ascii_case(&b'Q')
+        && bytes[start + 3] == b'-';
+    if !prefix_matches {
+        return None;
+    }
+
+    let digits_start = start + PREFIX_LEN;
+    let mut idx = digits_start;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        idx += 1;
+    }
+    if idx == digits_start {
+        return None; // no digits
+    }
+
+    if idx < bytes.len() && bytes[idx] == b':' {
+        Some(idx)
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -244,8 +319,12 @@ pub fn extract_requirements(_work_item_body: &str) -> Vec<Requirement> {
 /// coverage flags in the traceability matrix.
 ///
 /// For each [`TraceabilityEntry`] in `entries`, matches `requirement_ref`
-/// against the `id` field of each row in `matrix.rows`. When a match is found
-/// the corresponding stage coverage flag is set to `true`.
+/// against the `id` field of each row in `matrix.rows`. The comparison is
+/// case-insensitive (ASCII), since [`extract_requirements`] preserves the
+/// `REQ` prefix's case verbatim in `id`, but alignment checks may report
+/// `requirement_ref` in a different case. The row's `id` field is never
+/// mutated by this comparison — only the matching stage coverage flag is set
+/// to `true`.
 ///
 /// After updating flags, recomputes each row's `status` field and the
 /// matrix-level `complete` flag.
@@ -309,9 +388,43 @@ pub fn extract_requirements(_work_item_body: &str) -> Vec<Requirement> {
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §update_traceability_matrix.
 pub fn update_traceability_matrix(
-    _matrix: TraceabilityMatrix,
-    _stage: TraceabilityStage,
-    _entries: &[TraceabilityEntry],
+    mut matrix: TraceabilityMatrix,
+    stage: TraceabilityStage,
+    entries: &[TraceabilityEntry],
 ) -> TraceabilityMatrix {
-    todo!("See docs/spec/interfaces/advanced-features.md §Traceability Matrix")
+    for entry in entries {
+        for row in &mut matrix.rows {
+            if row
+                .requirement
+                .id
+                .eq_ignore_ascii_case(&entry.requirement_ref)
+            {
+                set_stage_covered(row, stage);
+            }
+        }
+    }
+
+    for row in &mut matrix.rows {
+        row.status = row.compute_status();
+    }
+    matrix.complete = matrix
+        .rows
+        .iter()
+        .all(|row| row.status == TraceabilityStatus::Complete);
+
+    matrix
 }
+
+/// Sets the coverage flag on `row` that corresponds to `stage`.
+fn set_stage_covered(row: &mut RequirementRow, stage: TraceabilityStage) {
+    match stage {
+        TraceabilityStage::Architecture => row.architecture_covered = true,
+        TraceabilityStage::Interface => row.interface_covered = true,
+        TraceabilityStage::SubWorkItem => row.sub_work_item_covered = true,
+        TraceabilityStage::Code => row.code_covered = true,
+    }
+}
+
+#[cfg(test)]
+#[path = "traceability_tests.rs"]
+mod tests;
