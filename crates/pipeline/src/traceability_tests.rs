@@ -260,6 +260,28 @@ fn test_extract_requirements_malformed_non_digit_suffix_ignored() {
 }
 
 #[test]
+fn test_extract_requirements_single_char_r_line_does_not_panic() {
+    // Mutation-kill: `match_tag_at`'s prefix-length bounds check
+    // (`start + PREFIX_LEN > bytes.len()`) must reject `start == 0` on a line
+    // shorter than 4 bytes *before* indexing past the end of the slice. A
+    // 1-byte line consisting of a single `R` (matching the first prefix byte,
+    // case-insensitively) would panic on out-of-bounds access if that bounds
+    // check were broken (e.g. `start * PREFIX_LEN` instead of `start +
+    // PREFIX_LEN`, which is always `0` at `start == 0` and so never trips).
+    let reqs = extract_requirements("R");
+    assert!(reqs.is_empty());
+}
+
+#[test]
+fn test_extract_requirements_two_and_three_char_lines_starting_with_r_do_not_panic() {
+    // Companion boundary cases to the 1-byte case above: lines of length 2
+    // and 3 starting with the prefix's first byte must also be safely
+    // rejected without panicking, for every too-short length.
+    assert!(extract_requirements("RE").is_empty());
+    assert!(extract_requirements("REQ").is_empty());
+}
+
+#[test]
 fn test_extract_requirements_single_digit_id_is_minimum_valid_boundary() {
     let reqs = extract_requirements("REQ-1: minimal digit count");
     assert_eq!(reqs.len(), 1);
