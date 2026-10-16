@@ -41,7 +41,7 @@
 //! |---|---|---|
 //! | 1 — Specification | 15 | Direct field-table mapping, one assertion per function/field pair |
 //! | 1 — Contract (Display) | 2 | `RootCause`/`MisalignmentType` `OTel` string regression lock |
-//! | 2 — Adversarial / boundary | 23 | Field isolation, disabled-span panic-freedom, anti-memoisation, N-1/N boundaries, variant tables |
+//! | 2 — Adversarial / boundary | 27 | Field isolation, disabled-span panic-freedom, bare-span (undeclared fields) silent-no-op proof, anti-memoisation, N-1/N boundaries, variant tables |
 //! | 3 — Property-based | 6 | Field-value/input invariants and panic-freedom across generated inputs |
 //!
 //! ## Spec gaps found (reported to Tech Lead / Architect)
@@ -257,6 +257,16 @@ fn complete_scoped_span() -> tracing::Span {
         pipeline.event = tracing::field::Empty,
         pipeline.token_cost.total_usd = tracing::field::Empty,
     )
+}
+
+/// Bare span: declares **none** of the `pipeline.*` fields any hook writes.
+/// Distinct from `tracing::Span::none()` — there IS an active subscriber and
+/// this span IS enabled, it simply never declared the fields a hook tries to
+/// record on it. Used by the silent-no-op tests below, which close the gap
+/// the disabled-span tests don't cover: "no subscriber / disabled span" is a
+/// different scenario from "enabled span, fields just never declared".
+fn bare_span() -> tracing::Span {
+    tracing::info_span!("pipeline_node_execution")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -750,6 +760,87 @@ fn test_record_rework_does_not_panic_with_disabled_span() {
     let span = tracing::Span::none();
 
     record_rework(&run_id, &node, &misalignment, &span);
+}
+
+// --- Bare span (fields undeclared): must stay a true silent no-op ---------
+//
+// These close a gap the disabled-span (`Span::none()`) tests above don't
+// cover. `Span::none()` proves panic-freedom with no subscriber / no span at
+// all. Here, by contrast, there IS an active `FieldCaptureLayer` subscriber
+// and the span IS enabled — it just never declared any `pipeline.*` field.
+// `tracing`'s documented behaviour is that `span.record()` on a field the
+// span's metadata never declared is a silent no-op (no panic, nothing
+// written), which is exactly what the PR's "tolerates empty or default
+// spans" claim depends on. Each test below asserts both halves: the call
+// does not panic, and the captured-fields map stays entirely free of
+// `pipeline.*` keys, proving this is a genuine no-op rather than an error
+// that merely happens not to panic.
+
+#[test]
+fn test_record_node_start_does_not_panic_and_leaves_fields_empty_with_bare_span() {
+    let run_id = run_id_seed(110);
+    let node = node_id("plan");
+
+    let ((), fields) = with_capture(|| {
+        let span = bare_span();
+        record_node_start(&run_id, &node, &span);
+    });
+
+    assert!(
+        fields.is_empty(),
+        "expected no fields to be captured on a bare span, got {fields:?}"
+    );
+}
+
+#[test]
+fn test_record_node_complete_does_not_panic_and_leaves_fields_empty_with_bare_span() {
+    let run_id = run_id_seed(111);
+    let node = node_id("code_generation");
+    let token_cost = cost(1.0);
+
+    let ((), fields) = with_capture(|| {
+        let span = bare_span();
+        record_node_complete(&run_id, &node, &token_cost, &span);
+    });
+
+    assert!(
+        fields.is_empty(),
+        "expected no fields to be captured on a bare span, got {fields:?}"
+    );
+}
+
+#[test]
+fn test_record_retry_does_not_panic_and_leaves_fields_empty_with_bare_span() {
+    let run_id = run_id_seed(112);
+    let node = node_id("implementation");
+    let cause = RootCause::AlignmentFailure;
+
+    let ((), fields) = with_capture(|| {
+        let span = bare_span();
+        record_retry(&run_id, &node, &cause, &span);
+    });
+
+    assert!(
+        fields.is_empty(),
+        "expected no fields to be captured on a bare span, got {fields:?}"
+    );
+}
+
+#[test]
+fn test_record_rework_does_not_panic_and_leaves_fields_empty_with_bare_span() {
+    let run_id = run_id_seed(113);
+    let node = node_id("integration");
+    let misalignment = MisalignmentType::Extra;
+
+    let ((), fields) = with_capture(|| {
+        let span = bare_span();
+        record_rework(&run_id, &node, &misalignment, &span);
+    });
+
+    assert!(
+        fields.is_empty(),
+        "expected no fields to be captured on a bare span, got {fields:?}"
+    );
 }
 
 // --- Anti-memoisation: a second call on the same span must overwrite ------
