@@ -2,20 +2,20 @@
 //!
 //! This module provides thin wrappers around [`tracing`] spans that emit
 //! structured event fields aligned with the OpenTelemetry semantic conventions
-//! used to produce CogWorks pipeline metrics.
+//! used to produce `CogWorks` pipeline metrics.
 //!
 //! ## Design
 //!
-//! CogWorks uses no custom metric sink or backend. All metrics flow from
-//! `tracing` spans through the OTel layer configured at startup in `cli`
+//! `CogWorks` uses no custom metric sink or backend. All metrics flow from
+//! `tracing` spans through the `OTel` layer configured at startup in `cli`
 //! (`tracing-opentelemetry` + OTLP exporter). Dashboard queries target the
-//! OTel attribute names emitted here.
+//! `OTel` attribute names emitted here.
 //!
 //! These functions are the **canonical** way for the `nodes` crate to record
 //! pipeline-level events. Direct `tracing` macro usage is permitted for
 //! fine-grained node diagnostics, but pipeline metrics (node timing, retry
 //! counts, rework counts, token usage) **must** go through these helpers so
-//! that OTel attribute names remain consistent across all node types.
+//! that `OTel` attribute names remain consistent across all node types.
 //!
 //! ## Span Ownership
 //!
@@ -27,7 +27,7 @@
 //! ## Specification
 //!
 //! See `docs/spec/interfaces/advanced-features.md` §Observability Hooks for
-//! the full field catalog and OTel attribute mapping.
+//! the full field catalog and `OTel` attribute mapping.
 
 use serde::{Deserialize, Serialize};
 
@@ -45,7 +45,7 @@ use crate::{
 /// dashboards can break down retry rates by cause category without requiring
 /// free-text parsing.
 ///
-/// See `docs/spec/interfaces/advanced-features.md` §RootCause.
+/// See `docs/spec/interfaces/advanced-features.md` §`RootCause`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RootCause {
     /// A build or compilation step produced errors.
@@ -93,7 +93,7 @@ impl std::fmt::Display for RootCause {
 /// * `node` — the node being started.
 /// * `span` — the `tracing` span to record fields on.
 ///
-/// See `docs/spec/interfaces/advanced-features.md` §record_node_start.
+/// See `docs/spec/interfaces/advanced-features.md` §`record_node_start`.
 pub fn record_node_start(run_id: &PipelineRunId, node: &NodeId, span: &tracing::Span) {
     span.record("pipeline.run_id", run_id.to_string());
     span.record("pipeline.node_id", node.to_string());
@@ -116,7 +116,7 @@ pub fn record_node_start(run_id: &PipelineRunId, node: &NodeId, span: &tracing::
 /// Note: [`TokenCost`] is a monetary-only type (USD) with no input/output
 /// token-count breakdown, so no `pipeline.token_cost.input` /
 /// `pipeline.token_cost.output` fields are emitted. See
-/// `docs/spec/interfaces/advanced-features.md` §record_node_complete.
+/// `docs/spec/interfaces/advanced-features.md` §`record_node_complete`.
 ///
 /// # Arguments
 ///
@@ -125,7 +125,7 @@ pub fn record_node_start(run_id: &PipelineRunId, node: &NodeId, span: &tracing::
 /// * `token_cost` — tokens consumed and estimated cost for this execution.
 /// * `span` — the `tracing` span to record fields on.
 ///
-/// See `docs/spec/interfaces/advanced-features.md` §record_node_complete.
+/// See `docs/spec/interfaces/advanced-features.md` §`record_node_complete`.
 pub fn record_node_complete(
     run_id: &PipelineRunId,
     node: &NodeId,
@@ -158,7 +158,7 @@ pub fn record_node_complete(
 /// * `cause` — categorised root cause of the retry.
 /// * `span` — the `tracing` span to record fields on.
 ///
-/// See `docs/spec/interfaces/advanced-features.md` §record_retry.
+/// See `docs/spec/interfaces/advanced-features.md` §`record_retry`.
 pub fn record_retry(
     run_id: &PipelineRunId,
     node: &NodeId,
@@ -195,7 +195,7 @@ pub fn record_retry(
 /// * `misalignment` — the category of misalignment that triggered rework.
 /// * `span` — the `tracing` span to record fields on.
 ///
-/// See `docs/spec/interfaces/advanced-features.md` §record_rework.
+/// See `docs/spec/interfaces/advanced-features.md` §`record_rework`.
 pub fn record_rework(
     run_id: &PipelineRunId,
     node: &NodeId,

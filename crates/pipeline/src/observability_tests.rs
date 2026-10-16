@@ -9,7 +9,7 @@
 //!
 //! `RootCause::fmt` (`observability.rs`) and `MisalignmentType::fmt`
 //! (`alignment.rs`) are already implemented (not stubs) — the contract tests
-//! for their `Display` output in this file are regression locks on OTel
+//! for their `Display` output in this file are regression locks on `OTel`
 //! attribute string values, not RED-phase placeholders.
 //!
 //! ## Test harness
@@ -40,7 +40,7 @@
 //! | Tier | Count | Focus |
 //! |---|---|---|
 //! | 1 — Specification | 15 | Direct field-table mapping, one assertion per function/field pair |
-//! | 1 — Contract (Display) | 2 | `RootCause`/`MisalignmentType` OTel string regression lock |
+//! | 1 — Contract (Display) | 2 | `RootCause`/`MisalignmentType` `OTel` string regression lock |
 //! | 2 — Adversarial / boundary | 23 | Field isolation, disabled-span panic-freedom, anti-memoisation, N-1/N boundaries, variant tables |
 //! | 3 — Property-based | 6 | Field-value/input invariants and panic-freedom across generated inputs |
 //!
@@ -49,7 +49,7 @@
 //! 1. **`pipeline.token_cost.input` / `pipeline.token_cost.output` fields
 //!    (pre-existing, accepted gap).** Both the doc comment on
 //!    `record_node_complete` in `observability.rs` and
-//!    `docs/spec/interfaces/advanced-features.md` §record_node_complete list
+//!    `docs/spec/interfaces/advanced-features.md` §`record_node_complete` list
 //!    these two fields in the emitted-fields table, but [`crate::types::TokenCost`]
 //!    exposes only a single total-cost `f64` (`as_f64()`/`Display`) — there is
 //!    no token-count breakdown reachable via the `token_cost: &TokenCost`
@@ -64,7 +64,7 @@
 //!    `pipeline.retry.root_cause`, and `pipeline.rework.misalignment_type` all
 //!    explicitly say "... as string" / "string representation of ...". The
 //!    `pipeline.token_cost.total_usd` row says only "total cost in USD" — no
-//!    "as string" qualifier. Given the OTel semantic-convention style used
+//!    "as string" qualifier. Given the `OTel` semantic-convention style used
 //!    throughout this module (costs/counts as numeric attributes, identifiers
 //!    as string attributes) and the asymmetry in the doc wording, this suite
 //!    treats `pipeline.token_cost.total_usd` as a **numeric `f64` field**
@@ -562,7 +562,7 @@ fn test_record_rework_sets_misalignment_type_field_to_display_string() {
 // Tier 1: Contract Tests — Display implementations consumed by this module
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Regression lock on `RootCause`'s OTel attribute string values. These
+/// Regression lock on `RootCause`'s `OTel` attribute string values. These
 /// strings flow directly into `pipeline.retry.root_cause` and are consumed by
 /// dashboards; any accidental rename (e.g. via a refactor) must fail here
 /// before it reaches `record_retry`'s own tests.
@@ -577,7 +577,7 @@ fn test_root_cause_display_matches_otel_snake_case_names_for_all_variants() {
     }
 }
 
-/// Regression lock on `MisalignmentType`'s OTel attribute string values,
+/// Regression lock on `MisalignmentType`'s `OTel` attribute string values,
 /// consumed by `pipeline.rework.misalignment_type`.
 #[test]
 fn test_misalignment_type_display_matches_otel_snake_case_names_for_all_variants() {
