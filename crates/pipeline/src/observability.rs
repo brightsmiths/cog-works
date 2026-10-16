@@ -94,8 +94,10 @@ impl std::fmt::Display for RootCause {
 /// * `span` — the `tracing` span to record fields on.
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §record_node_start.
-pub fn record_node_start(_run_id: &PipelineRunId, _node: &NodeId, _span: &tracing::Span) {
-    todo!("See docs/spec/interfaces/advanced-features.md §Observability Hooks")
+pub fn record_node_start(run_id: &PipelineRunId, node: &NodeId, span: &tracing::Span) {
+    span.record("pipeline.run_id", run_id.to_string());
+    span.record("pipeline.node_id", node.to_string());
+    span.record("pipeline.event", "node_start");
 }
 
 // ---------------------------------------------------------------------------
@@ -122,12 +124,15 @@ pub fn record_node_start(_run_id: &PipelineRunId, _node: &NodeId, _span: &tracin
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §record_node_complete.
 pub fn record_node_complete(
-    _run_id: &PipelineRunId,
-    _node: &NodeId,
-    _token_cost: &TokenCost,
-    _span: &tracing::Span,
+    run_id: &PipelineRunId,
+    node: &NodeId,
+    token_cost: &TokenCost,
+    span: &tracing::Span,
 ) {
-    todo!("See docs/spec/interfaces/advanced-features.md §Observability Hooks")
+    span.record("pipeline.run_id", run_id.to_string());
+    span.record("pipeline.node_id", node.to_string());
+    span.record("pipeline.event", "node_complete");
+    span.record("pipeline.token_cost.total_usd", token_cost.as_f64());
 }
 
 // ---------------------------------------------------------------------------
@@ -152,12 +157,15 @@ pub fn record_node_complete(
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §record_retry.
 pub fn record_retry(
-    _run_id: &PipelineRunId,
-    _node: &NodeId,
-    _cause: &RootCause,
-    _span: &tracing::Span,
+    run_id: &PipelineRunId,
+    node: &NodeId,
+    cause: &RootCause,
+    span: &tracing::Span,
 ) {
-    todo!("See docs/spec/interfaces/advanced-features.md §Observability Hooks")
+    span.record("pipeline.run_id", run_id.to_string());
+    span.record("pipeline.node_id", node.to_string());
+    span.record("pipeline.event", "node_retry");
+    span.record("pipeline.retry.root_cause", cause.to_string());
 }
 
 // ---------------------------------------------------------------------------
@@ -186,12 +194,18 @@ pub fn record_retry(
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §record_rework.
 pub fn record_rework(
-    _run_id: &PipelineRunId,
-    _node: &NodeId,
-    _misalignment: &MisalignmentType,
-    _span: &tracing::Span,
+    run_id: &PipelineRunId,
+    node: &NodeId,
+    misalignment: &MisalignmentType,
+    span: &tracing::Span,
 ) {
-    todo!("See docs/spec/interfaces/advanced-features.md §Observability Hooks")
+    span.record("pipeline.run_id", run_id.to_string());
+    span.record("pipeline.node_id", node.to_string());
+    span.record("pipeline.event", "node_rework");
+    span.record(
+        "pipeline.rework.misalignment_type",
+        misalignment.to_string(),
+    );
 }
 
 #[cfg(test)]
