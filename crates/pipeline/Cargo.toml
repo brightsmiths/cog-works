@@ -25,3 +25,7 @@ subtle = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 tokio = { workspace = true }
+# Test-only: used by observability_tests.rs to build a custom `Layer` that
+# captures structured fields recorded on a `tracing::Span` for assertion
+# purposes. Never used from production code in this crate.
+tracing-subscriber = { workspace = true }

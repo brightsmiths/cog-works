@@ -2,20 +2,20 @@
 //!
 //! This module provides thin wrappers around [`tracing`] spans that emit
 //! structured event fields aligned with the OpenTelemetry semantic conventions
-//! used to produce CogWorks pipeline metrics.
+//! used to produce `CogWorks` pipeline metrics.
 //!
 //! ## Design
 //!
-//! CogWorks uses no custom metric sink or backend. All metrics flow from
-//! `tracing` spans through the OTel layer configured at startup in `cli`
+//! `CogWorks` uses no custom metric sink or backend. All metrics flow from
+//! `tracing` spans through the `OTel` layer configured at startup in `cli`
 //! (`tracing-opentelemetry` + OTLP exporter). Dashboard queries target the
-//! OTel attribute names emitted here.
+//! `OTel` attribute names emitted here.
 //!
 //! These functions are the **canonical** way for the `nodes` crate to record
 //! pipeline-level events. Direct `tracing` macro usage is permitted for
 //! fine-grained node diagnostics, but pipeline metrics (node timing, retry
 //! counts, rework counts, token usage) **must** go through these helpers so
-//! that OTel attribute names remain consistent across all node types.
+//! that `OTel` attribute names remain consistent across all node types.
 //!
 //! ## Span Ownership
 //!
@@ -24,10 +24,64 @@
 //! this module only populates fields. Callers are expected to have entered the
 //! relevant span before calling.
 //!
+//! **Fields must be pre-declared at span-creation time.** `tracing::Span::record`
+//! only populates fields that were declared when the span was created — for
+//! example via `tracing::field::Empty` placeholders in a `tracing::info_span!`
+//! call, or the equivalent in an `#[instrument]` attribute. Recording a field
+//! name that was **not** declared on the span is a **silent no-op**: no panic,
+//! no error, no log line — `tracing` simply drops the value. There is no way
+//! to detect this from within this module; `span.record()` returns `()`.
+//!
+//! The consequence is blunt: if the caller's span does not declare a field
+//! this module writes, that attribute will never appear on the exported span,
+//! and there is no visible failure anywhere in the pipeline. The `OTel`
+//! exporter sends nothing for that attribute, and the dashboard panel built on
+//! it will simply show no data — silently, with no error, no warning, and
+//! nothing to alert on.
+//!
+//! Each function below requires the caller's span to have pre-declared the
+//! following field names before the function is called:
+//!
+//! | Function | Required pre-declared fields |
+//! |----------|-------------------------------|
+//! | [`record_node_start`] | `pipeline.run_id`, `pipeline.node_id`, `pipeline.event` |
+//! | [`record_node_complete`] | `pipeline.run_id`, `pipeline.node_id`, `pipeline.event`, `pipeline.token_cost.total_usd` |
+//! | [`record_retry`] | `pipeline.run_id`, `pipeline.node_id`, `pipeline.event`, `pipeline.retry.root_cause` |
+//! | [`record_rework`] | `pipeline.run_id`, `pipeline.node_id`, `pipeline.event`, `pipeline.rework.misalignment_type` |
+//!
+//! A `tracing` span's field set is fixed at creation and cannot be extended
+//! afterwards. A caller that wants a single span to represent a node's whole
+//! lifecycle — start, completion, and any retries/reworks in between — must
+//! therefore declare the union of all six possible fields up front:
+//!
+//! ```rust
+//! let span = tracing::info_span!(
+//!     "pipeline_node_execution",
+//!     pipeline.run_id = tracing::field::Empty,
+//!     pipeline.node_id = tracing::field::Empty,
+//!     pipeline.event = tracing::field::Empty,
+//!     pipeline.token_cost.total_usd = tracing::field::Empty,
+//!     pipeline.retry.root_cause = tracing::field::Empty,
+//!     pipeline.rework.misalignment_type = tracing::field::Empty,
+//! );
+//! ```
+//!
+//! Only declared fields can ever be populated by `record_node_start`,
+//! `record_node_complete`, `record_retry`, or `record_rework` when passed this
+//! `span` — any of the six names omitted from the `info_span!` call above
+//! would be silently dropped by whichever function tries to record it.
+//!
+//! This module deliberately does **not** provide a helper or macro that
+//! declares these fields automatically. Span creation belongs to the caller
+//! (see "Span Ownership" above), and this module's scope is limited to
+//! populating fields on a span it is handed — it is not the owner of span
+//! creation. Whoever wires these hooks into the pipeline executor (#57) is
+//! better positioned to decide whether such a helper belongs there.
+//!
 //! ## Specification
 //!
 //! See `docs/spec/interfaces/advanced-features.md` §Observability Hooks for
-//! the full field catalog and OTel attribute mapping.
+//! the full field catalog and `OTel` attribute mapping.
 
 use serde::{Deserialize, Serialize};
 
@@ -45,7 +99,7 @@ use crate::{
 /// dashboards can break down retry rates by cause category without requiring
 /// free-text parsing.
 ///
-/// See `docs/spec/interfaces/advanced-features.md` §RootCause.
+/// See `docs/spec/interfaces/advanced-features.md` §`RootCause`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RootCause {
     /// A build or compilation step produced errors.
@@ -93,9 +147,11 @@ impl std::fmt::Display for RootCause {
 /// * `node` — the node being started.
 /// * `span` — the `tracing` span to record fields on.
 ///
-/// See `docs/spec/interfaces/advanced-features.md` §record_node_start.
-pub fn record_node_start(_run_id: &PipelineRunId, _node: &NodeId, _span: &tracing::Span) {
-    todo!("See docs/spec/interfaces/advanced-features.md §Observability Hooks")
+/// See `docs/spec/interfaces/advanced-features.md` §`record_node_start`.
+pub fn record_node_start(run_id: &PipelineRunId, node: &NodeId, span: &tracing::Span) {
+    span.record("pipeline.run_id", run_id.to_string());
+    span.record("pipeline.node_id", node.to_string());
+    span.record("pipeline.event", "node_start");
 }
 
 // ---------------------------------------------------------------------------
@@ -109,9 +165,13 @@ pub fn record_node_start(_run_id: &PipelineRunId, _node: &NodeId, _span: &tracin
 /// | `pipeline.run_id` | `run_id` as string |
 /// | `pipeline.node_id` | `node` as string |
 /// | `pipeline.event` | `"node_complete"` |
-/// | `pipeline.token_cost.input` | input token count |
-/// | `pipeline.token_cost.output` | output token count |
 /// | `pipeline.token_cost.total_usd` | total cost in USD |
+///
+/// Note: [`TokenCost`] is a monetary-only type (USD) with no input/output
+/// token-count breakdown, so no `pipeline.token_cost.input` /
+/// `pipeline.token_cost.output` fields are emitted. Adding that breakdown is
+/// tracked as issue #162. See `docs/spec/interfaces/advanced-features.md`
+/// §`record_node_complete`.
 ///
 /// # Arguments
 ///
@@ -120,14 +180,17 @@ pub fn record_node_start(_run_id: &PipelineRunId, _node: &NodeId, _span: &tracin
 /// * `token_cost` — tokens consumed and estimated cost for this execution.
 /// * `span` — the `tracing` span to record fields on.
 ///
-/// See `docs/spec/interfaces/advanced-features.md` §record_node_complete.
+/// See `docs/spec/interfaces/advanced-features.md` §`record_node_complete`.
 pub fn record_node_complete(
-    _run_id: &PipelineRunId,
-    _node: &NodeId,
-    _token_cost: &TokenCost,
-    _span: &tracing::Span,
+    run_id: &PipelineRunId,
+    node: &NodeId,
+    token_cost: &TokenCost,
+    span: &tracing::Span,
 ) {
-    todo!("See docs/spec/interfaces/advanced-features.md §Observability Hooks")
+    span.record("pipeline.run_id", run_id.to_string());
+    span.record("pipeline.node_id", node.to_string());
+    span.record("pipeline.event", "node_complete");
+    span.record("pipeline.token_cost.total_usd", token_cost.as_f64());
 }
 
 // ---------------------------------------------------------------------------
@@ -150,14 +213,17 @@ pub fn record_node_complete(
 /// * `cause` — categorised root cause of the retry.
 /// * `span` — the `tracing` span to record fields on.
 ///
-/// See `docs/spec/interfaces/advanced-features.md` §record_retry.
+/// See `docs/spec/interfaces/advanced-features.md` §`record_retry`.
 pub fn record_retry(
-    _run_id: &PipelineRunId,
-    _node: &NodeId,
-    _cause: &RootCause,
-    _span: &tracing::Span,
+    run_id: &PipelineRunId,
+    node: &NodeId,
+    cause: &RootCause,
+    span: &tracing::Span,
 ) {
-    todo!("See docs/spec/interfaces/advanced-features.md §Observability Hooks")
+    span.record("pipeline.run_id", run_id.to_string());
+    span.record("pipeline.node_id", node.to_string());
+    span.record("pipeline.event", "node_retry");
+    span.record("pipeline.retry.root_cause", cause.to_string());
 }
 
 // ---------------------------------------------------------------------------
@@ -184,12 +250,22 @@ pub fn record_retry(
 /// * `misalignment` — the category of misalignment that triggered rework.
 /// * `span` — the `tracing` span to record fields on.
 ///
-/// See `docs/spec/interfaces/advanced-features.md` §record_rework.
+/// See `docs/spec/interfaces/advanced-features.md` §`record_rework`.
 pub fn record_rework(
-    _run_id: &PipelineRunId,
-    _node: &NodeId,
-    _misalignment: &MisalignmentType,
-    _span: &tracing::Span,
+    run_id: &PipelineRunId,
+    node: &NodeId,
+    misalignment: &MisalignmentType,
+    span: &tracing::Span,
 ) {
-    todo!("See docs/spec/interfaces/advanced-features.md §Observability Hooks")
+    span.record("pipeline.run_id", run_id.to_string());
+    span.record("pipeline.node_id", node.to_string());
+    span.record("pipeline.event", "node_rework");
+    span.record(
+        "pipeline.rework.misalignment_type",
+        misalignment.to_string(),
+    );
 }
+
+#[cfg(test)]
+#[path = "observability_tests.rs"]
+mod tests;

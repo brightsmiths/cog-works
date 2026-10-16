@@ -429,6 +429,16 @@ All functions take borrowed references and emit events on the **current**
 `tracing` span (i.e. they call `tracing::Span::current()` internally; callers
 are expected to have entered the relevant span before calling).
 
+> **Field pre-declaration is required.** `tracing::Span::record` only
+> populates fields that were declared when the span was created (e.g. via
+> `tracing::field::Empty` in a `tracing::info_span!`/`#[instrument]` call);
+> recording an undeclared field name is a silent no-op with no panic, no
+> error, and no visible failure — the attribute simply never reaches the
+> `OTel` exporter and dashboards show nothing for it. See
+> `crates/pipeline/src/observability.rs`'s module doc comment (`## Span
+> Ownership`) for the full per-function field-declaration list and a runnable
+> example of declaring all required fields up front.
+
 #### `fn record_node_start`
 
 ```rust
@@ -455,9 +465,26 @@ pub fn record_node_complete(
 Emits structured fields:
 
 - `pipeline.run_id`, `pipeline.node_id`, `pipeline.event` = `"node_complete"`
-- `pipeline.token_cost.input` = input token count
-- `pipeline.token_cost.output` = output token count
 - `pipeline.token_cost.total_usd` = total cost in USD
+
+> **Note**: Earlier revisions of this spec also listed `pipeline.token_cost.input`
+> and `pipeline.token_cost.output` fields. `TokenCost` (`crates/pipeline/src/types.rs`)
+> is a monetary-only type (USD, `f64`) with no input/output token-count
+> breakdown, so the implementation does not emit these two fields. Adding a
+> token-count breakdown would require widening `TokenCost` (or introducing a
+> separate type) and is tracked as issue #162, not part of this change.
+>
+> **Open design question for #57 (pipeline executor)**: `record_node_start`,
+> `record_node_complete`, `record_retry`, and `record_rework` all write
+> `pipeline.event` on whatever span they are given. If a caller reuses a
+> single span across a node's whole lifecycle, each later call overwrites the
+> earlier `pipeline.event` value (e.g. `record_node_start`'s `"node_start"` is
+> overwritten by `record_node_complete`'s `"node_complete"` on the same
+> span) — so per-event counts (how many retries, how many reworks) cannot be
+> derived from that span's final attributes alone. Whoever implements #57
+> will need to decide whether a single lifecycle span is sufficient (and
+> counts are derived from separate `tracing` events instead) or whether retries
+> and reworks should each get their own span.
 
 #### `fn record_retry`
 
