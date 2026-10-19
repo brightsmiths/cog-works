@@ -1240,3 +1240,7 @@ pub fn resolve_primary_and_secondary(
 ) -> Result<(DomainServiceName, Vec<DomainServiceName>), RoutingError> {
     todo!("See docs/spec/interfaces/advanced-features.md §Domain Service Routing")
 }
+
+#[cfg(test)]
+#[path = "domain_services_tests.rs"]
+mod tests;

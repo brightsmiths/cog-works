@@ -1,0 +1,13 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b6778aaf7871174c8896bbcafcf858d97f446d4cb98768cee3cf6841b5e9b8fd # shrinks to (matching_ext, decoy_ext) = ("a", "b")
+cc 3a6b4e245dde8c1c4e14a6a36d86cd14daa669047cde28f3d53faf4ea3fc4665 # shrinks to matching_ext = "a", other_names = [], shared_iface = "aaa"
+cc 2a5ab8610ab2f4fed7fff78b27be30a412121d86d6d312c65fe4c5228b82123f # shrinks to ext = "a", name_a = "aaa", name_b = "aab"
+cc 45e174e07c9cc54b142929babeb3e3e59166e7d63534555dafbac6bcdd71601e # shrinks to exts = ["a"], path_ext = "a"
+cc 9bcb4fd52905a7ff5cc802768e17068c06a63972be6576df0ce4a8c1c825702c # shrinks to declared_ext = "a", unrelated_ext = "b"
+cc ed6895a163da68cccd3f66bc033a74259eebb8cd6b6a97e8dac793693d86d5ba # shrinks to ext = "a", type_upper = false, path_upper = false
+cc 763b0c9172c385a4793f16af93cbc82cefee8be9bae459988b0d920cf2db8cef # shrinks to names = [], type_exts = [], path_ext = "a"
