@@ -236,7 +236,7 @@ pub struct HandshakeResult {
     pub domain: DomainServiceName,
     pub api_version: ApiVersion,
     pub capabilities: Vec<String>,    // e.g. "validate", "simulate"
-    pub artifact_types: Vec<String>,  // e.g. "rust/source"
+    pub artifact_types: Vec<String>,  // e.g. "rust/rs"
     pub interface_types: Vec<String>, // e.g. "rust/trait"
 }
 ```

@@ -543,7 +543,7 @@ pub struct HandshakeResult {
     /// (e.g. `"validate"`, `"simulate"`, `"dependency_graph"`).
     pub capabilities: Vec<String>,
     /// Artifact type identifiers this service can process
-    /// (e.g. `"rust/source"`, `"kicad/schematic"`).
+    /// (e.g. `"rust/rs"`, `"kicad/kicad_sch"`).
     pub artifact_types: Vec<String>,
     /// Interface type identifiers this service can extract or validate
     /// (e.g. `"rust/trait"`, `"openapi/path"`).
@@ -1051,10 +1051,10 @@ pub struct ServiceCapabilities {
     pub domain: DomainServiceName,
 
     /// Artifact type identifiers the service can process
-    /// (e.g. `"rust/source"`, `"kicad/schematic"`).
+    /// (e.g. `"rust/rs"`, `"kicad/kicad_sch"`).
     ///
     /// Routing uses these to match artifact paths: the type identifier
-    /// convention is `domain/extension` (e.g. `"rust/source"` matches `.rs`
+    /// convention is `domain/extension` (e.g. `"rust/rs"` matches `.rs`
     /// files). The convention is owned by the domain service;
     /// CogWorks treats these strings as opaque matchers.
     pub artifact_types: Vec<String>,
@@ -1187,13 +1187,18 @@ pub enum RoutingError {
 ///
 /// - [`RoutingError::NoServiceFound`] — no service matched any path.
 /// - [`RoutingError::Ambiguous`] — multiple services tied at the best score.
-/// - [`RoutingError::HandshakePending`] — the best-matching service has not
-///   completed its handshake.
+///
+/// Note: [`RoutingError::HandshakePending`] is defined on [`RoutingError`] but
+/// is never returned by this function. Candidates with `capabilities == None`
+/// are filtered out before scoring (see step 1 above), so a service that
+/// hasn't completed its handshake can never be "the best match" — it is
+/// simply invisible to the scorer. If no handshake-complete service matches,
+/// the result is [`RoutingError::NoServiceFound`], not `HandshakePending`.
 ///
 /// # Artifact Type Matching Convention
 ///
 /// The convention for `artifact_types` is `domain/extension` (e.g.
-/// `"rust/source"` matches `.rs` files). CogWorks strips the leading `domain/`
+/// `"rust/rs"` matches `.rs` files). CogWorks strips the leading `domain/`
 /// component and compares the remainder against the file extension extracted
 /// from each artifact path.
 ///

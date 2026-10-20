@@ -745,8 +745,13 @@ of artifact paths.
 4. If multiple services tie at the highest score: returns
    `Err(RoutingError::Ambiguous)`.
 5. If no service matches: returns `Err(RoutingError::NoServiceFound)`.
-6. If the best-matching service has `capabilities == None`:
-   returns `Err(RoutingError::HandshakePending)`.
+6. `RoutingError::HandshakePending` is never returned by this function: step 1
+   filters out `capabilities == None` candidates before scoring (step 2), so a
+   service that hasn't completed its handshake can never be "the best match."
+   If the only services whose `artifact_types` would otherwise match have not
+   completed their handshake, the result is `NoServiceFound`, not
+   `HandshakePending`. The variant remains defined on `RoutingError` for other
+   potential call sites.
 
 ### `fn resolve_primary_and_secondary`
 
@@ -765,7 +770,7 @@ a sub-work-item's artifact and interface set.
 **Behaviour**:
 
 1. Calls [`select_service_for_artifacts`] with `artifact_paths` to find the primary service.
-2. Finds all other services whose `artifact_types` intersect with
+2. Finds all other services whose `interface_types` intersect with
    `interface_type_identifiers` (for cross-domain validation).
 3. Returns `(primary, secondaries)` where `secondaries` excludes the primary.
 
@@ -796,7 +801,7 @@ in all events.
 
 Service routing matches `artifact_paths` against `artifact_types` by comparing
 the file extension of each path against each artifact type identifier. The
-convention is `domain/extension` (e.g. `"rust/source"` matches `.rs` files,
-`"kicad/schematic"` matches `.kicad_sch` files). This convention is owned by
+convention is `domain/extension` (e.g. `"rust/rs"` matches `.rs` files,
+`"kicad/kicad_sch"` matches `.kicad_sch` files). This convention is owned by
 the domain service; CogWorks treats type identifiers as opaque strings for
 matching.
