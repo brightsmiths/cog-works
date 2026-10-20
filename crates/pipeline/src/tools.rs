@@ -491,10 +491,32 @@ pub struct CompactToolIndex {
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §build_compact_index.
 pub fn build_compact_index(
-    _tool_list: &[ToolName],
-    _profiles: &[crate::knowledge::ToolProfile],
+    tool_list: &[ToolName],
+    profiles: &[crate::knowledge::ToolProfile],
 ) -> CompactToolIndex {
-    todo!("See docs/spec/interfaces/advanced-features.md §Progressive Tool Discovery")
+    let skill_names: std::collections::HashSet<&str> = profiles
+        .iter()
+        .flat_map(|profile| profile.allowed_skills.iter())
+        .map(SkillName::as_str)
+        .collect();
+
+    let mut entries: Vec<ToolIndexEntry> = tool_list
+        .iter()
+        .map(|tool_name| {
+            let is_skill = skill_names.contains(tool_name.as_str());
+            ToolIndexEntry {
+                tool_name: tool_name.clone(),
+                description: String::new(),
+                is_skill,
+            }
+        })
+        .collect();
+
+    entries.sort_by(|a, b| {
+        (!a.is_skill, a.tool_name.as_str()).cmp(&(!b.is_skill, b.tool_name.as_str()))
+    });
+
+    CompactToolIndex { entries }
 }
 
 // ---------------------------------------------------------------------------
