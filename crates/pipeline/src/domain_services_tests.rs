@@ -102,6 +102,29 @@ fn registration(
     }
 }
 
+/// Builds a registration whose `service_name` (registry key) and
+/// `capabilities.domain` (self-reported identity) are deliberately
+/// different — exercising the identity inconsistency described in PR #165
+/// review feedback (Bug 1: these two fields are conventionally expected to
+/// be equal but are not enforced to be equal by the type system).
+fn registration_with_mismatched_identity(
+    service_name: &str,
+    domain: &str,
+    artifact_types: &[&str],
+    interface_types: &[&str],
+) -> DomainServiceRegistration {
+    DomainServiceRegistration {
+        service_name: svc(service_name),
+        transport_config: serde_json::Value::Null,
+        capabilities: Some(ServiceCapabilities {
+            domain: svc(domain),
+            artifact_types: artifact_types.iter().map(ToString::to_string).collect(),
+            interface_types: interface_types.iter().map(ToString::to_string).collect(),
+            supported_methods: vec![],
+        }),
+    }
+}
+
 /// Builds a registration whose handshake has not yet completed
 /// (`capabilities: None`).
 fn pending_registration(name: &str) -> DomainServiceRegistration {
@@ -769,6 +792,126 @@ fn test_select_service_for_artifacts_multi_segment_artifact_type_only_strips_fir
         "'a/b/rs' strips to 'b/rs', which must not match extension 'rs' via suffix matching; \
          got {result:?}"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Regression Tests — PR #165 code review findings
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Regression (PR #165 review, Bug 1): `service_name` (registry key) and
+/// `capabilities.domain` are set to different `DomainServiceName` values on
+/// the sole registration in the registry. Since there is only one service,
+/// it MUST be its own (and only) primary, and therefore can never validly
+/// appear in its own secondaries list — regardless of which field is used
+/// as "the" identity. The current implementation selects `domain` as the
+/// primary but excludes secondaries by comparing against `service_name`, so
+/// the single registration fails to be excluded from its own secondaries
+/// list.
+#[test]
+fn test_resolve_primary_and_secondary_primary_excluded_even_when_domain_and_service_name_differ() {
+    let registry = registry_of(vec![registration_with_mismatched_identity(
+        "registry-key",
+        "different-name",
+        &["rust/rs"],
+        &["rust/trait"],
+    )]);
+    let paths = aps(&["src/lib.rs"]);
+    let interface_ids = vec!["rust/trait".to_string()];
+
+    let result = resolve_primary_and_secondary(&registry, &paths, &interface_ids);
+
+    let (_, secondaries) = result.expect("expected Ok result");
+    assert!(
+        secondaries.is_empty(),
+        "the registry's only service can never validly be its own secondary, \
+         regardless of whether `service_name` or `capabilities.domain` is used \
+         as the exclusion identity; got secondaries = {secondaries:?}"
+    );
+}
+
+/// Regression (PR #165 review, Bug 1): when a registration's `service_name`
+/// (the registry key) differs from its `capabilities.domain`, the registry
+/// key is the correct identity to return — `service_name` is what callers
+/// use to look the service up again (e.g. for secondary exclusion, logging,
+/// transport dispatch), whereas `domain` is merely self-reported capability
+/// metadata. The current implementation returns `capabilities.domain`
+/// instead.
+#[test]
+fn test_select_service_for_artifacts_returns_service_name_not_domain_when_they_differ() {
+    let registry = registry_of(vec![registration_with_mismatched_identity(
+        "registry-key",
+        "different-name",
+        &["rust/rs"],
+        &[],
+    )]);
+    let paths = aps(&["src/lib.rs"]);
+
+    let result = select_service_for_artifacts(&registry, &paths);
+
+    assert_selected(result, "registry-key");
+}
+
+/// Regression (PR #165 review, Bug 2): a service declaring the SAME
+/// `artifact_types` entry twice (`["rust/rs", "rust/rs"]`) must not score
+/// higher than its distinct-type count (1), consistent with type-centric
+/// scoring established elsewhere in this suite (see
+/// `test_select_service_for_artifacts_duplicate_matching_extension_does_not_inflate_score_beyond_distinct_types`).
+/// A service declaring two genuinely distinct matching types must win
+/// outright over a service whose duplicate inflates its raw entry count to
+/// the same number.
+#[test]
+fn test_select_service_for_artifacts_duplicate_artifact_type_does_not_tie_against_distinct_types()
+ {
+    let registry = registry_of(vec![
+        registration("duplicate-svc", &["rust/rs", "rust/rs"], &[], &[]),
+        registration("distinct-svc", &["rust/rs", "rust/toml"], &[], &[]),
+    ]);
+    let paths = aps(&["src/lib.rs", "Cargo.toml"]);
+
+    let result = select_service_for_artifacts(&registry, &paths);
+
+    assert_selected(result, "distinct-svc");
+}
+
+/// Regression (PR #165 review, Bug 3): a dotfile whose name is ENTIRELY a
+/// single leading-dot segment (e.g. `.gitignore`) has NO extension by
+/// convention — the leading dot marks it as hidden/config, not an extension
+/// separator (consistent with `std::path::Path::extension()`, which returns
+/// `None` for such names). `file_extension` must therefore return `None`
+/// for `.gitignore`, so it cannot match any declared `artifact_types`.
+#[test]
+fn test_select_service_for_artifacts_leading_dot_only_filename_has_no_extension() {
+    let registry = registry_of(vec![registration(
+        "dotfile-svc",
+        &["dotfile/gitignore"],
+        &[],
+        &[],
+    )]);
+    let paths = aps(&[".gitignore"]);
+
+    let result = select_service_for_artifacts(&registry, &paths);
+
+    assert!(
+        matches!(result, Err(RoutingError::NoServiceFound { .. })),
+        "'.gitignore' has no extension by convention and must not match \
+         'dotfile/gitignore'; got {result:?}"
+    );
+}
+
+/// Characterization (PR #165 review, Bug 3 companion): a leading dot
+/// followed by ADDITIONAL dots elsewhere in the filename (e.g.
+/// `.config.toml`) is NOT the single-dot-is-the-whole-name special case —
+/// it still correctly extracts the final component (`"toml"`) as its
+/// extension. This is already-correct behaviour, included to pin it down
+/// as a non-regression check alongside the Bug 3 fix.
+#[test]
+fn test_select_service_for_artifacts_leading_dot_with_additional_dot_still_extracts_extension() {
+    let registry = registry_of(vec![registration("toml-svc", &["config/toml"], &[], &[])]);
+    let paths = aps(&[".config.toml"]);
+
+    let result = select_service_for_artifacts(&registry, &paths);
+
+    assert_selected(result, "toml-svc");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
