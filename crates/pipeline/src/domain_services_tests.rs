@@ -860,8 +860,7 @@ fn test_select_service_for_artifacts_returns_service_name_not_domain_when_they_d
 /// outright over a service whose duplicate inflates its raw entry count to
 /// the same number.
 #[test]
-fn test_select_service_for_artifacts_duplicate_artifact_type_does_not_tie_against_distinct_types()
- {
+fn test_select_service_for_artifacts_duplicate_artifact_type_does_not_tie_against_distinct_types() {
     let registry = registry_of(vec![
         registration("duplicate-svc", &["rust/rs", "rust/rs"], &[], &[]),
         registration("distinct-svc", &["rust/rs", "rust/toml"], &[], &[]),
