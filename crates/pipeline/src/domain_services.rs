@@ -1181,7 +1181,12 @@ pub enum RoutingError {
 ///
 /// # Returns
 ///
-/// The [`DomainServiceName`] of the unique best-matching service.
+/// The [`DomainServiceName`] of the unique best-matching service — always the
+/// registration's `service_name` (registry key), never its self-reported
+/// `capabilities.domain`. These are conventionally expected to match, but
+/// `service_name` is the identity every other registry-facing function
+/// (e.g. [`resolve_primary_and_secondary`]'s secondary-exclusion filter)
+/// relies on, so it is the identity returned here too.
 ///
 /// # Errors
 ///
@@ -1215,10 +1220,10 @@ pub fn select_service_for_artifacts(
     let scored: Vec<(&DomainServiceName, usize)> = registry
         .registrations
         .iter()
-        .filter_map(|registration| registration.capabilities.as_ref())
-        .map(|capabilities| {
+        .filter_map(|registration| {
+            let capabilities = registration.capabilities.as_ref()?;
             let score = score_capabilities(capabilities, &path_extensions);
-            (&capabilities.domain, score)
+            Some((&registration.service_name, score))
         })
         .collect();
 
@@ -1251,9 +1256,19 @@ pub fn select_service_for_artifacts(
 /// The extension is the substring after the last `.` in the filename, so
 /// multi-dot filenames (e.g. `archive.tar.gz`) yield the final component
 /// (`"gz"`).
+///
+/// A filename that is entirely a single leading-dot segment (e.g.
+/// `.gitignore`) has no extension by convention — the leading dot marks it
+/// as hidden/config rather than separating a name from an extension, matching
+/// `std::path::Path::extension()`'s own behaviour. A leading dot followed by
+/// additional dots elsewhere in the name (e.g. `.config.toml`) is unaffected:
+/// the final component (`"toml"`) is still extracted normally.
 fn file_extension(path: &str) -> Option<String> {
     let filename = path.rsplit(['/', '\\']).next().unwrap_or(path);
     let dot_index = filename.rfind('.')?;
+    if dot_index == 0 {
+        return None;
+    }
     let extension = &filename[dot_index + 1..];
     if extension.is_empty() {
         None
@@ -1265,13 +1280,21 @@ fn file_extension(path: &str) -> Option<String> {
 /// Scores a single candidate's capabilities against the distinct file
 /// extensions present in a path set.
 ///
-/// Counts how many of the candidate's own declared `artifact_types` entries
-/// have a matching extension among `path_extensions` (type-centric scoring —
-/// see `select_service_for_artifacts` docs).
+/// Counts how many *distinct* `artifact_types` entries declared by the
+/// candidate have a matching extension among `path_extensions` (type-centric
+/// scoring — see `select_service_for_artifacts` docs). Declaring the same
+/// `artifact_types` entry more than once must not inflate the score: entries
+/// are deduplicated before scoring, so a service's score for a given
+/// extension is capped at 1 per distinct type it declares support for.
 fn score_capabilities(capabilities: &ServiceCapabilities, path_extensions: &[String]) -> usize {
-    capabilities
+    let distinct_artifact_types: std::collections::HashSet<&str> = capabilities
         .artifact_types
         .iter()
+        .map(String::as_str)
+        .collect();
+
+    distinct_artifact_types
+        .into_iter()
         .filter(|artifact_type| {
             let declared_extension = artifact_type_extension(artifact_type);
             path_extensions
