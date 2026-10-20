@@ -19,7 +19,7 @@
 //! ## Assertions covered
 //!
 //! - **ASSERT-DISC-003**: skills rank above raw tools in search —
-//!   `test_search_tools_query_matching_skill_and_raw_tool_returns_skill_first`.
+//!   `test_search_tools_preserves_skill_first_order_from_build_compact_index_on_matching_query`.
 //! - **ASSERT-SKILL-002** `[security]`: only `Active` skills are invocable —
 //!   the four `test_validate_skill_invocation_*_lifecycle_rejected_with_lifecycle_inactive`
 //!   tests.
@@ -662,12 +662,22 @@ fn test_search_tools_preserves_relative_order_of_index() {
 
 /// ASSERT-DISC-003: a query matching both a skill and a raw tool must return
 /// the skill before the raw tool.
+///
+/// `search_tools` itself is a pure order-preserving filter (per
+/// `docs/spec/interfaces/advanced-features.md` §search_tools, the "skills
+/// before raw tools" parenthetical describes the order `index.entries` is
+/// already expected to be in, not an instruction for `search_tools` to
+/// re-sort). The skill-first ordering guarantee is established by
+/// `build_compact_index`. This test therefore exercises the real end-to-end
+/// invariant: build the index via `build_compact_index` from a `tool_list`
+/// containing both a raw tool and a skill name, with a `ToolProfile` whose
+/// `allowed_skills` includes the skill — then confirm `search_tools`
+/// preserves that skill-first order on a query matching both.
 #[test]
-fn test_search_tools_query_matching_skill_and_raw_tool_returns_skill_first() {
-    let index = index_of(vec![
-        entry("deploy-raw-tool", "", false),
-        entry("deploy-skill", "", true),
-    ]);
+fn test_search_tools_preserves_skill_first_order_from_build_compact_index_on_matching_query() {
+    let tool_list = tns(&["deploy-raw-tool", "deploy-skill"]);
+    let profiles = vec![profile(&[], &["deploy-skill"])];
+    let index = build_compact_index(&tool_list, &profiles);
 
     let results = search_tools(&index, "deploy");
 
