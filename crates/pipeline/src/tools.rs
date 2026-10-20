@@ -534,8 +534,17 @@ pub fn build_compact_index(
 ///   `description`.
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §search_tools.
-pub fn search_tools(_index: &CompactToolIndex, _query: &str) -> Vec<ToolIndexEntry> {
-    todo!("See docs/spec/interfaces/advanced-features.md §Progressive Tool Discovery")
+pub fn search_tools(index: &CompactToolIndex, query: &str) -> Vec<ToolIndexEntry> {
+    let query = query.to_lowercase();
+    index
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.tool_name.as_str().to_lowercase().contains(&query)
+                || entry.description.to_lowercase().contains(&query)
+        })
+        .cloned()
+        .collect()
 }
 
 // ─── Skill validation ────────────────────────────────────────────────────────
