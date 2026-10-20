@@ -714,3 +714,7 @@ pub fn validate_skill_invocation(
 ) -> Result<ValidatedSkillInvocation, SkillError> {
     todo!("See docs/spec/interfaces/advanced-features.md §Skill Validation")
 }
+
+#[cfg(test)]
+#[path = "tools_tests.rs"]
+mod tests;
