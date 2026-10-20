@@ -543,7 +543,7 @@ pub struct HandshakeResult {
     /// (e.g. `"validate"`, `"simulate"`, `"dependency_graph"`).
     pub capabilities: Vec<String>,
     /// Artifact type identifiers this service can process
-    /// (e.g. `"rust/source"`, `"kicad/schematic"`).
+    /// (e.g. `"rust/rs"`, `"kicad/kicad_sch"`).
     pub artifact_types: Vec<String>,
     /// Interface type identifiers this service can extract or validate
     /// (e.g. `"rust/trait"`, `"openapi/path"`).
@@ -1051,10 +1051,10 @@ pub struct ServiceCapabilities {
     pub domain: DomainServiceName,
 
     /// Artifact type identifiers the service can process
-    /// (e.g. `"rust/source"`, `"kicad/schematic"`).
+    /// (e.g. `"rust/rs"`, `"kicad/kicad_sch"`).
     ///
     /// Routing uses these to match artifact paths: the type identifier
-    /// convention is `domain/extension` (e.g. `"rust/source"` matches `.rs`
+    /// convention is `domain/extension` (e.g. `"rust/rs"` matches `.rs`
     /// files). The convention is owned by the domain service;
     /// CogWorks treats these strings as opaque matchers.
     pub artifact_types: Vec<String>,
@@ -1181,28 +1181,139 @@ pub enum RoutingError {
 ///
 /// # Returns
 ///
-/// The [`DomainServiceName`] of the unique best-matching service.
+/// The [`DomainServiceName`] of the unique best-matching service — always the
+/// registration's `service_name` (registry key), never its self-reported
+/// `capabilities.domain`. These are conventionally expected to match, but
+/// `service_name` is the identity every other registry-facing function
+/// (e.g. [`resolve_primary_and_secondary`]'s secondary-exclusion filter)
+/// relies on, so it is the identity returned here too.
 ///
 /// # Errors
 ///
 /// - [`RoutingError::NoServiceFound`] — no service matched any path.
 /// - [`RoutingError::Ambiguous`] — multiple services tied at the best score.
-/// - [`RoutingError::HandshakePending`] — the best-matching service has not
-///   completed its handshake.
+///
+/// Note: [`RoutingError::HandshakePending`] is defined on [`RoutingError`] but
+/// is never returned by this function. Candidates with `capabilities == None`
+/// are filtered out before scoring (see step 1 above), so a service that
+/// hasn't completed its handshake can never be "the best match" — it is
+/// simply invisible to the scorer. If no handshake-complete service matches,
+/// the result is [`RoutingError::NoServiceFound`], not `HandshakePending`.
 ///
 /// # Artifact Type Matching Convention
 ///
 /// The convention for `artifact_types` is `domain/extension` (e.g.
-/// `"rust/source"` matches `.rs` files). CogWorks strips the leading `domain/`
+/// `"rust/rs"` matches `.rs` files). CogWorks strips the leading `domain/`
 /// component and compares the remainder against the file extension extracted
 /// from each artifact path.
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §select_service_for_artifacts.
 pub fn select_service_for_artifacts(
-    _registry: &ServiceRegistry,
-    _artifact_paths: &[ArtifactPath],
+    registry: &ServiceRegistry,
+    artifact_paths: &[ArtifactPath],
 ) -> Result<DomainServiceName, RoutingError> {
-    todo!("See docs/spec/interfaces/advanced-features.md §Domain Service Routing")
+    let path_extensions: Vec<String> = artifact_paths
+        .iter()
+        .filter_map(|path| file_extension(path.as_str()))
+        .collect();
+
+    let scored: Vec<(&DomainServiceName, usize)> = registry
+        .registrations
+        .iter()
+        .filter_map(|registration| {
+            let capabilities = registration.capabilities.as_ref()?;
+            let score = score_capabilities(capabilities, &path_extensions);
+            Some((&registration.service_name, score))
+        })
+        .collect();
+
+    let highest_score = scored.iter().map(|(_, score)| *score).max().unwrap_or(0);
+
+    if highest_score == 0 {
+        return Err(RoutingError::NoServiceFound {
+            artifact_paths: artifact_paths.to_vec(),
+        });
+    }
+
+    let top_candidates: Vec<DomainServiceName> = scored
+        .into_iter()
+        .filter(|(_, score)| *score == highest_score)
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    match top_candidates.as_slice() {
+        [single] => Ok(single.clone()),
+        _ => Err(RoutingError::Ambiguous {
+            artifact_paths: artifact_paths.to_vec(),
+            candidates: top_candidates,
+        }),
+    }
+}
+
+/// Extracts the file extension (without the leading `.`) from a repo-relative
+/// artifact path string, or `None` if the filename has no extension.
+///
+/// The extension is the substring after the last `.` in the filename, so
+/// multi-dot filenames (e.g. `archive.tar.gz`) yield the final component
+/// (`"gz"`).
+///
+/// A filename that is entirely a single leading-dot segment (e.g.
+/// `.gitignore`) has no extension by convention — the leading dot marks it
+/// as hidden/config rather than separating a name from an extension, matching
+/// `std::path::Path::extension()`'s own behaviour. A leading dot followed by
+/// additional dots elsewhere in the name (e.g. `.config.toml`) is unaffected:
+/// the final component (`"toml"`) is still extracted normally.
+fn file_extension(path: &str) -> Option<String> {
+    let filename = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let dot_index = filename.rfind('.')?;
+    if dot_index == 0 {
+        return None;
+    }
+    let extension = &filename[dot_index + 1..];
+    if extension.is_empty() {
+        None
+    } else {
+        Some(extension.to_string())
+    }
+}
+
+/// Scores a single candidate's capabilities against the distinct file
+/// extensions present in a path set.
+///
+/// Counts how many *distinct* `artifact_types` entries declared by the
+/// candidate have a matching extension among `path_extensions` (type-centric
+/// scoring — see `select_service_for_artifacts` docs). Declaring the same
+/// `artifact_types` entry more than once must not inflate the score: entries
+/// are deduplicated before scoring, so a service's score for a given
+/// extension is capped at 1 per distinct type it declares support for.
+fn score_capabilities(capabilities: &ServiceCapabilities, path_extensions: &[String]) -> usize {
+    let distinct_artifact_types: std::collections::HashSet<&str> = capabilities
+        .artifact_types
+        .iter()
+        .map(String::as_str)
+        .collect();
+
+    distinct_artifact_types
+        .into_iter()
+        .filter(|artifact_type| {
+            let declared_extension = artifact_type_extension(artifact_type);
+            path_extensions
+                .iter()
+                .any(|path_ext| path_ext.eq_ignore_ascii_case(declared_extension))
+        })
+        .count()
+}
+
+/// Strips the leading `domain/` component from an `artifact_types` entry,
+/// returning the remainder as the extension to match.
+///
+/// Only the first `/`-delimited segment is stripped (e.g. `"a/b/rs"` strips
+/// to `"b/rs"`, not `"rs"`).
+fn artifact_type_extension(artifact_type: &str) -> &str {
+    match artifact_type.split_once('/') {
+        Some((_, remainder)) => remainder,
+        None => artifact_type,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1234,9 +1345,29 @@ pub fn select_service_for_artifacts(
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §resolve_primary_and_secondary.
 pub fn resolve_primary_and_secondary(
-    _registry: &ServiceRegistry,
-    _artifact_paths: &[ArtifactPath],
-    _interface_type_identifiers: &[String],
+    registry: &ServiceRegistry,
+    artifact_paths: &[ArtifactPath],
+    interface_type_identifiers: &[String],
 ) -> Result<(DomainServiceName, Vec<DomainServiceName>), RoutingError> {
-    todo!("See docs/spec/interfaces/advanced-features.md §Domain Service Routing")
+    let primary = select_service_for_artifacts(registry, artifact_paths)?;
+
+    let secondaries: Vec<DomainServiceName> = registry
+        .registrations
+        .iter()
+        .filter(|registration| registration.service_name != primary)
+        .filter_map(|registration| {
+            let capabilities = registration.capabilities.as_ref()?;
+            let intersects = capabilities
+                .interface_types
+                .iter()
+                .any(|interface_type| interface_type_identifiers.contains(interface_type));
+            intersects.then(|| registration.service_name.clone())
+        })
+        .collect();
+
+    Ok((primary, secondaries))
 }
+
+#[cfg(test)]
+#[path = "domain_services_tests.rs"]
+mod tests;
