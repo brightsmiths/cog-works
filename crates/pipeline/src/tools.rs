@@ -578,6 +578,20 @@ impl SkillLifecycle {
     }
 }
 
+impl std::fmt::Display for SkillLifecycle {
+    /// Writes the bare variant identifier (e.g. `"Proposed"`, `"Deprecated"`
+    /// — without the `Deprecated` variant's `alternative` field contents).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Proposed => write!(f, "Proposed"),
+            Self::Reviewed => write!(f, "Reviewed"),
+            Self::Active => write!(f, "Active"),
+            Self::Deprecated { .. } => write!(f, "Deprecated"),
+            Self::Retired => write!(f, "Retired"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 
 /// Full specification of a skill, loaded from the skill registry.
@@ -746,7 +760,7 @@ pub fn validate_skill_invocation(
     if !manifest.lifecycle.is_invocable() {
         return Err(SkillError::LifecycleInactive {
             skill_name: manifest.name.clone(),
-            lifecycle_state: lifecycle_variant_name(&manifest.lifecycle),
+            lifecycle_state: manifest.lifecycle.to_string(),
         });
     }
 
@@ -782,20 +796,6 @@ pub fn validate_skill_invocation(
         invocation: invocation.clone(),
         tool_call_sequence: manifest.tool_call_sequence.clone(),
     })
-}
-
-/// Returns the bare Rust variant identifier for a skill lifecycle state
-/// (e.g. `"Proposed"`, `"Deprecated"` — without the `Deprecated` variant's
-/// `alternative` field contents).
-fn lifecycle_variant_name(lifecycle: &SkillLifecycle) -> String {
-    match lifecycle {
-        SkillLifecycle::Proposed => "Proposed",
-        SkillLifecycle::Reviewed => "Reviewed",
-        SkillLifecycle::Active => "Active",
-        SkillLifecycle::Deprecated { .. } => "Deprecated",
-        SkillLifecycle::Retired => "Retired",
-    }
-    .to_string()
 }
 
 /// Hand-rolled JSON Schema subset matcher.
