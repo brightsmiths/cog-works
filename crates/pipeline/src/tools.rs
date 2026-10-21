@@ -480,8 +480,23 @@ pub struct CompactToolIndex {
 ///
 /// # Arguments
 ///
-/// * `tool_list` — canonical names of tools that may be invoked.
+/// * `tool_list` — canonical names of tools that may be invoked. Callers are
+///   expected to pass unique names; this function does not deduplicate, so
+///   a repeated name produces one [`ToolIndexEntry`] per occurrence (sharing
+///   the same sort position, with relative order among exact duplicates
+///   otherwise unspecified).
 /// * `profiles` — tool profiles used to determine which tools are skills.
+///   A tool is marked `is_skill` if its name appears in **any** profile's
+///   `allowed_skills` — not only the profile that will ultimately be active
+///   for a given node — per `docs/spec/interfaces/advanced-features.md`
+///   §build_compact_index ("a tool is a skill if any `ToolProfile` ... list
+///   contains it"). This is deliberate: the index is a cross-profile catalog
+///   for discovery/ranking, not a per-profile permission view. A caller using
+///   this index to decide what to *show* a specific node must still gate the
+///   actual invocation through [`validate_skill_invocation`], which checks
+///   the skill against that node's specific active profile and will reject
+///   with [`SkillError::ProfileProhibited`] if the active profile doesn't
+///   permit it.
 ///
 /// # Returns
 ///
@@ -531,7 +546,9 @@ pub fn build_compact_index(
 ///
 /// * `index` — the compact tool index to search.
 /// * `query` — case-insensitive substring to look for in `tool_name` and
-///   `description`.
+///   `description`. An empty string is a substring of every value, so
+///   `query == ""` returns every entry in `index.entries`, in its existing
+///   order — this is intentional (an empty query means "no filter").
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §search_tools.
 pub fn search_tools(index: &CompactToolIndex, query: &str) -> Vec<ToolIndexEntry> {
@@ -657,6 +674,20 @@ pub struct SkillInvocation {
 /// it can only be obtained by calling [`validate_skill_invocation`]. This
 /// enforces the invariant that a skill can only be executed after it has been
 /// validated against its manifest and the active tool profile.
+///
+/// ## Parameter Pruning Caveat
+///
+/// `invocation().parameters` is carried forward **unmodified** from the
+/// caller-supplied [`SkillInvocation`] — validation checks that the
+/// schema-declared `required`/`properties`/`type` constraints are satisfied,
+/// but it does not enforce `additionalProperties` and does not strip or
+/// allow-list keys. A caller-supplied JSON object with extra keys beyond
+/// what the manifest's `parameter_schema` declares will still pass
+/// validation, and those extra keys are still present on this type. Any
+/// executor consuming `tool_call_sequence`/`invocation()` must read only the
+/// schema-declared properties (allow-list), not iterate `parameters` keys
+/// wholesale, or it risks acting on LLM-supplied fields the schema never
+/// sanctioned.
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §ValidatedSkillInvocation.
 #[derive(Debug, Clone)]
