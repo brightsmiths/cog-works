@@ -801,8 +801,10 @@ pub fn validate_skill_invocation(
 /// Hand-rolled JSON Schema subset matcher.
 ///
 /// Supports only `type`, `required`, and `properties` on an object-shaped
-/// schema; any other keyword is ignored (permissive). A non-object `schema`
-/// is treated as "no constraints" (always matches).
+/// schema; any other keyword is ignored (permissive). A `schema` of JSON
+/// `false` is a special case that rejects every instance. Any other
+/// non-object `schema` value (string, number, array, null, or boolean
+/// `true`) is treated as "no constraints" (always matches).
 ///
 /// # Depth
 ///
@@ -817,22 +819,25 @@ pub fn validate_skill_invocation(
 /// Returns `Err` with a human-readable description of the first violation
 /// found.
 fn schema_matches(schema: &serde_json::Value, instance: &serde_json::Value) -> Result<(), String> {
+    if schema == &serde_json::Value::Bool(false) {
+        return Err("schema is 'false', which rejects every instance".to_string());
+    }
+
     let Some(schema_obj) = schema.as_object() else {
         return Ok(());
     };
 
-    if let Some(type_name) = schema_obj.get("type").and_then(serde_json::Value::as_str)
-        && !instance_matches_type(instance, type_name)
-    {
-        return Err(format!(
-            "expected type '{type_name}', found {}",
-            json_type_name(instance)
-        ));
-    }
+    check_type_keyword(schema_obj, instance)?;
 
-    if let Some(required) = schema_obj
+    let required = schema_obj
         .get("required")
-        .and_then(serde_json::Value::as_array)
+        .and_then(serde_json::Value::as_array);
+    let properties = schema_obj
+        .get("properties")
+        .and_then(serde_json::Value::as_object);
+    check_object_shape_required(required, properties, instance)?;
+
+    if let Some(required) = required
         && let Some(instance_obj) = instance.as_object()
     {
         for name in required.iter().filter_map(serde_json::Value::as_str) {
@@ -842,9 +847,7 @@ fn schema_matches(schema: &serde_json::Value, instance: &serde_json::Value) -> R
         }
     }
 
-    if let Some(properties) = schema_obj
-        .get("properties")
-        .and_then(serde_json::Value::as_object)
+    if let Some(properties) = properties
         && let Some(instance_obj) = instance.as_object()
     {
         for (key, nested_schema) in properties {
@@ -857,19 +860,67 @@ fn schema_matches(schema: &serde_json::Value, instance: &serde_json::Value) -> R
     Ok(())
 }
 
-/// Returns `true` if `instance`'s JSON type matches the JSON Schema `type`
-/// keyword value `type_name`. Unknown `type_name` values are permissive
-/// (always match), consistent with the "other keywords ignored" rule.
-fn instance_matches_type(instance: &serde_json::Value, type_name: &str) -> bool {
+/// Validates the schema's optional `"type"` keyword against `instance`.
+///
+/// Returns `Ok(())` if `"type"` is absent, or present and the instance
+/// matches it. Returns `Err` if the instance doesn't match a recognised
+/// type, or if `"type"` names a type that isn't one of the 7 recognised
+/// JSON Schema primitive type names (fail-closed: see
+/// [`instance_matches_type`]).
+fn check_type_keyword(
+    schema_obj: &serde_json::Map<String, serde_json::Value>,
+    instance: &serde_json::Value,
+) -> Result<(), String> {
+    let Some(type_name) = schema_obj.get("type").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+
+    match instance_matches_type(instance, type_name) {
+        Some(true) => Ok(()),
+        Some(false) => Err(format!(
+            "expected type '{type_name}', found {}",
+            json_type_name(instance)
+        )),
+        None => Err(format!("schema declares unrecognised type '{type_name}'")),
+    }
+}
+
+/// Validates that `instance` is a JSON object whenever the schema declares a
+/// non-empty `"required"` array or non-empty `"properties"` object — even if
+/// the schema has no explicit `"type": "object"` keyword. An empty
+/// `required`/`properties` declares nothing, so it does not force an object
+/// shape.
+fn check_object_shape_required(
+    required: Option<&Vec<serde_json::Value>>,
+    properties: Option<&serde_json::Map<String, serde_json::Value>>,
+    instance: &serde_json::Value,
+) -> Result<(), String> {
+    let requires_object_shape =
+        required.is_some_and(|r| !r.is_empty()) || properties.is_some_and(|p| !p.is_empty());
+    if requires_object_shape && instance.as_object().is_none() {
+        return Err(format!(
+            "schema declares 'required' or 'properties', expected an object, found {}",
+            json_type_name(instance)
+        ));
+    }
+    Ok(())
+}
+
+/// Returns `Some(true)`/`Some(false)` indicating whether `instance`'s JSON
+/// type matches the JSON Schema `type` keyword value `type_name`, or `None`
+/// if `type_name` is not one of the recognised JSON Schema type names. An
+/// unrecognised `type_name` is a manifest-authoring error and must be
+/// treated as fail-closed by the caller, not as "no constraints".
+fn instance_matches_type(instance: &serde_json::Value, type_name: &str) -> Option<bool> {
     match type_name {
-        "string" => instance.is_string(),
-        "number" => instance.is_number(),
-        "integer" => is_integer_value(instance),
-        "boolean" => instance.is_boolean(),
-        "object" => instance.is_object(),
-        "array" => instance.is_array(),
-        "null" => instance.is_null(),
-        _ => true,
+        "string" => Some(instance.is_string()),
+        "number" => Some(instance.is_number()),
+        "integer" => Some(is_integer_value(instance)),
+        "boolean" => Some(instance.is_boolean()),
+        "object" => Some(instance.is_object()),
+        "array" => Some(instance.is_array()),
+        "null" => Some(instance.is_null()),
+        _ => None,
     }
 }
 
