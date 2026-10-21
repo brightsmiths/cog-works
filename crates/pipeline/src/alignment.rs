@@ -299,3 +299,7 @@ pub fn run_deterministic_alignment(
 ) -> Vec<AlignmentFinding> {
     todo!("See docs/spec/interfaces/advanced-features.md §Alignment Verification")
 }
+
+#[cfg(test)]
+#[path = "alignment_tests.rs"]
+mod tests;
