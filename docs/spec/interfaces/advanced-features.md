@@ -564,7 +564,7 @@ and their profile metadata.
 **Behaviour**:
 
 1. For each `ToolName` in `tool_list`, looks up whether it is a skill in
-   `profiles` (a tool is a skill if any `ToolProfile::skills` list contains it).
+   `profiles` (a tool is a skill if any `ToolProfile::allowed_skills` list contains it).
 2. Constructs a `ToolIndexEntry` for each tool, setting `is_skill` accordingly.
 3. Returns entries with skills sorted before raw tools; within each group,
    sorted alphabetically by `tool_name`.
