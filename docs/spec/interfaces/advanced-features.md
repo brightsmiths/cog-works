@@ -808,8 +808,26 @@ a sub-work-item's artifact and interface set.
 ### JSON Schema Validation
 
 `OutputSchema::new` accepts any JSON object. Schema validation in
-`validate_skill_invocation` uses a compatible JSON Schema validator; the
-`nodes` crate is responsible for selecting and wiring one up.
+`validate_skill_invocation` is performed by a private, hand-rolled JSON
+Schema **subset** matcher implemented entirely within `pipeline::tools`
+(no external `jsonschema`/`schemars`-family dependency, per the project's
+minimal-dependency policy). It supports only the `type`
+(`string`/`number`/`integer`/`boolean`/`object`/`array`/`null`), `required`,
+and `properties` keywords (the last recursively); any other keyword present
+on a schema object is ignored. For safety on this security-sensitive
+validation gate, the matcher is fail-closed rather than strictly
+spec-compliant in three cases: a schema of JSON `false` rejects every
+instance; an unrecognised `type` string rejects rather than matching
+anything; and a non-empty `required`/`properties` on an instance that is
+not a JSON object rejects, even without an explicit `"type": "object"`
+keyword (the literal JSON Schema specification treats `required`/
+`properties` as vacuously satisfied for non-object instances — this
+implementation deliberately deviates from that for skill-parameter safety).
+A manifest's `parameter_schema` relying on unsupported keywords (`enum`,
+`pattern`, `additionalProperties`, `items`, `minimum`/`maximum`, etc.) for a
+security-relevant constraint will not have that constraint enforced here.
+There is no `nodes`-crate-selected validator or injection point — this is
+the complete, final validation boundary for `validate_skill_invocation`.
 
 ### Requirement ID Format
 
