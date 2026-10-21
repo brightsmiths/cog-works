@@ -316,13 +316,28 @@ fn check_required_slots(
         .required_output_slots
         .iter()
         .filter(|slot| !node_output.artifacts.contains_key(slot.as_str()))
-        .map(|slot| AlignmentFinding {
-            check_type: AlignmentCheckType::Deterministic,
-            misalignment: MisalignmentType::Missing,
-            description: format!("Required output slot '{slot}' was not populated."),
-            blocking: true,
+        .map(|slot| {
+            deterministic_finding(
+                MisalignmentType::Missing,
+                format!("Required output slot '{slot}' was not populated."),
+            )
         })
         .collect()
+}
+
+/// Builds a blocking [`AlignmentFinding`] for [`AlignmentCheckType::Deterministic`].
+///
+/// All deterministic findings produced by this module are blocking (see
+/// module-level "Blocking vs. Non-Blocking Findings" docs), so this is the
+/// single construction point for both check 1 ([`check_required_slots`]) and
+/// checks 2/3 ([`scope_exceeded_finding`]).
+fn deterministic_finding(misalignment: MisalignmentType, description: String) -> AlignmentFinding {
+    AlignmentFinding {
+        check_type: AlignmentCheckType::Deterministic,
+        misalignment,
+        description,
+        blocking: true,
+    }
 }
 
 /// Checks 2 and 3, combined per artifact so that an artifact that is both
@@ -370,12 +385,10 @@ fn check_scope_and_protected_paths(
 /// Builds a `ScopeExceeded` finding for an out-of-scope or protected artifact
 /// key. `ScopeExceeded` findings are always blocking.
 fn scope_exceeded_finding(key: &str, reason: &str) -> AlignmentFinding {
-    AlignmentFinding {
-        check_type: AlignmentCheckType::Deterministic,
-        misalignment: MisalignmentType::ScopeExceeded,
-        description: format!("Artifact '{key}' {reason}."),
-        blocking: true,
-    }
+    deterministic_finding(
+        MisalignmentType::ScopeExceeded,
+        format!("Artifact '{key}' {reason}."),
+    )
 }
 
 #[cfg(test)]
