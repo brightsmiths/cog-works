@@ -39,7 +39,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    execution::NodeOutput, identifiers::ArtifactPath, security::ApprovedScope,
+    execution::NodeOutput,
+    identifiers::ArtifactPath,
+    security::{self, ApprovedScope, ProtectedPath},
     types::AlignmentScore,
 };
 
@@ -294,10 +296,86 @@ pub struct DeclaredNodeInputs {
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §run_deterministic_alignment.
 pub fn run_deterministic_alignment(
-    _inputs: &DeclaredNodeInputs,
-    _node_output: &NodeOutput,
+    inputs: &DeclaredNodeInputs,
+    node_output: &NodeOutput,
 ) -> Vec<AlignmentFinding> {
-    todo!("See docs/spec/interfaces/advanced-features.md §Alignment Verification")
+    let mut findings = check_required_slots(inputs, node_output);
+    findings.extend(check_scope_and_protected_paths(inputs, node_output));
+    findings
+}
+
+/// Check 1: every declared required output slot must be a key in
+/// `node_output.artifacts`. One [`MisalignmentType::Missing`] finding is
+/// produced per absent slot (duplicates in `required_output_slots` are not
+/// deduplicated — each absent occurrence produces its own finding).
+fn check_required_slots(
+    inputs: &DeclaredNodeInputs,
+    node_output: &NodeOutput,
+) -> Vec<AlignmentFinding> {
+    inputs
+        .required_output_slots
+        .iter()
+        .filter(|slot| !node_output.artifacts.contains_key(slot.as_str()))
+        .map(|slot| AlignmentFinding {
+            check_type: AlignmentCheckType::Deterministic,
+            misalignment: MisalignmentType::Missing,
+            description: format!("Required output slot '{slot}' was not populated."),
+            blocking: true,
+        })
+        .collect()
+}
+
+/// Checks 2 and 3, combined per artifact so that an artifact that is both
+/// out of scope and protected yields exactly one finding (protected-path
+/// precedence, mirroring `security::validate_scope`'s `ASSERT-SEC-005` rule).
+///
+/// For each artifact key: if it parses as an [`ArtifactPath`] and matches a
+/// protected path, emit one finding and skip the scope check for that key.
+/// Otherwise (including keys that fail `ArtifactPath::new`), fall back to
+/// the scope-containment check (check 2) against the raw string key.
+fn check_scope_and_protected_paths(
+    inputs: &DeclaredNodeInputs,
+    node_output: &NodeOutput,
+) -> Vec<AlignmentFinding> {
+    let approved_set = security::build_glob_set(&inputs.approved_scope.artifact_patterns);
+    let protected: Vec<ProtectedPath> = inputs
+        .protected_paths
+        .iter()
+        .map(|path| ProtectedPath {
+            pattern: path.as_str().to_string(),
+            reason: "declared protected path".to_string(),
+        })
+        .collect();
+
+    node_output
+        .artifacts
+        .keys()
+        .filter_map(|key| {
+            let is_protected = ArtifactPath::new(key.clone())
+                .is_some_and(|path| security::is_protected(&path, &protected));
+            if is_protected {
+                return Some(scope_exceeded_finding(key, "matches a protected path"));
+            }
+            if !approved_set.is_match(key.as_str()) {
+                return Some(scope_exceeded_finding(
+                    key,
+                    "falls outside the approved scope",
+                ));
+            }
+            None
+        })
+        .collect()
+}
+
+/// Builds a `ScopeExceeded` finding for an out-of-scope or protected artifact
+/// key. `ScopeExceeded` findings are always blocking.
+fn scope_exceeded_finding(key: &str, reason: &str) -> AlignmentFinding {
+    AlignmentFinding {
+        check_type: AlignmentCheckType::Deterministic,
+        misalignment: MisalignmentType::ScopeExceeded,
+        description: format!("Artifact '{key}' {reason}."),
+        blocking: true,
+    }
 }
 
 #[cfg(test)]
