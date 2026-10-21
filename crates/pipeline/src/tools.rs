@@ -480,8 +480,23 @@ pub struct CompactToolIndex {
 ///
 /// # Arguments
 ///
-/// * `tool_list` — canonical names of tools that may be invoked.
+/// * `tool_list` — canonical names of tools that may be invoked. Callers are
+///   expected to pass unique names; this function does not deduplicate, so
+///   a repeated name produces one [`ToolIndexEntry`] per occurrence (sharing
+///   the same sort position, with relative order among exact duplicates
+///   otherwise unspecified).
 /// * `profiles` — tool profiles used to determine which tools are skills.
+///   A tool is marked `is_skill` if its name appears in **any** profile's
+///   `allowed_skills` — not only the profile that will ultimately be active
+///   for a given node — per `docs/spec/interfaces/advanced-features.md`
+///   §build_compact_index ("a tool is a skill if any `ToolProfile` ... list
+///   contains it"). This is deliberate: the index is a cross-profile catalog
+///   for discovery/ranking, not a per-profile permission view. A caller using
+///   this index to decide what to *show* a specific node must still gate the
+///   actual invocation through [`validate_skill_invocation`], which checks
+///   the skill against that node's specific active profile and will reject
+///   with [`SkillError::ProfileProhibited`] if the active profile doesn't
+///   permit it.
 ///
 /// # Returns
 ///
@@ -491,10 +506,32 @@ pub struct CompactToolIndex {
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §build_compact_index.
 pub fn build_compact_index(
-    _tool_list: &[ToolName],
-    _profiles: &[crate::knowledge::ToolProfile],
+    tool_list: &[ToolName],
+    profiles: &[crate::knowledge::ToolProfile],
 ) -> CompactToolIndex {
-    todo!("See docs/spec/interfaces/advanced-features.md §Progressive Tool Discovery")
+    let skill_names: std::collections::HashSet<&str> = profiles
+        .iter()
+        .flat_map(|profile| profile.allowed_skills.iter())
+        .map(SkillName::as_str)
+        .collect();
+
+    let mut entries: Vec<ToolIndexEntry> = tool_list
+        .iter()
+        .map(|tool_name| {
+            let is_skill = skill_names.contains(tool_name.as_str());
+            ToolIndexEntry {
+                tool_name: tool_name.clone(),
+                description: String::new(),
+                is_skill,
+            }
+        })
+        .collect();
+
+    entries.sort_by(|a, b| {
+        (!a.is_skill, a.tool_name.as_str()).cmp(&(!b.is_skill, b.tool_name.as_str()))
+    });
+
+    CompactToolIndex { entries }
 }
 
 // ---------------------------------------------------------------------------
@@ -509,11 +546,22 @@ pub fn build_compact_index(
 ///
 /// * `index` — the compact tool index to search.
 /// * `query` — case-insensitive substring to look for in `tool_name` and
-///   `description`.
+///   `description`. An empty string is a substring of every value, so
+///   `query == ""` returns every entry in `index.entries`, in its existing
+///   order — this is intentional (an empty query means "no filter").
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §search_tools.
-pub fn search_tools(_index: &CompactToolIndex, _query: &str) -> Vec<ToolIndexEntry> {
-    todo!("See docs/spec/interfaces/advanced-features.md §Progressive Tool Discovery")
+pub fn search_tools(index: &CompactToolIndex, query: &str) -> Vec<ToolIndexEntry> {
+    let query = query.to_lowercase();
+    index
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.tool_name.as_str().to_lowercase().contains(&query)
+                || entry.description.to_lowercase().contains(&query)
+        })
+        .cloned()
+        .collect()
 }
 
 // ─── Skill validation ────────────────────────────────────────────────────────
@@ -544,6 +592,20 @@ impl SkillLifecycle {
     #[must_use]
     pub fn is_invocable(&self) -> bool {
         matches!(self, Self::Active)
+    }
+}
+
+impl std::fmt::Display for SkillLifecycle {
+    /// Writes the bare variant identifier (e.g. `"Proposed"`, `"Deprecated"`
+    /// — without the `Deprecated` variant's `alternative` field contents).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Proposed => write!(f, "Proposed"),
+            Self::Reviewed => write!(f, "Reviewed"),
+            Self::Active => write!(f, "Active"),
+            Self::Deprecated { .. } => write!(f, "Deprecated"),
+            Self::Retired => write!(f, "Retired"),
+        }
     }
 }
 
@@ -612,6 +674,20 @@ pub struct SkillInvocation {
 /// it can only be obtained by calling [`validate_skill_invocation`]. This
 /// enforces the invariant that a skill can only be executed after it has been
 /// validated against its manifest and the active tool profile.
+///
+/// ## Parameter Pruning Caveat
+///
+/// `invocation().parameters` is carried forward **unmodified** from the
+/// caller-supplied [`SkillInvocation`] — validation checks that the
+/// schema-declared `required`/`properties`/`type` constraints are satisfied,
+/// but it does not enforce `additionalProperties` and does not strip or
+/// allow-list keys. A caller-supplied JSON object with extra keys beyond
+/// what the manifest's `parameter_schema` declares will still pass
+/// validation, and those extra keys are still present on this type. Any
+/// executor consuming `tool_call_sequence`/`invocation()` must read only the
+/// schema-declared properties (allow-list), not iterate `parameters` keys
+/// wholesale, or it risks acting on LLM-supplied fields the schema never
+/// sanctioned.
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §ValidatedSkillInvocation.
 #[derive(Debug, Clone)]
@@ -708,9 +784,201 @@ pub enum SkillError {
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §validate_skill_invocation.
 pub fn validate_skill_invocation(
-    _invocation: &SkillInvocation,
-    _manifest: &SkillManifest,
-    _profile: &crate::knowledge::ToolProfile,
+    invocation: &SkillInvocation,
+    manifest: &SkillManifest,
+    profile: &crate::knowledge::ToolProfile,
 ) -> Result<ValidatedSkillInvocation, SkillError> {
-    todo!("See docs/spec/interfaces/advanced-features.md §Skill Validation")
+    if !manifest.lifecycle.is_invocable() {
+        return Err(SkillError::LifecycleInactive {
+            skill_name: manifest.name.clone(),
+            lifecycle_state: manifest.lifecycle.to_string(),
+        });
+    }
+
+    let is_permitted = profile
+        .allowed_skills
+        .iter()
+        .any(|allowed| allowed.as_str() == manifest.name.as_str());
+    if !is_permitted {
+        return Err(SkillError::ProfileProhibited {
+            skill_name: manifest.name.clone(),
+        });
+    }
+
+    let schema_value = manifest.parameter_schema.as_value();
+    let depth_exceeded = crate::json_guard::exceeds_max_depth(
+        schema_value,
+        crate::json_guard::MAX_SCHEMA_COMPARISON_DEPTH,
+    ) || crate::json_guard::exceeds_max_depth(
+        &invocation.parameters,
+        crate::json_guard::MAX_SCHEMA_COMPARISON_DEPTH,
+    );
+    if depth_exceeded {
+        return Err(SkillError::SchemaValidationFailed {
+            description: "schema or parameters nested too deeply to validate safely".to_string(),
+        });
+    }
+
+    if let Err(description) = schema_matches(schema_value, &invocation.parameters) {
+        return Err(SkillError::SchemaValidationFailed { description });
+    }
+
+    Ok(ValidatedSkillInvocation {
+        invocation: invocation.clone(),
+        tool_call_sequence: manifest.tool_call_sequence.clone(),
+    })
 }
+
+/// Hand-rolled JSON Schema subset matcher.
+///
+/// Supports only `type`, `required`, and `properties` on an object-shaped
+/// schema; any other keyword is ignored (permissive). A `schema` of JSON
+/// `false` is a special case that rejects every instance. Any other
+/// non-object `schema` value (string, number, array, null, or boolean
+/// `true`) is treated as "no constraints" (always matches).
+///
+/// # Depth
+///
+/// Callers MUST check [`crate::json_guard::exceeds_max_depth`] on both
+/// `schema` and `instance` before calling this function. Ordinary (non-
+/// iterative) recursion is safe here only because the caller has already
+/// bounded the maximum nesting depth to
+/// [`crate::json_guard::MAX_SCHEMA_COMPARISON_DEPTH`] (64).
+///
+/// # Errors
+///
+/// Returns `Err` with a human-readable description of the first violation
+/// found.
+fn schema_matches(schema: &serde_json::Value, instance: &serde_json::Value) -> Result<(), String> {
+    if schema == &serde_json::Value::Bool(false) {
+        return Err("schema is 'false', which rejects every instance".to_string());
+    }
+
+    let Some(schema_obj) = schema.as_object() else {
+        return Ok(());
+    };
+
+    check_type_keyword(schema_obj, instance)?;
+
+    let required = schema_obj
+        .get("required")
+        .and_then(serde_json::Value::as_array);
+    let properties = schema_obj
+        .get("properties")
+        .and_then(serde_json::Value::as_object);
+    check_object_shape_required(required, properties, instance)?;
+
+    if let Some(required) = required
+        && let Some(instance_obj) = instance.as_object()
+    {
+        for name in required.iter().filter_map(serde_json::Value::as_str) {
+            if !instance_obj.contains_key(name) {
+                return Err(format!("missing required property '{name}'"));
+            }
+        }
+    }
+
+    if let Some(properties) = properties
+        && let Some(instance_obj) = instance.as_object()
+    {
+        for (key, nested_schema) in properties {
+            if let Some(value) = instance_obj.get(key) {
+                schema_matches(nested_schema, value)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Validates the schema's optional `"type"` keyword against `instance`.
+///
+/// Returns `Ok(())` if `"type"` is absent, or present and the instance
+/// matches it. Returns `Err` if the instance doesn't match a recognised
+/// type, or if `"type"` names a type that isn't one of the 7 recognised
+/// JSON Schema primitive type names (fail-closed: see
+/// [`instance_matches_type`]).
+fn check_type_keyword(
+    schema_obj: &serde_json::Map<String, serde_json::Value>,
+    instance: &serde_json::Value,
+) -> Result<(), String> {
+    let Some(type_name) = schema_obj.get("type").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+
+    match instance_matches_type(instance, type_name) {
+        Some(true) => Ok(()),
+        Some(false) => Err(format!(
+            "expected type '{type_name}', found {}",
+            json_type_name(instance)
+        )),
+        None => Err(format!("schema declares unrecognised type '{type_name}'")),
+    }
+}
+
+/// Validates that `instance` is a JSON object whenever the schema declares a
+/// non-empty `"required"` array or non-empty `"properties"` object — even if
+/// the schema has no explicit `"type": "object"` keyword. An empty
+/// `required`/`properties` declares nothing, so it does not force an object
+/// shape.
+fn check_object_shape_required(
+    required: Option<&Vec<serde_json::Value>>,
+    properties: Option<&serde_json::Map<String, serde_json::Value>>,
+    instance: &serde_json::Value,
+) -> Result<(), String> {
+    let requires_object_shape =
+        required.is_some_and(|r| !r.is_empty()) || properties.is_some_and(|p| !p.is_empty());
+    if requires_object_shape && instance.as_object().is_none() {
+        return Err(format!(
+            "schema declares 'required' or 'properties', expected an object, found {}",
+            json_type_name(instance)
+        ));
+    }
+    Ok(())
+}
+
+/// Returns `Some(true)`/`Some(false)` indicating whether `instance`'s JSON
+/// type matches the JSON Schema `type` keyword value `type_name`, or `None`
+/// if `type_name` is not one of the recognised JSON Schema type names. An
+/// unrecognised `type_name` is a manifest-authoring error and must be
+/// treated as fail-closed by the caller, not as "no constraints".
+fn instance_matches_type(instance: &serde_json::Value, type_name: &str) -> Option<bool> {
+    match type_name {
+        "string" => Some(instance.is_string()),
+        "number" => Some(instance.is_number()),
+        "integer" => Some(is_integer_value(instance)),
+        "boolean" => Some(instance.is_boolean()),
+        "object" => Some(instance.is_object()),
+        "array" => Some(instance.is_array()),
+        "null" => Some(instance.is_null()),
+        _ => None,
+    }
+}
+
+/// Returns `true` if `value` is a JSON number with no fractional part.
+#[allow(clippy::float_cmp)]
+fn is_integer_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Number(n) => {
+            n.is_i64() || n.is_u64() || n.as_f64().is_some_and(|f| f.fract() == 0.0)
+        }
+        _ => false,
+    }
+}
+
+/// Returns the JSON Schema type name for `value`'s runtime JSON type, used
+/// to build human-readable `SchemaValidationFailed` descriptions.
+fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+#[cfg(test)]
+#[path = "tools_tests.rs"]
+mod tests;

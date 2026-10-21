@@ -1,0 +1,16 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a04d24fafbd1a3c8ee84b674f2061c4c44f279c123c962ffec810b60b7555b66 # shrinks to n = 1, mask = 0
+cc 643c7820481b63c72aca7ae01e421e3c86b0a74c2482a5d5f3c01699a5fc3b8f # shrinks to tool_names = []
+cc d01db531569eb095bf165cdeb16bba677b89be61643d8179fc6514997de54afa # shrinks to (tool_names, profile_skill_lists) = ([], [])
+cc 61f3fab415e21dd38205377b716b1ad5eae4d83f92bbc50bfea1621ef32f6b21 # shrinks to (tool_names, _profile_skill_lists) = ([], [])
+cc 9e61fd209718e1a7f16fbc896e7da4ea48a64352071b1f6951a3c44fc42a14d6 # shrinks to index = CompactToolIndex { entries: [] }, query = ""
+cc 12064d4ffc579cb3a802c4953b4fafb6c353555b1edfead693ad8db4546a92b8 # shrinks to (tool_names, profile_skill_lists) = ([], [])
+cc e3ec0e55236d626e1ff1f7c857779b2bd6796aa7e1d95c2a7166fd415cd7f107 # shrinks to index = CompactToolIndex { entries: [] }
+cc 8394afa5947769aac7b0c33cb48d3c1fd3981fab9a08c02c14121581f9f66476 # shrinks to lifecycle = Proposed, profile_allows = false, params_conform = false
+cc e84bebcf867a4bdafae9b6d2a660e8e14f893e3bf521c8a4c106ae06808183b0 # shrinks to index = CompactToolIndex { entries: [] }, query = "a"
+cc dd7966b24d9cdafbfdb7b2980fffb3e1384b538db75367537fbbd493ae090f83 # shrinks to (tool_names, profile_skill_lists) = ([], [])
