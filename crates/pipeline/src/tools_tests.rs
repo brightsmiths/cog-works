@@ -37,10 +37,18 @@
 //!   rendering. If the intended rendering differs (e.g. includes the
 //!   `Deprecated { alternative }` payload), the corresponding test will need
 //!   architect clarification — flagged as a gap in the task report.
-//! - The hand-rolled JSON Schema subset's behaviour when `required`/
-//!   `properties` are present but `type` is absent, and the instance is not
-//!   an object, is unspecified by the injected contract; this suite does not
-//!   exercise that combination to avoid locking in an unconfirmed assumption.
+//! - **PR #168 review remediation (#50)**: the hand-rolled JSON Schema
+//!   subset's behaviour when `required`/`properties` are present but `type`
+//!   is absent, and the instance is not an object, was previously
+//!   unspecified/untested (see prior revision of this note) and found to be a
+//!   fail-open gap — `required`/`properties` were silently skipped against a
+//!   non-object instance. This is now a pinned, intentional deviation from
+//!   strict JSON Schema semantics (which would vacuously pass): a *non-empty*
+//!   `required` or `properties` keyword now requires the instance to be an
+//!   object, recursively. See the "Tier 2: Adversarial / security tests —
+//!   fail-closed schema_matches gaps (#50)" section below, which also covers
+//!   the two related fail-open bugs (boolean `false` schema nodes, and
+//!   unrecognised `type` strings).
 //! - `SchemaValidationFailed::description` content (beyond non-emptiness) is
 //!   only loosely pinned: `test_validate_skill_invocation_schema_failure_description_identifies_missing_property`
 //!   asserts the missing property name appears somewhere in the message, on
@@ -1293,6 +1301,274 @@ fn test_validate_skill_invocation_success_invocation_accessor_returns_original_i
 
     assert_eq!(result.invocation().skill_name, skill);
     assert_eq!(result.invocation().parameters, params);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tier 2: Adversarial / security tests — fail-closed schema_matches gaps (#50)
+//
+// PR #168 review found three related fail-open bugs in the hand-rolled
+// `schema_matches`/`instance_matches_type` matcher: a boolean `false` schema
+// node was treated as "no constraints" instead of "reject everything"; an
+// unrecognised `type` string matched any instance instead of failing; and
+// `required`/`properties` checks were silently skipped whenever the instance
+// was not a JSON object (even with no explicit `"type": "object"` keyword),
+// which is a real gap for a security-sensitive validation gate given that
+// `invocation.parameters` is effectively LLM-sourced input. The tests below
+// pin the new fail-closed contract. They are expected to fail (RED) against
+// the current implementation.
+//
+// Note: a boolean `false`/`true` schema cannot be exercised as the manifest's
+// *root* `parameter_schema`, because `OutputSchema::new` only accepts a JSON
+// object at the root (see `tools.rs`'s `OutputSchema::new` doc comment) — so
+// `schema_val(json!(false))` would panic in the test fixture itself. The
+// boolean-schema behaviour is therefore exercised via a nested `properties`
+// entry instead, which is exactly where `schema_matches` recurses on raw,
+// unwrapped `serde_json::Value` schema fragments.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Behavior 1 + 4: a nested property schema of JSON `false` must reject every
+/// instance value placed at that property, regardless of the instance's JSON
+/// type (object, string, null, number, boolean, array all included).
+#[test]
+fn test_validate_skill_invocation_nested_false_schema_rejects_every_instance_value() {
+    let skill = sn("my-skill");
+    let schema_value = json!({
+        "type": "object",
+        "properties": { "x": false }
+    });
+    let m = manifest(
+        skill.clone(),
+        SkillLifecycle::Active,
+        schema_val(schema_value),
+        &[],
+    );
+    let prof = profile(&[], &["my-skill"]);
+
+    for value in [
+        json!({}),
+        json!("x"),
+        json!(null),
+        json!(42),
+        json!(true),
+        json!([1, 2, 3]),
+    ] {
+        let inv = invocation(skill.clone(), json!({ "x": value.clone() }));
+
+        let result = validate_skill_invocation(&inv, &m, &prof);
+
+        assert_schema_validation_failed(&result);
+    }
+}
+
+/// Sanity check (not a new requirement): a nested property schema of JSON
+/// `true` must still behave as "no constraints", exactly as before this
+/// remediation. Guards against an overzealous fix that treats *any* boolean
+/// schema as fail-closed instead of only `false`.
+#[test]
+fn test_validate_skill_invocation_nested_true_schema_still_matches_anything() {
+    let skill = sn("my-skill");
+    let schema_value = json!({
+        "type": "object",
+        "properties": { "x": true }
+    });
+    let m = manifest(
+        skill.clone(),
+        SkillLifecycle::Active,
+        schema_val(schema_value),
+        &[],
+    );
+    let prof = profile(&[], &["my-skill"]);
+    let inv = invocation(skill, json!({ "x": "anything-goes" }));
+
+    let result = validate_skill_invocation(&inv, &m, &prof);
+
+    assert!(
+        result.is_ok(),
+        "boolean `true` nested schema must still mean no constraints; got {result:?}"
+    );
+}
+
+/// Behavior 2: an unrecognised `type` string (a manifest-authoring typo) must
+/// cause rejection regardless of what the instance is — not match-anything.
+#[test]
+fn test_validate_skill_invocation_unknown_type_keyword_rejects_regardless_of_instance_shape() {
+    let skill = sn("my-skill");
+    let schema_value = json!({"type": "strng"});
+    let m = manifest(
+        skill.clone(),
+        SkillLifecycle::Active,
+        schema_val(schema_value),
+        &[],
+    );
+    let prof = profile(&[], &["my-skill"]);
+
+    for params in [json!({}), json!("hello"), json!(42), json!(null)] {
+        let inv = invocation(skill.clone(), params);
+
+        let result = validate_skill_invocation(&inv, &m, &prof);
+
+        assert_schema_validation_failed(&result);
+    }
+}
+
+/// Behavior 2 + 4: the unknown-`type` fail-closed rule must also apply to a
+/// nested `properties` schema fragment, not just the schema root.
+#[test]
+fn test_validate_skill_invocation_nested_unknown_type_keyword_rejected() {
+    let skill = sn("my-skill");
+    let schema_value = json!({
+        "type": "object",
+        "properties": { "field": {"type": "strng"} }
+    });
+    let m = manifest(
+        skill.clone(),
+        SkillLifecycle::Active,
+        schema_val(schema_value),
+        &[],
+    );
+    let prof = profile(&[], &["my-skill"]);
+    let inv = invocation(skill, json!({"field": "hello"}));
+
+    let result = validate_skill_invocation(&inv, &m, &prof);
+
+    assert_schema_validation_failed(&result);
+}
+
+/// Behavior 3: a schema with a non-empty `required` list but no explicit
+/// `"type": "object"` must still reject a non-object instance, across
+/// several distinct non-object JSON shapes (string, number, boolean, null,
+/// array) — not just the one shape a narrower fix might special-case.
+#[test]
+fn test_validate_skill_invocation_required_keyword_without_type_rejects_non_object_instance() {
+    let skill = sn("my-skill");
+    let schema_value = json!({"required": ["target"]});
+    let m = manifest(
+        skill.clone(),
+        SkillLifecycle::Active,
+        schema_val(schema_value),
+        &[],
+    );
+    let prof = profile(&[], &["my-skill"]);
+
+    for params in [
+        json!("a-string"),
+        json!(42),
+        json!(true),
+        json!(null),
+        json!([1, 2, 3]),
+    ] {
+        let inv = invocation(skill.clone(), params.clone());
+
+        let result = validate_skill_invocation(&inv, &m, &prof);
+
+        assert_schema_validation_failed(&result);
+    }
+}
+
+/// Behavior 3: a schema with a non-empty `properties` object but no explicit
+/// `"type": "object"` must still reject a non-object instance.
+#[test]
+fn test_validate_skill_invocation_properties_keyword_without_type_rejects_non_object_instance() {
+    let skill = sn("my-skill");
+    let schema_value = json!({
+        "properties": { "target": {"type": "string"} }
+    });
+    let m = manifest(
+        skill.clone(),
+        SkillLifecycle::Active,
+        schema_val(schema_value),
+        &[],
+    );
+    let prof = profile(&[], &["my-skill"]);
+
+    for params in [
+        json!("a-string"),
+        json!(42),
+        json!(true),
+        json!(null),
+        json!([1, 2, 3]),
+    ] {
+        let inv = invocation(skill.clone(), params.clone());
+
+        let result = validate_skill_invocation(&inv, &m, &prof);
+
+        assert_schema_validation_failed(&result);
+    }
+}
+
+/// Behavior 3 edge case: an *empty* `required` array requires nothing, so it
+/// must NOT by itself force the instance to be an object. Only a non-empty
+/// `required` (or non-empty `properties`) triggers the fail-closed
+/// object-shape rule.
+#[test]
+fn test_validate_skill_invocation_empty_required_array_does_not_force_object_instance() {
+    let skill = sn("my-skill");
+    let schema_value = json!({"required": []});
+    let m = manifest(
+        skill.clone(),
+        SkillLifecycle::Active,
+        schema_val(schema_value),
+        &[],
+    );
+    let prof = profile(&[], &["my-skill"]);
+    let inv = invocation(skill, json!("a-string-not-an-object"));
+
+    let result = validate_skill_invocation(&inv, &m, &prof);
+
+    assert!(
+        result.is_ok(),
+        "an empty `required` array must not force the instance to be an object; got {result:?}"
+    );
+}
+
+/// Behavior 3 edge case (symmetrical to the empty-`required` case above): an
+/// *empty* `properties` object declares no expected properties, so it must
+/// NOT by itself force the instance to be an object either.
+#[test]
+fn test_validate_skill_invocation_empty_properties_object_does_not_force_object_instance() {
+    let skill = sn("my-skill");
+    let schema_value = json!({"properties": {}});
+    let m = manifest(
+        skill.clone(),
+        SkillLifecycle::Active,
+        schema_val(schema_value),
+        &[],
+    );
+    let prof = profile(&[], &["my-skill"]);
+    let inv = invocation(skill, json!(42));
+
+    let result = validate_skill_invocation(&inv, &m, &prof);
+
+    assert!(
+        result.is_ok(),
+        "an empty `properties` object must not force the instance to be an object; got {result:?}"
+    );
+}
+
+/// Behavior 3 + 4: the non-object-instance-against-required fail-closed rule
+/// must also apply recursively through a nested `properties` schema, not
+/// just at the schema root.
+#[test]
+fn test_validate_skill_invocation_nested_required_keyword_rejects_non_object_nested_value() {
+    let skill = sn("my-skill");
+    let schema_value = json!({
+        "type": "object",
+        "properties": {
+            "nested": {"required": ["id"]}
+        }
+    });
+    let m = manifest(
+        skill.clone(),
+        SkillLifecycle::Active,
+        schema_val(schema_value),
+        &[],
+    );
+    let prof = profile(&[], &["my-skill"]);
+    let inv = invocation(skill, json!({"nested": "not-an-object"}));
+
+    let result = validate_skill_invocation(&inv, &m, &prof);
+
+    assert_schema_validation_failed(&result);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
