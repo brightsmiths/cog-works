@@ -1100,6 +1100,120 @@ fn test_validate_skill_invocation_integer_type_rejects_fractional_number() {
     assert_schema_validation_failed(&result);
 }
 
+/// Mutation-kill test (survivor: `cargo mutants` mutant
+/// `tools.rs:879:5: replace is_integer_value -> bool with false`).
+///
+/// The suite previously only exercised the *rejection* path for `type:
+/// "integer"` (fractional numbers); nothing asserted that an ordinary
+/// positive integer is actually *accepted*. A stub that always returns
+/// `false` from `is_integer_value` therefore passed every existing test.
+#[test]
+fn test_validate_skill_invocation_integer_type_accepts_plain_positive_integer() {
+    let skill = sn("my-skill");
+    let schema_value = json!({
+        "type": "object",
+        "required": ["count"],
+        "properties": { "count": {"type": "integer"} }
+    });
+    let m = manifest(
+        skill.clone(),
+        SkillLifecycle::Active,
+        schema_val(schema_value),
+        &[],
+    );
+    let prof = profile(&[], &["my-skill"]);
+    let inv = invocation(skill, json!({"count": 5}));
+
+    let result = validate_skill_invocation(&inv, &m, &prof);
+
+    assert!(
+        result.is_ok(),
+        "a plain positive integer must satisfy type 'integer'; got {result:?}"
+    );
+}
+
+/// Mutation-kill test (survivor: `cargo mutants` mutant
+/// `tools.rs:881:38: replace || with && in is_integer_value`).
+///
+/// `is_integer_value` must also accept a JSON number that serde_json stores
+/// as a float but which has no fractional part (e.g. `5.0`), via its
+/// `as_f64().is_some_and(|f| f.fract() == 0.0)` fallback branch. This is the
+/// one case where the three disjuncts are *not* mutually redundant: for a
+/// float-encoded whole number, `is_i64()` and `is_u64()` are both `false`,
+/// so only the third disjunct can accept it. Flipping the second `||` to
+/// `&&` makes this fallback branch require `is_u64()` to also be true,
+/// incorrectly rejecting `5.0`.
+#[test]
+fn test_validate_skill_invocation_integer_type_accepts_whole_number_encoded_as_float() {
+    let skill = sn("my-skill");
+    let schema_value = json!({
+        "type": "object",
+        "required": ["count"],
+        "properties": { "count": {"type": "integer"} }
+    });
+    let m = manifest(
+        skill.clone(),
+        SkillLifecycle::Active,
+        schema_val(schema_value),
+        &[],
+    );
+    let prof = profile(&[], &["my-skill"]);
+    // `5.0` is a Rust f64 literal; `json!` stores it as a serde_json float
+    // Number (is_i64() == false, is_u64() == false) despite being
+    // integer-valued.
+    let inv = invocation(skill, json!({"count": 5.0}));
+
+    let result = validate_skill_invocation(&inv, &m, &prof);
+
+    assert!(
+        result.is_ok(),
+        "a float-encoded whole number (5.0) must satisfy type 'integer'; got {result:?}"
+    );
+}
+
+/// Mutation-kill test (survivors: `cargo mutants` mutants
+/// `tools.rs:890:5: replace json_type_name -> &'static str with ""` and
+/// `with "xyzzy"`).
+///
+/// `SchemaValidationFailed::description` is documented to identify "the
+/// problem"; for a type mismatch this must include the *actual* runtime
+/// type found, not just the expected type. No existing test inspected that
+/// half of the message, so a stub `json_type_name` returning a constant
+/// string for every JSON value passed silently.
+#[test]
+fn test_validate_skill_invocation_schema_failure_description_identifies_actual_type_found() {
+    let skill = sn("my-skill");
+    let schema_value = json!({
+        "type": "object",
+        "required": ["repo"],
+        "properties": { "repo": {"type": "string"} }
+    });
+    let m = manifest(
+        skill.clone(),
+        SkillLifecycle::Active,
+        schema_val(schema_value),
+        &[],
+    );
+    let prof = profile(&[], &["my-skill"]);
+    let inv = invocation(skill, json!({"repo": 12345}));
+
+    let result = validate_skill_invocation(&inv, &m, &prof);
+
+    match result {
+        Err(SkillError::SchemaValidationFailed { description }) => {
+            assert!(
+                description.contains("number"),
+                "description must identify the actual found type ('number'); got: {description}"
+            );
+            assert!(
+                !description.contains("xyzzy"),
+                "description must not contain mutant placeholder text; got: {description}"
+            );
+        }
+        other => panic!("expected SchemaValidationFailed, got {other:?}"),
+    }
+}
+
 #[test]
 fn test_validate_skill_invocation_boolean_type_mismatch_rejected() {
     let skill = sn("my-skill");
