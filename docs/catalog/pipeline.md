@@ -24,6 +24,7 @@ Core orchestration domain — domain concepts, newtype identifiers, shared primi
 | `AuditStore` | trait | `crates/pipeline/src/audit.rs:288` | trait in crates/pipeline/src/audit.rs | core, pipeline, trait |
 | `AuditStoreError` | enum | `crates/pipeline/src/audit.rs:251` | enum in crates/pipeline/src/audit.rs | core, pipeline |
 | `BudgetAcquisition` | enum | `crates/pipeline/src/budget.rs:112` | enum in crates/pipeline/src/budget.rs | core, pipeline |
+| `build_compact_index` | fn | `crates/pipeline/src/tools.rs:508` | Builds a skill-first, then-alphabetical `CompactToolIndex` from a tool list and `ToolProfile` set; marks an entry `is_skill` if its name appears in any profile's `allowed_skills`. `description` is always empty pending `nodes`-crate enrichment. Pure, infallible. | discovery, tools, pipeline |
 | `CacheError` | enum | `crates/pipeline/src/knowledge.rs:110` | enum in crates/pipeline/src/knowledge.rs | core, pipeline |
 | `ChatMessage` | struct | `crates/pipeline/src/tools.rs:91` | struct in crates/pipeline/src/tools.rs | core, pipeline |
 | `ChatRole` | enum | `crates/pipeline/src/tools.rs:67` | enum in crates/pipeline/src/tools.rs | core, pipeline |
@@ -56,9 +57,6 @@ Core orchestration domain — domain concepts, newtype identifiers, shared primi
 | `DependencyError` | enum | `crates/pipeline/src/execution.rs:264` | enum in crates/pipeline/src/execution.rs | core, pipeline |
 | `determine_next_actions` | fn | `crates/pipeline/src/execution.rs:380` | Pure state-machine dispatcher: given current pipeline state, graph, gate config, and current time, returns the next set of actions (Execute, ExecuteParallel, Wait, Escalate, or HaltWithError). Entry point for the execution loop. | execution, state-machine, pipeline |
 | `enforce_scenario_holdout` | fn | `crates/pipeline/src/context.rs` | Hard safety constraint (ASSERT-SCEN-002): removes any `ContextItem` whose `source_path` is rooted under one of the `holdout_dirs` using directory-prefix semantics (`spec/scenarios` matches `spec/scenarios/foo.md` but NOT `spec/scenarios-alt/foo.md`). Items with `source_path=None` are never removed. Returns the opaque `HoldoutFilteredItems` newtype, making it a compile-time error to call `apply_priority_truncation` without first calling this function. Infallible, pure. | context, safety, holdout, pipeline |
-| `build_compact_index` | fn | `crates/pipeline/src/tools.rs` | Builds a skill-first, then-alphabetical `CompactToolIndex` from a tool list and `ToolProfile` set; marks an entry `is_skill` if its name appears in any profile's `allowed_skills`. `description` is always empty pending `nodes`-crate enrichment. Pure, infallible. | discovery, tools, pipeline |
-| `search_tools` | fn | `crates/pipeline/src/tools.rs` | Case-insensitive substring filter over a `CompactToolIndex`'s `tool_name`/`description`; order-preserving (does not re-rank — skill-first ordering comes from `build_compact_index`). Pure, infallible. | discovery, tools, pipeline |
-| `validate_skill_invocation` | fn | `crates/pipeline/src/tools.rs` | Skill invocation gate: lifecycle (`Active`-only) → profile (`allowed_skills`) → parameter schema (hand-rolled `type`/`required`/`properties` subset, depth-guarded). Returns an opaque `ValidatedSkillInvocation` carrying the resolved `tool_call_sequence`. | skills, validation, security, pipeline |
 | `DependencyGraph` | struct | `crates/pipeline/src/domain_services.rs:165` | struct in crates/pipeline/src/domain_services.rs | core, pipeline |
 | `DependencyResult` | struct | `crates/pipeline/src/domain_services.rs:128` | struct in crates/pipeline/src/domain_services.rs | core, pipeline |
 | `Diagnostic` | struct | `crates/pipeline/src/types.rs:288` | struct in crates/pipeline/src/types.rs | core, pipeline |
@@ -176,6 +174,7 @@ Core orchestration domain — domain concepts, newtype identifiers, shared primi
 | `ScopeViolation` | struct | `crates/pipeline/src/security.rs:761` | struct in crates/pipeline/src/security.rs | core, pipeline |
 | `ScopeViolationKind` | enum | `crates/pipeline/src/security.rs:732` | enum in crates/pipeline/src/security.rs | core, pipeline |
 | `ScopeViolationRecord` | struct | `crates/pipeline/src/audit.rs:143` | struct in crates/pipeline/src/audit.rs | core, pipeline |
+| `search_tools` | fn | `crates/pipeline/src/tools.rs:554` | Case-insensitive substring filter over a `CompactToolIndex`'s `tool_name`/`description`; order-preserving (does not re-rank — skill-first ordering comes from `build_compact_index`). Pure, infallible. | discovery, tools, pipeline |
 | `ServiceCapabilities` | struct | `crates/pipeline/src/domain_services.rs:1049` | struct in crates/pipeline/src/domain_services.rs | core, pipeline |
 | `ServiceRegistry` | struct | `crates/pipeline/src/domain_services.rs:1120` | struct in crates/pipeline/src/domain_services.rs | core, pipeline |
 | `SimulationResults` | struct | `crates/pipeline/src/domain_services.rs:108` | struct in crates/pipeline/src/domain_services.rs | core, pipeline |
@@ -219,6 +218,7 @@ Core orchestration domain — domain concepts, newtype identifiers, shared primi
 | `TypedLink` | struct | `crates/pipeline/src/github.rs:337` | struct in crates/pipeline/src/github.rs | core, pipeline |
 | `TypedLinkKind` | enum | `crates/pipeline/src/github.rs:325` | enum in crates/pipeline/src/github.rs | core, pipeline |
 | `ValidatedPrompt` | struct | `crates/pipeline/src/security.rs:215` | struct in crates/pipeline/src/security.rs | core, pipeline |
+| `validate_skill_invocation` | fn | `crates/pipeline/src/tools.rs:786` | Skill invocation gate: lifecycle (`Active`-only) → profile (`allowed_skills`) → parameter schema (hand-rolled `type`/`required`/`properties` subset, depth-guarded, fail-closed on unrecognised `type` or a `false` sub-schema). Returns an opaque `ValidatedSkillInvocation` carrying the resolved `tool_call_sequence`. | skills, validation, security, pipeline |
 | `ValidatedSkillInvocation` | struct | `crates/pipeline/src/tools.rs:618` | struct in crates/pipeline/src/tools.rs | core, pipeline |
 | `ValidationKind` | enum | `crates/pipeline/src/graph.rs:115` | enum in crates/pipeline/src/graph.rs | core, pipeline |
 | `ValidationRecord` | struct | `crates/pipeline/src/audit.rs:65` | struct in crates/pipeline/src/audit.rs | core, pipeline |
