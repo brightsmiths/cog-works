@@ -931,3 +931,191 @@ fn prop_run_deterministic_alignment_never_panics() {
         let _ = run_deterministic_alignment(&inputs, &node_output);
     });
 }
+
+// ─── Group H: PR #170 review remediation regressions ─────────────────────────
+//
+// These tests target three review findings on `run_deterministic_alignment`
+// (see PR #170 review comments on `alignment.rs`):
+//
+// 1. `check_scope_and_protected_paths` builds each `ProtectedPath.pattern`
+//    from `ArtifactPath::as_str()` unescaped, so a *literal* protected path
+//    containing glob metacharacters (`[`, `]`, `{`, `}`, `*`, `?`) does not
+//    protect itself, because those characters are reinterpreted as glob
+//    syntax rather than matched literally. The fix escapes glob
+//    metacharacters (e.g. via `globset::escape`) when adapting
+//    `ArtifactPath` → `ProtectedPath`.
+// 3. `classify_artifact_key` checks protected paths against the *parsed,
+//    normalized* `path`, but checks scope containment against the *raw* `key`
+//    string. Since `ArtifactPath::new` strips a leading `./`, a key like
+//    `"./src/main.rs"` normalizes to `"src/main.rs"` but the scope check
+//    still matches the un-normalized raw string, producing a spurious
+//    `ScopeExceeded` finding for an in-scope artifact. The fix matches
+//    `path.as_str()` instead of `key`.
+// 4. `deterministic_finding`'s callers interpolate untrusted,
+//    LLM-influenced strings (artifact keys, slot names) directly into
+//    `AlignmentFinding.description` with no control-character handling and
+//    no length bound. Since findings feed into rework-loop prompts sent back
+//    to an LLM, a crafted key with embedded control characters or an
+//    extreme length could inject into, or blow up, that downstream prompt.
+// The fixtures below are deliberately chosen so that each test FAILS against
+// the current (unfixed) implementation, proving each defect is real rather
+// than already covered by the existing suite above.
+
+/// Item 1: a protected path containing `[`/`]` glob metacharacters must
+/// protect the literal file of the same name. Pre-fix, the unescaped
+/// pattern `"src/[id].rs"` is compiled as a glob where `[id]` is a
+/// single-character class (matching one of `i` or `d`), so it does not match
+/// its own four-character literal span `[id]` and the artifact slips through
+/// unprotected.
+#[test]
+fn test_protected_literal_path_with_bracket_metacharacters_protects_itself() {
+    let inputs = declared_inputs(&[], &["**"], &["src/[id].rs"]);
+    let node_output = output(&["src/[id].rs"]);
+
+    let findings = run_deterministic_alignment(&inputs, &node_output);
+
+    assert_eq!(
+        count_of(&findings, MisalignmentType::ScopeExceeded),
+        1,
+        "a declared protected path containing glob metacharacters ('[', ']') must protect \
+         the literal artifact of the same name once the pattern is escaped, got {findings:?}"
+    );
+}
+
+/// Item 1, second metacharacter class: a protected path containing `{`/`}`
+/// must likewise protect the literal file of the same name. Pre-fix, the
+/// unescaped pattern `"a{b}.md"` is compiled as a glob alternation group
+/// (`{b}` matching the single literal `b`), so the pattern only matches
+/// `"ab.md"`, never the literal eight-character string `"a{b}.md"` itself.
+#[test]
+fn test_protected_literal_path_with_brace_metacharacters_protects_itself() {
+    let inputs = declared_inputs(&[], &["**"], &["a{b}.md"]);
+    let node_output = output(&["a{b}.md"]);
+
+    let findings = run_deterministic_alignment(&inputs, &node_output);
+
+    assert_eq!(
+        count_of(&findings, MisalignmentType::ScopeExceeded),
+        1,
+        "a declared protected path containing glob metacharacters ('{{', '}}') must protect \
+         the literal artifact of the same name once the pattern is escaped, got {findings:?}"
+    );
+}
+
+/// Item 1 companion: escaping the protected pattern must not leave it
+/// over-broad. Pre-fix, the unescaped pattern `"src/[id].rs"` coincidentally
+/// matches the unrelated key `"src/i.rs"` (via the `[id]` character class
+/// matching a lone `i`), wrongly protecting a file that was never declared.
+/// Once the pattern is escaped to match only the literal `"src/[id].rs"`,
+/// this unrelated key must not be flagged.
+#[test]
+fn test_protected_literal_path_escaping_does_not_match_unrelated_coincidental_key() {
+    let inputs = declared_inputs(&[], &["**"], &["src/[id].rs"]);
+    let node_output = output(&["src/i.rs"]);
+
+    let findings = run_deterministic_alignment(&inputs, &node_output);
+
+    assert!(
+        findings.is_empty(),
+        "escaping the protected pattern 'src/[id].rs' must not leave it matching the \
+         unrelated key 'src/i.rs', which only matched under the old, unescaped \
+         character-class interpretation; got {findings:?}"
+    );
+}
+
+/// Item 3: the scope-containment check must operate on the same normalized
+/// path as the protected-path check. `ArtifactPath::new` strips a leading
+/// `./`, so the artifact key `"./src/main.rs"` normalizes to `"src/main.rs"`,
+/// which exactly matches the deliberately non-wildcard approved pattern
+/// `"src/main.rs"`. Pre-fix, the scope check matches the *raw* key
+/// `"./src/main.rs"` against that exact-match pattern, which never matches
+/// (the leading `./` makes the raw string differ from the pattern), so a
+/// fully in-scope artifact is wrongly flagged `ScopeExceeded`.
+#[test]
+fn test_scope_check_uses_normalized_path_not_raw_key_with_leading_dot_slash() {
+    let inputs = declared_inputs(&[], &["src/main.rs"], &[]);
+    let node_output = output(&["./src/main.rs"]);
+
+    let findings = run_deterministic_alignment(&inputs, &node_output);
+
+    assert!(
+        findings.is_empty(),
+        "artifact key './src/main.rs' normalizes (via ArtifactPath::new, which strips a \
+         leading './') to 'src/main.rs', which exactly matches the approved pattern \
+         'src/main.rs'; the scope check must match on the normalized path, not the raw \
+         key, got {findings:?}"
+    );
+}
+
+/// Item 4: a `ScopeExceeded` finding's description must never carry a raw
+/// control character from an untrusted (LLM-generated) artifact key.
+/// Findings feed into rework-loop prompts sent back to an LLM, so an
+/// embedded newline in the key must not survive verbatim into the
+/// description text.
+#[test]
+fn test_scope_exceeded_description_does_not_contain_raw_newline_from_artifact_key() {
+    let inputs = declared_inputs(&[], &["allowed/**"], &[]);
+    let node_output = output(&["evil\nkey"]);
+
+    let findings = run_deterministic_alignment(&inputs, &node_output);
+
+    let finding = findings
+        .iter()
+        .find(|f| f.misalignment == MisalignmentType::ScopeExceeded)
+        .expect("expected a ScopeExceeded finding for the out-of-scope key");
+    assert!(
+        !finding.description.contains('\n'),
+        "finding description must not contain a raw newline byte copied verbatim from an \
+         untrusted artifact key, got: {:?}",
+        finding.description
+    );
+}
+
+/// Item 4 companion: a `ScopeExceeded` finding's description must be bounded
+/// in length even when the untrusted artifact key is extremely long (here,
+/// 500 characters). The 400-character threshold leaves ample headroom for
+/// the fixed prose around the key while still proving truncation actually
+/// happened rather than the raw key appearing verbatim.
+#[test]
+fn test_scope_exceeded_description_is_bounded_for_extremely_long_artifact_key() {
+    let long_key = "a".repeat(500);
+    let inputs = declared_inputs(&[], &["allowed/**"], &[]);
+    let node_output = output(&[long_key.as_str()]);
+
+    let findings = run_deterministic_alignment(&inputs, &node_output);
+
+    let finding = findings
+        .iter()
+        .find(|f| f.misalignment == MisalignmentType::ScopeExceeded)
+        .expect("expected a ScopeExceeded finding for the out-of-scope key");
+    assert!(
+        finding.description.len() < 400,
+        "finding description must truncate an overlong (500-char) artifact key rather than \
+         interpolating it verbatim, got description of length {}: {:?}",
+        finding.description.len(),
+        finding.description
+    );
+}
+
+/// Item 4, `check_required_slots` side: a `Missing` finding's description
+/// must likewise never carry a raw control character from an untrusted
+/// required-slot name (slot names, like artifact keys, are declared data
+/// that can originate from upstream LLM-influenced configuration).
+#[test]
+fn test_missing_finding_description_does_not_contain_raw_newline_from_slot_name() {
+    let inputs = declared_inputs(&["evil\nslot"], &["**"], &[]);
+    let node_output = output(&[]);
+
+    let findings = run_deterministic_alignment(&inputs, &node_output);
+
+    let finding = findings
+        .iter()
+        .find(|f| f.misalignment == MisalignmentType::Missing)
+        .expect("expected a Missing finding for the absent slot");
+    assert!(
+        !finding.description.contains('\n'),
+        "finding description must not contain a raw newline byte copied verbatim from an \
+         untrusted required-slot name, got: {:?}",
+        finding.description
+    );
+}
