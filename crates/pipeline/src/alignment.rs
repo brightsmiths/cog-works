@@ -319,10 +319,39 @@ fn check_required_slots(
         .map(|slot| {
             deterministic_finding(
                 MisalignmentType::Missing,
-                format!("Required output slot '{slot}' was not populated."),
+                format!(
+                    "Required output slot '{}' was not populated.",
+                    sanitize_for_description(slot)
+                ),
             )
         })
         .collect()
+}
+
+/// Maximum number of characters of a user- or LLM-influenced string (an
+/// artifact key or slot name) that may appear verbatim in a finding
+/// description. Longer values are truncated; this keeps descriptions bounded
+/// even for adversarially long node output, since findings are documented as
+/// feeding into rework-loop prompts sent back to an LLM.
+const MAX_DESCRIPTION_KEY_LEN: usize = 200;
+
+/// Escapes control characters (including newlines) and truncates `s` to
+/// [`MAX_DESCRIPTION_KEY_LEN`] characters before it is embedded in an
+/// [`AlignmentFinding::description`]. Prevents a crafted artifact key or slot
+/// name from injecting raw newlines/control bytes or an unbounded amount of
+/// text into a description that may later be replayed into an LLM prompt.
+fn sanitize_for_description(s: &str) -> String {
+    let total_chars = s.chars().count();
+    let escaped: String = s
+        .chars()
+        .take(MAX_DESCRIPTION_KEY_LEN)
+        .flat_map(char::escape_default)
+        .collect();
+    if total_chars > MAX_DESCRIPTION_KEY_LEN {
+        format!("{escaped}...")
+    } else {
+        escaped
+    }
 }
 
 /// Builds a blocking [`AlignmentFinding`] for [`AlignmentCheckType::Deterministic`].
@@ -356,7 +385,14 @@ fn check_scope_and_protected_paths(
         .protected_paths
         .iter()
         .map(|path| ProtectedPath {
-            pattern: path.as_str().to_string(),
+            // `ProtectedPath.pattern` is compiled as a glob by
+            // `security::is_protected`/`build_glob_set`, but a declared
+            // protected path is a concrete artifact location, not a glob —
+            // it must match itself literally even when it contains glob
+            // metacharacters (e.g. `src/[id].rs`). Escaping preserves `/` so
+            // the existing anchored-vs-any-depth logic in
+            // `normalize_glob_pattern`/`build_glob_set` still applies.
+            pattern: globset::escape(path.as_str()),
             reason: "declared protected path".to_string(),
         })
         .collect();
@@ -397,7 +433,11 @@ fn classify_artifact_key(
     if security::is_protected(&path, protected) {
         return Some(scope_exceeded_finding(key, "matches a protected path"));
     }
-    if !approved_set.is_match(key) {
+    // Match the normalized, parsed path (not the raw `key`) so that both
+    // checks agree on the same canonical form — e.g. a leading `./` is
+    // stripped by `ArtifactPath::new` and must be stripped consistently
+    // before either check runs.
+    if !approved_set.is_match(path.as_str()) {
         return Some(scope_exceeded_finding(
             key,
             "falls outside the approved scope",
@@ -408,10 +448,14 @@ fn classify_artifact_key(
 
 /// Builds a `ScopeExceeded` finding for an out-of-scope or protected artifact
 /// key. `ScopeExceeded` findings are always blocking.
+///
+/// `key` is sanitized (control characters escaped, length bounded) before
+/// being embedded in the description, since it may be an untrusted,
+/// LLM-influenced artifact key that later feeds into a rework-loop prompt.
 fn scope_exceeded_finding(key: &str, reason: &str) -> AlignmentFinding {
     deterministic_finding(
         MisalignmentType::ScopeExceeded,
-        format!("Artifact '{key}' {reason}."),
+        format!("Artifact '{}' {reason}.", sanitize_for_description(key)),
     )
 }
 
