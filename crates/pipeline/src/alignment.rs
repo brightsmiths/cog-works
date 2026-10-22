@@ -344,10 +344,9 @@ fn deterministic_finding(misalignment: MisalignmentType, description: String) ->
 /// out of scope and protected yields exactly one finding (protected-path
 /// precedence, mirroring `security::validate_scope`'s `ASSERT-SEC-005` rule).
 ///
-/// For each artifact key: if it parses as an [`ArtifactPath`] and matches a
-/// protected path, emit one finding and skip the scope check for that key.
-/// Otherwise (including keys that fail `ArtifactPath::new`), fall back to
-/// the scope-containment check (check 2) against the raw string key.
+/// For each artifact key, [`classify_artifact_key`] decides the outcome. Keys
+/// that fail `ArtifactPath::new` are rejected fail-closed (see that
+/// function's docs) rather than falling back to the raw-string scope check.
 fn check_scope_and_protected_paths(
     inputs: &DeclaredNodeInputs,
     node_output: &NodeOutput,
@@ -365,21 +364,46 @@ fn check_scope_and_protected_paths(
     node_output
         .artifacts
         .keys()
-        .filter_map(|key| {
-            let is_protected = ArtifactPath::new(key.clone())
-                .is_some_and(|path| security::is_protected(&path, &protected));
-            if is_protected {
-                return Some(scope_exceeded_finding(key, "matches a protected path"));
-            }
-            if !approved_set.is_match(key.as_str()) {
-                return Some(scope_exceeded_finding(
-                    key,
-                    "falls outside the approved scope",
-                ));
-            }
-            None
-        })
+        .filter_map(|key| classify_artifact_key(key, &approved_set, &protected))
         .collect()
+}
+
+/// Classifies a single artifact key against the protected-path and
+/// approved-scope rules, returning the finding (if any) for that key.
+///
+/// Fail-closed rule: if `key` does not parse as a valid [`ArtifactPath`]
+/// (e.g. it contains a `..` traversal component), it is rejected immediately
+/// with a blocking `ScopeExceeded` finding. It is never matched against the
+/// raw-string approved-scope glob, because an unresolved string cannot be
+/// trusted to reflect the artifact's true, path-resolved location — doing so
+/// previously allowed a `..`-containing key to defeat both the protected-path
+/// check (which requires a parsed `ArtifactPath`) and the scope check
+/// (which matched the raw string) simultaneously.
+///
+/// Only when `key` parses successfully does the existing protected-path-then-
+/// scope precedence apply (protected match wins over, and suppresses, a
+/// redundant scope violation for the same artifact).
+fn classify_artifact_key(
+    key: &str,
+    approved_set: &globset::GlobSet,
+    protected: &[ProtectedPath],
+) -> Option<AlignmentFinding> {
+    let Some(path) = ArtifactPath::new(key) else {
+        return Some(scope_exceeded_finding(
+            key,
+            "is not a valid artifact path (e.g. contains an invalid component such as '..')",
+        ));
+    };
+    if security::is_protected(&path, protected) {
+        return Some(scope_exceeded_finding(key, "matches a protected path"));
+    }
+    if !approved_set.is_match(key) {
+        return Some(scope_exceeded_finding(
+            key,
+            "falls outside the approved scope",
+        ));
+    }
+    None
 }
 
 /// Builds a `ScopeExceeded` finding for an out-of-scope or protected artifact
