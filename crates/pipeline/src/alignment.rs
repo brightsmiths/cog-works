@@ -350,20 +350,33 @@ fn check_required_slots(
 /// feeding into rework-loop prompts sent back to an LLM.
 const MAX_DESCRIPTION_KEY_LEN: usize = 200;
 
-/// Escapes control characters (including newlines) and truncates `s` to
-/// [`MAX_DESCRIPTION_KEY_LEN`] characters before it is embedded in an
-/// [`AlignmentFinding::description`]. Prevents a crafted artifact key or slot
-/// name from injecting raw newlines/control bytes or an unbounded amount of
-/// text into a description that may later be replayed into an LLM prompt.
+/// Upper bound on the number of *raw* input characters considered before
+/// escaping. This exists only to cap the cost of escaping pathologically
+/// long input (e.g. a multi-megabyte artifact key); it is deliberately much
+/// larger than [`MAX_DESCRIPTION_KEY_LEN`] so it never affects the final
+/// truncation bound, which is enforced on the escaped output instead.
+const MAX_RAW_INPUT_LEN: usize = 2000;
+
+/// Escapes control characters (including newlines) in `s` and truncates the
+/// *escaped* output to [`MAX_DESCRIPTION_KEY_LEN`] characters before it is
+/// embedded in an [`AlignmentFinding::description`]. Escaping before
+/// truncating (rather than the reverse) keeps the final description length
+/// tightly bounded even when the input is composed of characters that
+/// expand under [`char::escape_default`] (e.g. `'\u{0}'` expands to the
+/// 5-character sequence `\u{0}`); truncating the raw input first would let
+/// such characters blow past the intended bound after escaping. Prevents a
+/// crafted artifact key or slot name from injecting raw newlines/control
+/// bytes or an unbounded amount of text into a description that may later be
+/// replayed into an LLM prompt.
 fn sanitize_for_description(s: &str) -> String {
-    let total_chars = s.chars().count();
     let escaped: String = s
         .chars()
-        .take(MAX_DESCRIPTION_KEY_LEN)
+        .take(MAX_RAW_INPUT_LEN)
         .flat_map(char::escape_default)
         .collect();
-    if total_chars > MAX_DESCRIPTION_KEY_LEN {
-        format!("{escaped}...")
+    if escaped.chars().count() > MAX_DESCRIPTION_KEY_LEN {
+        let truncated: String = escaped.chars().take(MAX_DESCRIPTION_KEY_LEN).collect();
+        format!("{truncated}...")
     } else {
         escaped
     }
