@@ -1097,6 +1097,43 @@ fn test_scope_exceeded_description_is_bounded_for_extremely_long_artifact_key() 
     );
 }
 
+/// Item 4 companion (expansion-prone characters): the description length
+/// bound must hold on the *escaped* output, not on the raw input. `sanitize_
+/// for_description` truncates to `MAX_DESCRIPTION_KEY_LEN` (200) characters
+/// before escaping, but `char::escape_default` can expand a single input
+/// character into several output characters (e.g. the NUL control character
+/// `'\u{0}'` escapes to the 5-character sequence `\u{0}`). Truncating first
+/// means a 200-character run of NUL bytes escapes to roughly 1000 output
+/// characters, not ~200, defeating the purpose of bounding description
+/// length against adversarial input. This test uses 200 repetitions of NUL
+/// (exactly at `MAX_DESCRIPTION_KEY_LEN`, so no raw-length truncation marker
+/// is even needed to blow the bound) and asserts a generous-but-meaningful
+/// 600-character ceiling: comfortably below the ~1000+ characters the
+/// pre-fix order of operations produces, and comfortably above what a
+/// correct escape-then-truncate (or equivalent) bound would produce.
+#[test]
+fn test_scope_exceeded_description_is_bounded_even_for_expansion_prone_characters() {
+    let expansion_prone_key = "\0".repeat(200);
+    let inputs = declared_inputs(&[], &["allowed/**"], &[]);
+    let node_output = output(&[expansion_prone_key.as_str()]);
+
+    let findings = run_deterministic_alignment(&inputs, &node_output);
+
+    let finding = findings
+        .iter()
+        .find(|f| f.misalignment == MisalignmentType::ScopeExceeded)
+        .expect("expected a ScopeExceeded finding for the out-of-scope key");
+    assert!(
+        finding.description.len() < 600,
+        "finding description must bound the *escaped* output length, not just the raw \
+         input length; a 200-character run of NUL bytes (each expanding to the 5-character \
+         escape sequence `\\u{{0}}`) must not be allowed to produce a description of \
+         roughly 1000+ characters, got description of length {}: {:?}",
+        finding.description.len(),
+        finding.description
+    );
+}
+
 /// Item 4, `check_required_slots` side: a `Missing` finding's description
 /// must likewise never carry a raw control character from an untrusted
 /// required-slot name (slot names, like artifact keys, are declared data
