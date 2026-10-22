@@ -615,37 +615,144 @@ fn test_artifact_both_out_of_scope_and_protected_produces_single_finding() {
     );
 }
 
-/// Spec-gap edge case: an artifact key that cannot be parsed as an
-/// `ArtifactPath` (contains a `..` traversal component) is skipped by the
-/// protected-path check (check 3), since `is_protected` requires a parsed
-/// `ArtifactPath`. The approved scope is set to `"**"` so check 2 does not
-/// also contribute a finding, isolating check 3's behaviour.
+/// Security remediation (fail-closed, path-traversal bypass): an artifact
+/// key that cannot be parsed as an `ArtifactPath` (contains a `..`
+/// traversal component) must never be silently waved through. Previously
+/// such a key was skipped by the protected-path check (check 3, since
+/// `is_protected` requires a parsed `ArtifactPath`) *and* matched as a raw,
+/// unresolved string by the scope check (check 2), so a permissive pattern
+/// like `"**"` produced zero findings for a key that, once path-resolved,
+/// could target a protected file. The corrected behaviour is fail-closed:
+/// an unparseable key always produces exactly one blocking
+/// `ScopeExceeded` finding, regardless of how permissive the approved
+/// scope is.
 #[test]
-fn test_unparseable_artifact_key_is_skipped_by_protected_path_check() {
+fn test_unparseable_artifact_key_produces_blocking_finding_fail_closed() {
     let inputs = declared_inputs(&[], &["**"], &["b"]);
     let node_output = output(&["a/../b"]);
 
     let findings = run_deterministic_alignment(&inputs, &node_output);
 
+    assert_eq!(
+        findings.len(),
+        1,
+        "an unparseable artifact key must produce exactly one finding, got {findings:?}"
+    );
+    assert_eq!(
+        findings[0].misalignment,
+        MisalignmentType::ScopeExceeded,
+        "the fail-closed finding for an unparseable key must be ScopeExceeded, got {findings:?}"
+    );
     assert!(
-        findings.is_empty(),
-        "an artifact key that fails ArtifactPath::new must not be flagged by the \
-         protected-path check, got {findings:?}"
+        findings[0].blocking,
+        "the fail-closed finding for an unparseable key must be blocking, got {findings:?}"
     );
 }
 
 /// Robustness companion to the above: the unparseable-key case must not
-/// panic, regardless of how check 3 is implemented internally. Note that
-/// `required_output_slots` entries are plain `String`s (no `ArtifactPath`
-/// parsing applies to them), so an unparseable-looking slot name there is
-/// unremarkable; only the artifact *keys* in `node_output.artifacts` are
-/// exercised against `ArtifactPath::new` by check 3.
+/// panic, regardless of how the checks are implemented internally. Note
+/// that `required_output_slots` entries are plain `String`s (no
+/// `ArtifactPath` parsing applies to them), so an unparseable-looking slot
+/// name there is unremarkable; only the artifact *keys* in
+/// `node_output.artifacts` are exercised against `ArtifactPath::new`.
+/// Strengthened per the fail-closed remediation: both artifact keys here
+/// (`"a/../b"` containing a `..` component, and `""` the empty string) fail
+/// `ArtifactPath::new`, so the call must not panic AND must yield a
+/// non-empty findings vec (the fail-closed behaviour is observable, not
+/// just silently absorbed).
 #[test]
 fn test_unparseable_artifact_key_does_not_panic() {
     let inputs = declared_inputs(&["a/../b"], &["**"], &["b"]);
     let node_output = output(&["a/../b", ""]);
 
-    let _ = run_deterministic_alignment(&inputs, &node_output);
+    let findings = run_deterministic_alignment(&inputs, &node_output);
+
+    assert!(
+        !findings.is_empty(),
+        "two unparseable artifact keys must still produce observable fail-closed findings, \
+         got {findings:?}"
+    );
+}
+
+/// Security remediation: the original bypass report used a narrow approved
+/// scope (`"allowed/**"`), not `"**"`, where the unparseable key's *raw*
+/// string form happens to coincidentally match a scope pattern that looks
+/// plausible (`"a/**"`) even though the key contains a `..` segment that
+/// would resolve outside of it. The fail-closed check must fire regardless
+/// — an unparseable key can never be trusted as a scope-approved member,
+/// no matter what the raw string coincidentally lines up with.
+#[test]
+fn test_unparseable_artifact_key_flagged_even_when_raw_string_coincidentally_matches_narrow_scope()
+{
+    let inputs = declared_inputs(&[], &["a/**"], &["b"]);
+    let node_output = output(&["a/../b"]);
+
+    let findings = run_deterministic_alignment(&inputs, &node_output);
+
+    assert_eq!(
+        findings.len(),
+        1,
+        "an unparseable key must be flagged even though its raw string coincidentally \
+         matches the approved scope pattern 'a/**', got {findings:?}"
+    );
+    assert_eq!(findings[0].misalignment, MisalignmentType::ScopeExceeded);
+    assert!(findings[0].blocking);
+}
+
+/// Companion to the above: when the unparseable key's raw string form does
+/// *not* match the approved scope either, the fail-closed check must still
+/// produce exactly **one** finding for that key — not two (one from the
+/// fail-closed rule and a redundant one from the raw-string scope
+/// fallback). This proves the fail-closed rule short-circuits the scope
+/// check for unparseable keys rather than running both.
+#[test]
+fn test_unparseable_artifact_key_produces_exactly_one_finding_when_raw_string_also_out_of_scope() {
+    let inputs = declared_inputs(&[], &["allowed/**"], &["b"]);
+    let node_output = output(&["a/../b"]);
+
+    let findings = run_deterministic_alignment(&inputs, &node_output);
+
+    assert_eq!(
+        findings.len(),
+        1,
+        "an unparseable key whose raw string also fails the scope pattern must still \
+         produce exactly one finding (no double-counting), got {findings:?}"
+    );
+    assert_eq!(findings[0].misalignment, MisalignmentType::ScopeExceeded);
+    assert!(findings[0].blocking);
+}
+
+/// Property: regardless of what the approved-scope patterns are — maximally
+/// permissive, narrowly-but-coincidentally matching, or entirely
+/// non-matching — an unparseable artifact key always produces exactly one
+/// blocking `ScopeExceeded` finding, because it can never be a trusted
+/// member of an approved-scope decision.
+#[test]
+fn prop_unparseable_artifact_key_always_produces_exactly_one_scope_exceeded_finding() {
+    proptest::proptest!(|(scope_patterns in proptest::collection::vec(
+        proptest::sample::select(vec![
+            "**".to_string(),
+            "a/**".to_string(),
+            "allowed/**".to_string(),
+            "b".to_string(),
+            "".to_string(),
+        ]),
+        0..4usize,
+    ))| {
+        let inputs = declared_inputs(&[], &scope_patterns.iter().map(String::as_str).collect::<Vec<_>>(), &[]);
+        let node_output = output(&["a/../b"]);
+
+        let findings = run_deterministic_alignment(&inputs, &node_output);
+
+        assert_eq!(
+            findings.len(),
+            1,
+            "an unparseable key must always produce exactly one finding regardless of \
+             approved_scope patterns {scope_patterns:?}, got {findings:?}"
+        );
+        assert_eq!(findings[0].misalignment, MisalignmentType::ScopeExceeded);
+        assert!(findings[0].blocking);
+    });
 }
 
 // ─── Group F: determinism / stub-killing ─────────────────────────────────────
