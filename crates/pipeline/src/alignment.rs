@@ -242,6 +242,21 @@ pub struct DeclaredNodeInputs {
     /// These are the globally-protected paths (from the safety registry plus
     /// pipeline configuration). Any match generates a
     /// [`MisalignmentType::ScopeExceeded`] finding.
+    ///
+    /// # Matching semantics differ from a literal "concrete path"
+    ///
+    /// Although each entry is an [`ArtifactPath`] (a single, concrete, already
+    /// path-resolved value — not a glob pattern), [`run_deterministic_alignment`]
+    /// checks it via [`crate::security::is_protected`], which matches using
+    /// `.gitignore`-style glob semantics. A path containing no `/` separator
+    /// (e.g. `"SECURITY.md"`) therefore matches at **any depth** in the tree —
+    /// `"docs/SECURITY.md"` and `"a/b/SECURITY.md"` are also protected, not
+    /// only the exact repository-root file. A path containing a `/` matches
+    /// only that exact relative location. This is intentional: it over-blocks
+    /// (protects more than the literal entry) rather than under-blocks, so it
+    /// never weakens the guarantee — but callers populating this field should
+    /// use a `/`-qualified path (e.g. `"docs/SECURITY.md"`, not `"SECURITY.md"`)
+    /// whenever they mean to protect only one specific location.
     pub protected_paths: Vec<ArtifactPath>,
 }
 

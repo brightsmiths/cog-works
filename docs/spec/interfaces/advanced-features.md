@@ -259,6 +259,39 @@ cross-crate dependency on PR 9.
 **Returns**: Zero or more `AlignmentFinding` values. An empty vec means the
 structural alignment checks all passed.
 
+**Edge-case behaviour** (resolved during implementation; recorded here so the
+spec matches the shipped behaviour):
+
+- **Unparseable artifact keys fail closed.** An artifact key in
+  `node_output.artifacts` that cannot be parsed as a valid `ArtifactPath`
+  (e.g. it contains a `..` traversal component, or is empty) is **never**
+  matched against the raw-string approved-scope pattern. It immediately
+  produces its own blocking `ScopeExceeded` finding instead. This is
+  deliberate and externally visible: an unresolved string cannot be trusted
+  to reflect the artifact's true, path-resolved location, so falling back to
+  a raw-string scope match would let a crafted key (e.g.
+  `"src/../.cogworks/constitutional-rules.md"`) defeat both the scope check
+  and the protected-path check simultaneously.
+- **`protected_paths` adaptation for matching.** `DeclaredNodeInputs.protected_paths`
+  holds concrete, already-resolved `ArtifactPath` values (not glob patterns).
+  To reuse `security::is_protected`'s matching engine, each entry's string
+  value is glob-escaped (so metacharacters such as `[`, `]`, `{`, `}`, `*`,
+  `?` are treated literally) before being passed in as a `ProtectedPath`
+  pattern. A path containing no `/` still matches at any tree depth (see
+  `DeclaredNodeInputs::protected_paths` rustdoc for the full rationale) —
+  this over-blocks rather than under-blocks, so it does not weaken the
+  guarantee.
+- **Protected-path precedence.** When a single artifact is both outside the
+  approved scope *and* matches a protected path, exactly one finding is
+  produced (the protected-path reason wins) — not two. This mirrors the
+  precedence rule `security::validate_scope` already applies between
+  `ProtectedPathViolation` and `UnauthorizedCapability` (see `ASSERT-SEC-005`).
+- **No deduplication of required-slot names.** If `required_output_slots`
+  contains the same slot name more than once and it is absent from
+  `node_output.artifacts`, each duplicate occurrence produces its own
+  `Missing` finding (callers are expected not to declare duplicates; the
+  function does not defensively dedupe).
+
 ---
 
 ## Part 3 — Traceability Matrix (`traceability.rs`)
