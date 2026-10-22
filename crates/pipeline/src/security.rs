@@ -1032,7 +1032,11 @@ pub fn validate_scope(
 
 /// Builds a `GlobSet` from a slice of pattern strings.
 /// Invalid patterns are silently skipped (fail-open).
-fn build_glob_set(patterns: &[String]) -> globset::GlobSet {
+///
+/// Widened to `pub(crate)` so [`crate::alignment::run_deterministic_alignment`]
+/// can reuse the exact same glob-normalization semantics as [`validate_scope`]
+/// for its scope-containment check, instead of duplicating this logic.
+pub(crate) fn build_glob_set(patterns: &[String]) -> globset::GlobSet {
     let mut builder = GlobSetBuilder::new();
     for p in patterns {
         let normalized = normalize_glob_pattern(p);

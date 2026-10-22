@@ -39,7 +39,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    execution::NodeOutput, identifiers::ArtifactPath, security::ApprovedScope,
+    execution::NodeOutput,
+    identifiers::ArtifactPath,
+    security::{self, ApprovedScope, ProtectedPath},
     types::AlignmentScore,
 };
 
@@ -240,6 +242,21 @@ pub struct DeclaredNodeInputs {
     /// These are the globally-protected paths (from the safety registry plus
     /// pipeline configuration). Any match generates a
     /// [`MisalignmentType::ScopeExceeded`] finding.
+    ///
+    /// # Matching semantics differ from a literal "concrete path"
+    ///
+    /// Although each entry is an [`ArtifactPath`] (a single, concrete, already
+    /// path-resolved value — not a glob pattern), [`run_deterministic_alignment`]
+    /// checks it via [`crate::security::is_protected`], which matches using
+    /// `.gitignore`-style glob semantics. A path containing no `/` separator
+    /// (e.g. `"SECURITY.md"`) therefore matches at **any depth** in the tree —
+    /// `"docs/SECURITY.md"` and `"a/b/SECURITY.md"` are also protected, not
+    /// only the exact repository-root file. A path containing a `/` matches
+    /// only that exact relative location. This is intentional: it over-blocks
+    /// (protects more than the literal entry) rather than under-blocks, so it
+    /// never weakens the guarantee — but callers populating this field should
+    /// use a `/`-qualified path (e.g. `"docs/SECURITY.md"`, not `"SECURITY.md"`)
+    /// whenever they mean to protect only one specific location.
     pub protected_paths: Vec<ArtifactPath>,
 }
 
@@ -294,8 +311,182 @@ pub struct DeclaredNodeInputs {
 ///
 /// See `docs/spec/interfaces/advanced-features.md` §run_deterministic_alignment.
 pub fn run_deterministic_alignment(
-    _inputs: &DeclaredNodeInputs,
-    _node_output: &NodeOutput,
+    inputs: &DeclaredNodeInputs,
+    node_output: &NodeOutput,
 ) -> Vec<AlignmentFinding> {
-    todo!("See docs/spec/interfaces/advanced-features.md §Alignment Verification")
+    let mut findings = check_required_slots(inputs, node_output);
+    findings.extend(check_scope_and_protected_paths(inputs, node_output));
+    findings
 }
+
+/// Check 1: every declared required output slot must be a key in
+/// `node_output.artifacts`. One [`MisalignmentType::Missing`] finding is
+/// produced per absent slot (duplicates in `required_output_slots` are not
+/// deduplicated — each absent occurrence produces its own finding).
+fn check_required_slots(
+    inputs: &DeclaredNodeInputs,
+    node_output: &NodeOutput,
+) -> Vec<AlignmentFinding> {
+    inputs
+        .required_output_slots
+        .iter()
+        .filter(|slot| !node_output.artifacts.contains_key(slot.as_str()))
+        .map(|slot| {
+            deterministic_finding(
+                MisalignmentType::Missing,
+                format!(
+                    "Required output slot '{}' was not populated.",
+                    sanitize_for_description(slot)
+                ),
+            )
+        })
+        .collect()
+}
+
+/// Maximum number of characters of a user- or LLM-influenced string (an
+/// artifact key or slot name) that may appear verbatim in a finding
+/// description. Longer values are truncated; this keeps descriptions bounded
+/// even for adversarially long node output, since findings are documented as
+/// feeding into rework-loop prompts sent back to an LLM.
+const MAX_DESCRIPTION_KEY_LEN: usize = 200;
+
+/// Upper bound on the number of *raw* input characters considered before
+/// escaping. This exists only to cap the cost of escaping pathologically
+/// long input (e.g. a multi-megabyte artifact key); it is deliberately much
+/// larger than [`MAX_DESCRIPTION_KEY_LEN`] so it never affects the final
+/// truncation bound, which is enforced on the escaped output instead.
+const MAX_RAW_INPUT_LEN: usize = 2000;
+
+/// Escapes control characters (including newlines) in `s` and truncates the
+/// *escaped* output to [`MAX_DESCRIPTION_KEY_LEN`] characters before it is
+/// embedded in an [`AlignmentFinding::description`]. Escaping before
+/// truncating (rather than the reverse) keeps the final description length
+/// tightly bounded even when the input is composed of characters that
+/// expand under [`char::escape_default`] (e.g. `'\u{0}'` expands to the
+/// 5-character sequence `\u{0}`); truncating the raw input first would let
+/// such characters blow past the intended bound after escaping. Prevents a
+/// crafted artifact key or slot name from injecting raw newlines/control
+/// bytes or an unbounded amount of text into a description that may later be
+/// replayed into an LLM prompt.
+fn sanitize_for_description(s: &str) -> String {
+    let escaped: String = s
+        .chars()
+        .take(MAX_RAW_INPUT_LEN)
+        .flat_map(char::escape_default)
+        .collect();
+    if escaped.chars().count() > MAX_DESCRIPTION_KEY_LEN {
+        let truncated: String = escaped.chars().take(MAX_DESCRIPTION_KEY_LEN).collect();
+        format!("{truncated}...")
+    } else {
+        escaped
+    }
+}
+
+/// Builds a blocking [`AlignmentFinding`] for [`AlignmentCheckType::Deterministic`].
+///
+/// All deterministic findings produced by this module are blocking (see
+/// module-level "Blocking vs. Non-Blocking Findings" docs), so this is the
+/// single construction point for both check 1 ([`check_required_slots`]) and
+/// checks 2/3 ([`scope_exceeded_finding`]).
+fn deterministic_finding(misalignment: MisalignmentType, description: String) -> AlignmentFinding {
+    AlignmentFinding {
+        check_type: AlignmentCheckType::Deterministic,
+        misalignment,
+        description,
+        blocking: true,
+    }
+}
+
+/// Checks 2 and 3, combined per artifact so that an artifact that is both
+/// out of scope and protected yields exactly one finding (protected-path
+/// precedence, mirroring `security::validate_scope`'s `ASSERT-SEC-005` rule).
+///
+/// For each artifact key, [`classify_artifact_key`] decides the outcome. Keys
+/// that fail `ArtifactPath::new` are rejected fail-closed (see that
+/// function's docs) rather than falling back to the raw-string scope check.
+fn check_scope_and_protected_paths(
+    inputs: &DeclaredNodeInputs,
+    node_output: &NodeOutput,
+) -> Vec<AlignmentFinding> {
+    let approved_set = security::build_glob_set(&inputs.approved_scope.artifact_patterns);
+    let protected: Vec<ProtectedPath> = inputs
+        .protected_paths
+        .iter()
+        .map(|path| ProtectedPath {
+            // `ProtectedPath.pattern` is compiled as a glob by
+            // `security::is_protected`/`build_glob_set`, but a declared
+            // protected path is a concrete artifact location, not a glob —
+            // it must match itself literally even when it contains glob
+            // metacharacters (e.g. `src/[id].rs`). Escaping preserves `/` so
+            // the existing anchored-vs-any-depth logic in
+            // `normalize_glob_pattern`/`build_glob_set` still applies.
+            pattern: globset::escape(path.as_str()),
+            reason: "declared protected path".to_string(),
+        })
+        .collect();
+
+    node_output
+        .artifacts
+        .keys()
+        .filter_map(|key| classify_artifact_key(key, &approved_set, &protected))
+        .collect()
+}
+
+/// Classifies a single artifact key against the protected-path and
+/// approved-scope rules, returning the finding (if any) for that key.
+///
+/// Fail-closed rule: if `key` does not parse as a valid [`ArtifactPath`]
+/// (e.g. it contains a `..` traversal component), it is rejected immediately
+/// with a blocking `ScopeExceeded` finding. It is never matched against the
+/// raw-string approved-scope glob, because an unresolved string cannot be
+/// trusted to reflect the artifact's true, path-resolved location — doing so
+/// previously allowed a `..`-containing key to defeat both the protected-path
+/// check (which requires a parsed `ArtifactPath`) and the scope check
+/// (which matched the raw string) simultaneously.
+///
+/// Only when `key` parses successfully does the existing protected-path-then-
+/// scope precedence apply (protected match wins over, and suppresses, a
+/// redundant scope violation for the same artifact).
+fn classify_artifact_key(
+    key: &str,
+    approved_set: &globset::GlobSet,
+    protected: &[ProtectedPath],
+) -> Option<AlignmentFinding> {
+    let Some(path) = ArtifactPath::new(key) else {
+        return Some(scope_exceeded_finding(
+            key,
+            "is not a valid artifact path (e.g. contains an invalid component such as '..')",
+        ));
+    };
+    if security::is_protected(&path, protected) {
+        return Some(scope_exceeded_finding(key, "matches a protected path"));
+    }
+    // Match the normalized, parsed path (not the raw `key`) so that both
+    // checks agree on the same canonical form — e.g. a leading `./` is
+    // stripped by `ArtifactPath::new` and must be stripped consistently
+    // before either check runs.
+    if !approved_set.is_match(path.as_str()) {
+        return Some(scope_exceeded_finding(
+            key,
+            "falls outside the approved scope",
+        ));
+    }
+    None
+}
+
+/// Builds a `ScopeExceeded` finding for an out-of-scope or protected artifact
+/// key. `ScopeExceeded` findings are always blocking.
+///
+/// `key` is sanitized (control characters escaped, length bounded) before
+/// being embedded in the description, since it may be an untrusted,
+/// LLM-influenced artifact key that later feeds into a rework-loop prompt.
+fn scope_exceeded_finding(key: &str, reason: &str) -> AlignmentFinding {
+    deterministic_finding(
+        MisalignmentType::ScopeExceeded,
+        format!("Artifact '{}' {reason}.", sanitize_for_description(key)),
+    )
+}
+
+#[cfg(test)]
+#[path = "alignment_tests.rs"]
+mod tests;
