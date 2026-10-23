@@ -120,6 +120,32 @@ impl HandlebarsTemplateEngine {
         self.required_vars.insert(name, required);
         Ok(())
     }
+
+    /// Looks up the declared required-variable list for `name`.
+    ///
+    /// Shared by [`TemplateEngine::render`] and
+    /// [`TemplateEngine::list_required_variables`] so both report an
+    /// identical [`TemplateError::NotFound`] for an unregistered template
+    /// name instead of duplicating the lookup-or-error logic.
+    fn required_vars_for(&self, name: &str) -> Result<&Vec<String>, TemplateError> {
+        self.required_vars
+            .get(name)
+            .ok_or_else(|| TemplateError::NotFound {
+                name: name.to_string(),
+            })
+    }
+
+    /// Builds a [`TemplateError::ConstraintViolation`] for `name`.
+    ///
+    /// Centralizes the error shape used by [`TemplateEngine::render`] for
+    /// both the handlebars runtime-error case and the empty-output case, so
+    /// the two call sites cannot drift in field construction.
+    fn constraint_violation(name: &str, message: impl Into<String>) -> TemplateError {
+        TemplateError::ConstraintViolation {
+            name: name.to_string(),
+            message: message.into(),
+        }
+    }
 }
 
 impl Default for HandlebarsTemplateEngine {
@@ -148,12 +174,7 @@ impl TemplateEngine for HandlebarsTemplateEngine {
         name: &str,
         context: HashMap<String, String>,
     ) -> Result<String, TemplateError> {
-        let required = self
-            .required_vars
-            .get(name)
-            .ok_or_else(|| TemplateError::NotFound {
-                name: name.to_string(),
-            })?;
+        let required = self.required_vars_for(name)?;
 
         let missing: Vec<String> = required
             .iter()
@@ -170,18 +191,13 @@ impl TemplateEngine for HandlebarsTemplateEngine {
         // (e.g. a resource limit) rather than a usage error — report it as a
         // constraint violation rather than leaking the raw handlebars error
         // detail.
-        let rendered = self.registry.render(name, &context).map_err(|error| {
-            TemplateError::ConstraintViolation {
-                name: name.to_string(),
-                message: error.to_string(),
-            }
-        })?;
+        let rendered = self
+            .registry
+            .render(name, &context)
+            .map_err(|error| Self::constraint_violation(name, error.to_string()))?;
 
         if rendered.is_empty() {
-            return Err(TemplateError::ConstraintViolation {
-                name: name.to_string(),
-                message: "rendered output is empty".to_string(),
-            });
+            return Err(Self::constraint_violation(name, "rendered output is empty"));
         }
 
         Ok(rendered)
@@ -195,12 +211,7 @@ impl TemplateEngine for HandlebarsTemplateEngine {
     ///
     /// See `docs/spec/interfaces/github-traits.md` §`TemplateEngine`.
     fn list_required_variables(&self, name: &str) -> Result<Vec<String>, TemplateError> {
-        self.required_vars
-            .get(name)
-            .cloned()
-            .ok_or_else(|| TemplateError::NotFound {
-                name: name.to_string(),
-            })
+        self.required_vars_for(name).cloned()
     }
 }
 
