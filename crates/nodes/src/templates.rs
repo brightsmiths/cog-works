@@ -729,6 +729,35 @@ mod tests {
     }
 
     #[test]
+    fn test_render_unregistered_partial_returns_constraint_violation() {
+        // Partial references (`{{> name}}`) are resolved at render time, not
+        // at registration time, so `register_template` happily accepts a
+        // template body that refers to a partial that was never registered.
+        // This exercises the handlebars-runtime-error branch in `render`
+        // (distinct from the empty-rendered-output branch exercised by the
+        // other `ConstraintViolation` tests) to confirm it is mapped to
+        // `ConstraintViolation` rather than panicking or leaking a different
+        // error variant.
+        let mut engine = HandlebarsTemplateEngine::new();
+        engine
+            .register_template("uses-partial", "{{> missing_partial}}", vec![])
+            .expect("registration must succeed: partial refs are not validated at register time");
+
+        let result = engine.render("uses-partial", HashMap::new());
+
+        match result {
+            Err(TemplateError::ConstraintViolation { name, message }) => {
+                assert_eq!(name, "uses-partial");
+                assert!(
+                    !message.is_empty(),
+                    "runtime handlebars error message must not be empty"
+                );
+            }
+            other => panic!("expected TemplateError::ConstraintViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_engine_usable_as_boxed_trait_object() {
         let mut engine = HandlebarsTemplateEngine::new();
         engine
