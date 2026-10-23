@@ -729,6 +729,31 @@ mod tests {
     }
 
     #[test]
+    fn test_render_context_value_with_html_special_characters_is_not_html_escaped() {
+        // handlebars::Handlebars defaults to HTML-escaping substituted values
+        // (rewriting `&`, `<`, `>`, `"` to entities) because the crate was
+        // designed primarily for HTML templating. This engine's documented
+        // purpose is rendering GitHub Markdown PR bodies and issue comments —
+        // contexts where those characters are common and entity-encoding
+        // them corrupts the rendered Markdown. `new()` must therefore
+        // disable escaping on construction.
+        let mut engine = HandlebarsTemplateEngine::new();
+        engine
+            .register_template("echo-raw", "{{value}}", vec!["value".to_string()])
+            .expect("registration must succeed for valid syntax");
+
+        let rendered = engine
+            .render("echo-raw", ctx(&[("value", r#"<a> & "b""#)]))
+            .expect("render must succeed when the required variable is present");
+
+        assert_eq!(
+            rendered,
+            r#"<a> & "b""#,
+            "special characters must be substituted literally, not HTML-entity-encoded"
+        );
+    }
+
+    #[test]
     fn test_render_unregistered_partial_returns_constraint_violation() {
         // Partial references (`{{> name}}`) are resolved at render time, not
         // at registration time, so `register_template` happily accepts a
