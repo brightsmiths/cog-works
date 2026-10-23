@@ -34,8 +34,8 @@
 //!
 //! ## Specification
 //!
-//! See `docs/spec/interfaces/github-traits.md` §TemplateEngine and
-//! `docs/spec/interfaces/infrastructure.md` §HandlebarsTemplateEngine.
+//! See `docs/spec/interfaces/github-traits.md` §`TemplateEngine` and
+//! `docs/spec/interfaces/infrastructure.md` §`HandlebarsTemplateEngine`.
 
 use std::collections::HashMap;
 
@@ -60,7 +60,7 @@ use pipeline::{TemplateEngine, TemplateError};
 /// are registered). The `required_vars` map is populated at construction time
 /// only; no mutation occurs during rendering.
 ///
-/// See `docs/spec/interfaces/infrastructure.md` §HandlebarsTemplateEngine.
+/// See `docs/spec/interfaces/infrastructure.md` §`HandlebarsTemplateEngine`.
 pub struct HandlebarsTemplateEngine {
     /// The Handlebars template registry, pre-loaded at startup.
     registry: Handlebars<'static>,
@@ -77,6 +77,7 @@ impl HandlebarsTemplateEngine {
     /// Templates are registered individually via
     /// [`register_template`](Self::register_template). The engine is ready
     /// for rendering after all templates are registered.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             registry: Handlebars::new(),
@@ -103,10 +104,21 @@ impl HandlebarsTemplateEngine {
         template_source: &str,
         required: Vec<String>,
     ) -> Result<(), TemplateError> {
-        todo!(
-            "HandlebarsTemplateEngine::register_template — \
-               see docs/spec/interfaces/infrastructure.md §HandlebarsTemplateEngine"
-        )
+        let name = name.into();
+
+        // `register_template_string` compiles the source before inserting it
+        // into the registry's internal map; on a parse failure nothing is
+        // registered, so there is no risk of leaving a partially-registered
+        // template behind.
+        self.registry
+            .register_template_string(&name, template_source)
+            .map_err(|error| TemplateError::SyntaxError {
+                name: name.clone(),
+                message: error.to_string(),
+            })?;
+
+        self.required_vars.insert(name, required);
+        Ok(())
     }
 }
 
@@ -130,16 +142,49 @@ impl TemplateEngine for HandlebarsTemplateEngine {
     ///   are absent from `context`.
     /// * [`TemplateError::ConstraintViolation`] — rendered output is empty.
     ///
-    /// See `docs/spec/interfaces/github-traits.md` §TemplateEngine.
+    /// See `docs/spec/interfaces/github-traits.md` §`TemplateEngine`.
     fn render(
         &self,
-        _name: &str,
-        _context: HashMap<String, String>,
+        name: &str,
+        context: HashMap<String, String>,
     ) -> Result<String, TemplateError> {
-        todo!(
-            "HandlebarsTemplateEngine::render — \
-               see docs/spec/interfaces/infrastructure.md §HandlebarsTemplateEngine"
-        )
+        let required = self
+            .required_vars
+            .get(name)
+            .ok_or_else(|| TemplateError::NotFound {
+                name: name.to_string(),
+            })?;
+
+        let missing: Vec<String> = required
+            .iter()
+            .filter(|variable| !context.contains_key(*variable))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            return Err(TemplateError::MissingVariables { missing });
+        }
+
+        // All declared required variables are present and the template body
+        // was validated for syntax at registration time, so a render-time
+        // handlebars error here indicates an unexpected runtime condition
+        // (e.g. a resource limit) rather than a usage error — report it as a
+        // constraint violation rather than leaking the raw handlebars error
+        // detail.
+        let rendered = self.registry.render(name, &context).map_err(|error| {
+            TemplateError::ConstraintViolation {
+                name: name.to_string(),
+                message: error.to_string(),
+            }
+        })?;
+
+        if rendered.is_empty() {
+            return Err(TemplateError::ConstraintViolation {
+                name: name.to_string(),
+                message: "rendered output is empty".to_string(),
+            });
+        }
+
+        Ok(rendered)
     }
 
     /// Returns the list of variable names required by the named template.
@@ -148,12 +193,14 @@ impl TemplateEngine for HandlebarsTemplateEngine {
     ///
     /// * [`TemplateError::NotFound`] — `name` is not registered.
     ///
-    /// See `docs/spec/interfaces/github-traits.md` §TemplateEngine.
-    fn list_required_variables(&self, _name: &str) -> Result<Vec<String>, TemplateError> {
-        todo!(
-            "HandlebarsTemplateEngine::list_required_variables — \
-               see docs/spec/interfaces/infrastructure.md §HandlebarsTemplateEngine"
-        )
+    /// See `docs/spec/interfaces/github-traits.md` §`TemplateEngine`.
+    fn list_required_variables(&self, name: &str) -> Result<Vec<String>, TemplateError> {
+        self.required_vars
+            .get(name)
+            .cloned()
+            .ok_or_else(|| TemplateError::NotFound {
+                name: name.to_string(),
+            })
     }
 }
 
