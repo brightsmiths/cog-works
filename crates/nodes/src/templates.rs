@@ -755,8 +755,7 @@ mod tests {
             .expect("render must succeed when the required variable is present");
 
         assert_eq!(
-            rendered,
-            r#"<a> & "b""#,
+            rendered, r#"<a> & "b""#,
             "special characters must be substituted literally, not HTML-entity-encoded"
         );
     }
