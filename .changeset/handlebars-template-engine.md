@@ -1,0 +1,20 @@
+---
+"nodes": minor
+---
+
+Implement `HandlebarsTemplateEngine` (`register_template`, `render`, `list_required_variables`, `new`/`Default`) in `crates/nodes/src/templates.rs`, completing the `nodes` crate's concrete implementation of `pipeline::TemplateEngine`.
+
+`HandlebarsTemplateEngine` wraps a single `handlebars::Handlebars<'static>` registry, created once and reused for every render — never recreated per call. Templates are pre-loaded via `register_template(name, template_source, required_vars)` before any rendering happens; `required_vars` is populated only at registration time and never mutated during `render`, which is what makes the engine `Send + Sync` and safe to share behind an `Arc<dyn TemplateEngine>`.
+
+Behavior:
+
+- **`register_template`** compiles the Handlebars source *before* touching internal state, so a `TemplateError::SyntaxError` (invalid `.hbs` syntax) never leaves a partially-registered template behind. Registering the same name twice is last-write-wins for both the template body and its required-variable list — this is a judgment call, not mandated by the spec, since the interface contract doesn't define duplicate-registration semantics.
+- **`render`** first checks that every variable declared `required` for the template is present in the caller's context map, returning `TemplateError::MissingVariables { missing }` (listing every absent name, not just the first) if not. It then renders through the handlebars registry; a runtime handlebars error (e.g. a template referencing an unregistered `{{> partial}}`, which is only resolved at render time) or genuinely empty rendered output both map to `TemplateError::ConstraintViolation` — the raw handlebars error text is summarized via `.to_string()` rather than forwarded verbatim, so internal error detail (e.g. file paths from other handlebars APIs this engine never calls) can't leak through this error path.
+- **`list_required_variables`** returns the declared list for a registered name, or `TemplateError::NotFound` for an unregistered one — the same lookup/error path `render` uses internally, so both report identical `NotFound` behavior.
+- Context values are substituted **literally** — no type coercion, and no HTML-entity escaping. By default `handlebars::Handlebars` escapes `&`, `<`, `>`, and `"` because the crate assumes HTML output; `new()` now explicitly calls `registry.register_escape_fn(handlebars::no_escape)` so GitHub Markdown PR bodies and issue comments rendered through this engine are never corrupted by entity-encoding. (This was flagged as a Medium-severity finding during security review and fixed before merge — see `.llm/findings/handlebars-template-engine.md`.)
+
+No public API shapes changed from what was already specified in `docs/spec/interfaces/infrastructure.md` §`HandlebarsTemplateEngine` and `docs/spec/interfaces/github-traits.md` §`TemplateEngine` — this change fills in the previously-`todo!()` implementation bodies on an existing stub. `pipeline::TemplateEngine` and `pipeline::TemplateError` are unchanged.
+
+**Not yet wired**: no caller in the `cli` composition root constructs a `HandlebarsTemplateEngine` yet, and loading `.cogworks/templates/*.hbs` files plus their `manifest.toml` required-variable declarations from a repository's working directory at startup is not part of this change — only the in-memory engine (`register_template`/`render`/`list_required_variables`) is implemented. Startup template loading and composition-root wiring are tracked separately.
+
+<!-- TODO(spec-owner): `.llm/tasks.md` (task #55) describes a `render_file` method and a `.cogworks/prompts/` directory. Neither exists in `pipeline::TemplateEngine`, in `docs/spec/interfaces/infrastructure.md`, or in `docs/spec/interfaces/github-traits.md` — all three instead define only `render`/`list_required_variables` and a `.cogworks/templates/` directory with a `manifest.toml` manifest. This implementation follows the trait/spec, not the task text; the task description appears stale and should be corrected or reconciled with the spec. -->
