@@ -20,10 +20,19 @@
 //!
 //! ## Lifecycle
 //!
-//! The `HandlebarsTemplateEngine` is owned by the `nodes` crate and created
-//! once in the `cli` composition root. All templates are pre-loaded at startup
-//! via [`HandlebarsTemplateEngine::register_template`]; rendering is
+//! The `HandlebarsTemplateEngine` is owned by the `nodes` crate and is
+//! intended to be created once in the `cli` composition root, with all
+//! templates pre-loaded at startup via
+//! [`HandlebarsTemplateEngine::register_template`]. Rendering itself is
 //! synchronous in-memory work with no I/O.
+//!
+//! **Not yet wired**: no caller in the `cli` composition root constructs a
+//! `HandlebarsTemplateEngine` yet, and loading `.hbs` files plus
+//! `manifest.toml` from a repository's `.cogworks/templates/` directory at
+//! startup is not implemented by this module. Only the in-memory engine
+//! (`register_template`/`render`/`list_required_variables`) exists today;
+//! composition-root wiring and startup template loading are tracked
+//! separately.
 //!
 //! ## Architectural Note
 //!
@@ -56,9 +65,13 @@ use pipeline::{TemplateEngine, TemplateError};
 /// ## Thread Safety
 ///
 /// `HandlebarsTemplateEngine` implements `Send + Sync` (inherited from the
-/// `handlebars::Handlebars` registry which is thread-safe after all templates
-/// are registered). The `required_vars` map is populated at construction time
-/// only; no mutation occurs during rendering.
+/// `handlebars::Handlebars` registry, which is thread-safe). `required_vars`
+/// is only ever mutated by [`register_template`](Self::register_template),
+/// which takes `&mut self`; [`TemplateEngine::render`] and
+/// [`TemplateEngine::list_required_variables`] take `&self` and never write
+/// to it. In the intended usage (all templates registered once at startup,
+/// then shared read-only behind `Arc<dyn TemplateEngine>`), no mutation
+/// occurs while the engine is being rendered from.
 ///
 /// See `docs/spec/interfaces/infrastructure.md` §`HandlebarsTemplateEngine`.
 pub struct HandlebarsTemplateEngine {
@@ -66,8 +79,9 @@ pub struct HandlebarsTemplateEngine {
     registry: Handlebars<'static>,
     /// Declared required variable names per template name.
     ///
-    /// Populated from the template manifest at construction time; never mutated
-    /// during rendering.
+    /// Populated and updated only by [`register_template`](Self::register_template)
+    /// (which requires `&mut self`); never mutated by `render` or
+    /// `list_required_variables`.
     required_vars: HashMap<String, Vec<String>>,
 }
 
@@ -174,7 +188,10 @@ impl TemplateEngine for HandlebarsTemplateEngine {
     /// * [`TemplateError::NotFound`] — `name` is not registered.
     /// * [`TemplateError::MissingVariables`] — one or more required variables
     ///   are absent from `context`.
-    /// * [`TemplateError::ConstraintViolation`] — rendered output is empty.
+    /// * [`TemplateError::ConstraintViolation`] — either the rendered output
+    ///   is empty, or handlebars reported a runtime error (e.g. the template
+    ///   references an unregistered `{{> partial}}`, which is only resolved
+    ///   at render time, not at registration).
     ///
     /// See `docs/spec/interfaces/github-traits.md` §`TemplateEngine`.
     fn render(
@@ -196,9 +213,12 @@ impl TemplateEngine for HandlebarsTemplateEngine {
         // All declared required variables are present and the template body
         // was validated for syntax at registration time, so a render-time
         // handlebars error here indicates an unexpected runtime condition
-        // (e.g. a resource limit) rather than a usage error — report it as a
-        // constraint violation rather than leaking the raw handlebars error
-        // detail.
+        // (e.g. an unregistered partial, which handlebars only resolves at
+        // render time) rather than a usage error already covered above. The
+        // error is summarized via `.to_string()` into the ConstraintViolation
+        // message rather than forwarded as a typed/opaque handlebars error,
+        // keeping `pipeline::TemplateError` free of a dependency on the
+        // `handlebars` crate's error types.
         let rendered = self
             .registry
             .render(name, &context)
@@ -213,6 +233,11 @@ impl TemplateEngine for HandlebarsTemplateEngine {
 
     /// Returns the list of variable names required by the named template.
     ///
+    /// The order of the returned `Vec` matches the order passed to
+    /// [`register_template`](HandlebarsTemplateEngine::register_template);
+    /// this is an implementation detail, not a guarantee of the
+    /// [`TemplateEngine`] trait — callers should not rely on it.
+    ///
     /// # Errors
     ///
     /// * [`TemplateError::NotFound`] — `name` is not registered.
@@ -226,12 +251,6 @@ impl TemplateEngine for HandlebarsTemplateEngine {
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 /// Adversarial test suite for [`HandlebarsTemplateEngine`].
-///
-/// ## Phase: RED
-///
-/// `register_template`, `render`, and `list_required_variables` are
-/// `todo!()` stubs. Every test here is expected to **compile** cleanly but
-/// **panic** at runtime until the implementation lands (GREEN phase).
 ///
 /// ## Why these fixtures
 ///
