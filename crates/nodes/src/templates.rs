@@ -77,10 +77,18 @@ impl HandlebarsTemplateEngine {
     /// Templates are registered individually via
     /// [`register_template`](Self::register_template). The engine is ready
     /// for rendering after all templates are registered.
+    ///
+    /// HTML escaping is disabled on the underlying registry: by default
+    /// `handlebars::Handlebars` rewrites `&`, `<`, `>`, and `"` in
+    /// substituted values into HTML entities, which contradicts this
+    /// engine's "literal substitution, no coercion" contract and would
+    /// corrupt the GitHub Markdown PR bodies and issue comments it renders.
     #[must_use]
     pub fn new() -> Self {
+        let mut registry = Handlebars::new();
+        registry.register_escape_fn(handlebars::no_escape);
         Self {
-            registry: Handlebars::new(),
+            registry,
             required_vars: HashMap::new(),
         }
     }
