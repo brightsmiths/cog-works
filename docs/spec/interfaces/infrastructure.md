@@ -619,6 +619,15 @@ The `HandlebarsTemplateEngine` is an internal implementation detail of the
 `nodes` crate. The `cli` composition root creates an instance and injects it
 as `Arc<dyn TemplateEngine>` into the nodes that need it.
 
+**Escaping**: `handlebars::Handlebars::new()` defaults to HTML-escaping
+substituted values (`&`, `<`, `>`, `"` become entities), since the crate
+assumes HTML output. `HandlebarsTemplateEngine::new()` explicitly disables
+this via `register_escape_fn(handlebars::no_escape)`, so context values are
+substituted literally. This is required because the engine renders GitHub
+Markdown PR bodies and issue comments, where entity-encoding would corrupt
+the output a human reads on GitHub — not an HTML page where escaping would
+be a correctness requirement.
+
 ---
 
 ## Section 7 — CLI-Wired Adapters (`cli` crate, implements `pipeline` traits)

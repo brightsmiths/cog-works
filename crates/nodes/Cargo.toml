@@ -26,5 +26,6 @@ async-trait = { workspace = true }
 # `validate_constitutional_prompt`'s hash check. Never used from production
 # code in this crate.
 sha2 = { workspace = true }
-# Property-based tests for `BudgetTracker` concurrency invariants.
+# Property-based tests for `BudgetTracker` concurrency invariants (this task)
+# and for `HandlebarsTemplateEngine` (templates.rs, from master).
 proptest = { workspace = true }
