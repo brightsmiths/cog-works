@@ -239,10 +239,7 @@ impl BudgetTracker {
     ///
     /// See `docs/spec/interfaces/nodes.md` §BudgetTracker.
     pub fn try_acquire(&self, estimated: &TokenCost) -> BudgetAcquisition {
-        let mut accumulated = self
-            .accumulated
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut accumulated = crate::lock_or_recover(&self.accumulated);
 
         let decision = pipeline::acquire_budget(&accumulated, estimated, &self.limit, || {
             pipeline::CostReport {

@@ -256,7 +256,7 @@ impl LlmGateway {
         // Step 1-2: pre-flight backoff check. The lock is scoped to this block
         // only and is released before the provider is ever called.
         {
-            let guard = self.rate_limit.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let guard = crate::lock_or_recover(&self.rate_limit);
             if guard.backoff_active
                 && guard
                     .window_reset
@@ -285,13 +285,13 @@ impl LlmGateway {
         match result {
             Ok(response) => {
                 // Step 6: clear any stale backoff flag on success.
-                let mut guard = self.rate_limit.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut guard = crate::lock_or_recover(&self.rate_limit);
                 guard.backoff_active = false;
                 Ok(response)
             }
             Err(LlmError::RateLimited { retry_after }) => {
                 // Step 7: record the new backoff window and propagate.
-                let mut guard = self.rate_limit.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut guard = crate::lock_or_recover(&self.rate_limit);
                 guard.backoff_active = true;
                 guard.window_reset =
                     Some(Instant::now() + retry_after.unwrap_or(DEFAULT_BACKOFF));

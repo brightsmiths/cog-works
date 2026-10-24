@@ -36,6 +36,8 @@
 // These attributes are removed when the stubs are implemented (PR implementation phase).
 #![allow(dead_code, unused_variables)]
 
+use std::sync::Mutex;
+
 pub mod architecture;
 pub mod code_generation;
 pub mod executor;
@@ -48,6 +50,21 @@ pub mod planning;
 pub mod review;
 pub mod spawning;
 pub mod templates;
+
+// ─── Shared internal helpers ───────────────────────────────────────────────────
+
+/// Locks `mutex`, recovering the inner guard if the lock is poisoned.
+///
+/// This crate's policy for production code is that mutex poisoning (a panic
+/// while a prior holder had the lock) must not cascade into a second panic
+/// on the next lock attempt — the recovered guard is used as-is. This mirrors
+/// the approach already used across the workspace for shared mutable state
+/// (see `crates/pipeline/src/budget.rs`, `crates/llm/src/lib.rs` module docs).
+/// Test code that wants poisoning to fail loudly should use
+/// `.lock().expect("...")` directly instead of this helper.
+pub(crate) fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 // ─── Re-exports ───────────────────────────────────────────────────────────────
 

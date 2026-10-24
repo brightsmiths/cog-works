@@ -30,4 +30,4 @@ Pipeline node implementations and LLM gateway — Intake through Integration nod
 | `ReviewNode` | struct | `crates/nodes/src/review.rs:29` | struct in crates/nodes/src/review.rs | nodes, pipeline |
 | `SpawningNode` | struct | `crates/nodes/src/spawning.rs:36` | struct in crates/nodes/src/spawning.rs | nodes, pipeline |
 | `StepResult` | enum | `crates/nodes/src/executor.rs:41` | enum in crates/nodes/src/executor.rs | nodes, pipeline |
-| `WorkingCopyManager` | struct | `crates/nodes/src/node.rs:271` | struct in crates/nodes/src/node.rs | nodes, pipeline |
+| `WorkingCopyManager` | struct | `crates/nodes/src/node.rs:268` | struct in crates/nodes/src/node.rs | nodes, pipeline |
