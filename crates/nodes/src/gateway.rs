@@ -262,9 +262,14 @@ impl LlmGateway {
                     .window_reset
                     .is_some_and(|reset| Instant::now() < reset)
             {
-                // Safety: `window_reset` is `Some` and in the future per the
-                // condition above, so this subtraction never underflows.
-                let retry_after = guard.window_reset.map(|reset| reset - Instant::now());
+                // `window_reset` was in the future at the check above, but wall
+                // clock time keeps advancing while the guard is held; use the
+                // saturating form so a reset that elapses between the check and
+                // here returns a zero duration instead of panicking on
+                // `Instant` subtraction underflow.
+                let retry_after = guard
+                    .window_reset
+                    .map(|reset| reset.saturating_duration_since(Instant::now()));
                 return Err(LlmError::RateLimited { retry_after });
             }
         }
