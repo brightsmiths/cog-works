@@ -111,8 +111,14 @@ can share the same handle across all nodes.
 pub fn assemble_constitutional_prompt(
     rules: &ConstitutionalRules,
     system_prompt: &str,
-) -> ConstitutionallyWrappedPrompt
+) -> Result<ConstitutionallyWrappedPrompt, ConstitutionalError>
 ```
+
+The return type is `Result`, not a bare `ConstitutionallyWrappedPrompt`: the
+function must propagate `ConstitutionalError` from `validate_constitutional_prompt`
+without panicking (no `unwrap()`/`expect()` in production code), so a fallible
+internal call requires a fallible return type. `ApprovedBranches::default()` is
+used internally; there is no caller-supplied `ApprovedBranches` parameter.
 
 **Purpose**: Embeds constitutional rules at the privileged leading position of
 the system prompt and combines them with the node-specific system prompt text.
@@ -147,11 +153,16 @@ assembly happens inside each node's `execute` function when it calls `LlmGateway
 
 **Behaviour**:
 
-1. Calls `validate_constitutional_prompt(rules, PromptAssembly { system_prompt, user_content: "" })`.
-   If this returns `Err(ConstitutionalError)`, propagates the error immediately
-   (callers receive a `PipelineError::ConstitutionalRulesLoadFailed`).
-2. Wraps the `ValidatedPrompt` in a `ConstitutionallyWrappedPrompt` (private fields).
-3. Returns the opaque `ConstitutionallyWrappedPrompt`.
+1. Calls `validate_constitutional_prompt(rules, PromptAssembly { system_prompt, user_content: "" }, &ApprovedBranches::default())`.
+   If this returns `Err(ConstitutionalError)`, propagates the error immediately as
+   `Err(ConstitutionalError)`. Mapping to `PipelineError::ConstitutionalRulesLoadFailed`
+   (if desired) is the caller's responsibility at the `run_step`/node-execute layer —
+   `assemble_constitutional_prompt` itself returns the raw `ConstitutionalError`.
+2. On success, constructs a `ConstitutionallyWrappedPrompt` (private fields) directly
+   from `rules.content` and `system_prompt` — the validation outcome is checked but
+   the already-joined `ValidatedPrompt::assembled_system_prompt()` is not reused,
+   since `ConstitutionallyWrappedPrompt` keeps the two parts as separate fields.
+3. Returns `Ok(ConstitutionallyWrappedPrompt)`.
 
 **Contract**: `run_step` calls this only after Step 1 (constitutional rules
 load and validation) has succeeded. No constitutional rule text ever appears
