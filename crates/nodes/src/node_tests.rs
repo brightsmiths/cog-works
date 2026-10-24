@@ -34,13 +34,15 @@ use std::sync::{
 
 use async_trait::async_trait;
 use pipeline::{
-    ArtifactPath, BranchName, BudgetAcquisition, CacheError, CodeRepository, CommitSha,
-    CostBudget, DirectoryEntry, FileContent, GitHubOperationError, InterfaceDefinition,
+    ArtifactPath, BranchName, BudgetAcquisition, CacheError, CodeRepository, CommitSha, CostBudget,
+    DirectoryEntry, FileContent, GitHubOperationError, InterfaceDefinition,
     InterfaceRegistryLoader, PyramidSummary, RegistryError, RepositoryId, SummaryCache,
     SummaryLevel, TokenCost, ValidationResult,
 };
 
-use super::{BudgetTracker, ConstraintValidator, ContextAssembler, ContextPackLoader, WorkingCopyManager};
+use super::{
+    BudgetTracker, ConstraintValidator, ContextAssembler, ContextPackLoader, WorkingCopyManager,
+};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -276,7 +278,10 @@ fn run_std_thread_race_trial() -> u32 {
             std::thread::spawn(move || {
                 barrier.wait();
                 let estimated = cost(0.125);
-                if matches!(tracker.try_acquire(&estimated), BudgetAcquisition::Approved { .. }) {
+                if matches!(
+                    tracker.try_acquire(&estimated),
+                    BudgetAcquisition::Approved { .. }
+                ) {
                     approved_count.fetch_add(1, Ordering::SeqCst);
                 }
             })
@@ -316,8 +321,7 @@ fn test_try_acquire_concurrent_std_threads_approve_exactly_capacity_no_overspend
     for trial in 0..RACE_TRIAL_COUNT {
         let approved = run_std_thread_race_trial();
         assert_eq!(
-            approved,
-            7,
+            approved, 7,
             "trial {trial}: exactly 7 of {RACE_WORKER_COUNT} threads racing for 0.125 \
              against a 1.0 limit (strict <) must be approved — any other count \
              indicates a TOCTOU race (over-approval or lost updates)"
@@ -342,7 +346,10 @@ async fn run_tokio_task_race_trial() -> u32 {
         handles.push(tokio::spawn(async move {
             barrier.wait().await;
             let estimated = cost(0.125);
-            if matches!(tracker.try_acquire(&estimated), BudgetAcquisition::Approved { .. }) {
+            if matches!(
+                tracker.try_acquire(&estimated),
+                BudgetAcquisition::Approved { .. }
+            ) {
                 approved_count.fetch_add(1, Ordering::SeqCst);
             }
         }));
@@ -363,8 +370,7 @@ async fn test_try_acquire_concurrent_tokio_tasks_approve_exactly_capacity_no_ove
     for trial in 0..RACE_TRIAL_COUNT {
         let approved = run_tokio_task_race_trial().await;
         assert_eq!(
-            approved,
-            7,
+            approved, 7,
             "trial {trial}: exactly 7 of {RACE_WORKER_COUNT} concurrent tokio tasks racing \
              for 0.125 against a 1.0 limit (strict <) must be approved"
         );
@@ -390,7 +396,11 @@ impl SummaryCache for MarkerSummaryCache {
         Ok(None)
     }
 
-    async fn is_stale(&self, _path: &ArtifactPath, _current_sha: &CommitSha) -> Result<bool, CacheError> {
+    async fn is_stale(
+        &self,
+        _path: &ArtifactPath,
+        _current_sha: &CommitSha,
+    ) -> Result<bool, CacheError> {
         Ok(self.is_stale_answer)
     }
 
@@ -453,7 +463,10 @@ impl InterfaceRegistryLoader for MarkerRegistryLoader {
             .collect())
     }
 
-    fn validate_schema(&self, _definition: &InterfaceDefinition) -> Result<ValidationResult, RegistryError> {
+    fn validate_schema(
+        &self,
+        _definition: &InterfaceDefinition,
+    ) -> Result<ValidationResult, RegistryError> {
         Ok(ValidationResult::passed())
     }
 }

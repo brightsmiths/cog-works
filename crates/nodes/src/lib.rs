@@ -63,7 +63,9 @@ pub mod templates;
 /// Test code that wants poisoning to fail loudly should use
 /// `.lock().expect("...")` directly instead of this helper.
 pub(crate) fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 // ─── Re-exports ───────────────────────────────────────────────────────────────

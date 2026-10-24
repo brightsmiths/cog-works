@@ -70,12 +70,14 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use pipeline::{
-    BranchName, ChatMessage, ConstitutionalError, ConstitutionalRules, ContextItem,
-    ContextPackage, ContextPriority, LlmError, LlmProvider, ModelConfig, OutputSchema,
-    RequiredRule, StructuredResponse,
+    BranchName, ChatMessage, ConstitutionalError, ConstitutionalRules, ContextItem, ContextPackage,
+    ContextPriority, LlmError, LlmProvider, ModelConfig, OutputSchema, RequiredRule,
+    StructuredResponse,
 };
 
-use super::{ConstitutionallyWrappedPrompt, LlmGateway, RateLimitState, assemble_constitutional_prompt};
+use super::{
+    ConstitutionallyWrappedPrompt, LlmGateway, RateLimitState, assemble_constitutional_prompt,
+};
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -306,9 +308,7 @@ fn test_assemble_constitutional_prompt_missing_scope_binding_rule_returns_err() 
 #[test]
 fn test_assemble_constitutional_prompt_missing_no_credential_generation_rule_returns_err() {
     let mut rules = valid_rules();
-    rules.content = rules
-        .content
-        .replace("RULE: NO_CREDENTIAL_GENERATION", "");
+    rules.content = rules.content.replace("RULE: NO_CREDENTIAL_GENERATION", "");
     rules.source_hash = sha256_hex(rules.content.as_bytes());
 
     let result = assemble_constitutional_prompt(&rules, "sys");
@@ -330,8 +330,7 @@ fn test_assemble_constitutional_prompt_missing_no_credential_generation_rule_ret
 #[test]
 fn test_assemble_constitutional_prompt_feature_branch_returns_invalid_source_branch() {
     let mut rules = valid_rules();
-    rules.source_branch =
-        BranchName::new("feature/sneaky-change").expect("non-empty branch name");
+    rules.source_branch = BranchName::new("feature/sneaky-change").expect("non-empty branch name");
 
     let result = assemble_constitutional_prompt(&rules, "sys");
 
@@ -499,7 +498,11 @@ async fn test_call_assembles_system_prompt_with_constitutional_content_leading()
     assert!(result.is_ok(), "expected Ok, got {result:?}");
 
     let calls = captured.lock().expect("captured mutex poisoned");
-    assert_eq!(calls.len(), 1, "provider.complete must be called exactly once");
+    assert_eq!(
+        calls.len(),
+        1,
+        "provider.complete must be called exactly once"
+    );
     let (sent_system_prompt, _messages) = &calls[0];
 
     assert!(
@@ -628,15 +631,14 @@ async fn test_call_success_clears_backoff_active_flag() {
     {
         let handle = gateway.rate_limit_handle();
         let mut guard = handle.lock().expect("mutex poisoned");
-        *guard = RateLimitState {
-            remaining_requests: 3,
-            window_reset: Some(
-                Instant::now()
-                    .checked_sub(Duration::from_secs(1))
-                    .expect("process has been running for at least 1 second by the time tests run"),
-            ),
-            backoff_active: true,
-        };
+        *guard =
+            RateLimitState {
+                remaining_requests: 3,
+                window_reset: Some(Instant::now().checked_sub(Duration::from_secs(1)).expect(
+                    "process has been running for at least 1 second by the time tests run",
+                )),
+                backoff_active: true,
+            };
     }
 
     let rules = valid_rules();
@@ -684,7 +686,10 @@ async fn test_call_rate_limited_with_retry_after_sets_backoff_and_future_window(
 
     let handle = gateway.rate_limit_handle();
     let guard = handle.lock().expect("mutex poisoned");
-    assert!(guard.backoff_active, "backoff_active must be set true on 429");
+    assert!(
+        guard.backoff_active,
+        "backoff_active must be set true on 429"
+    );
 
     let window_reset = guard
         .window_reset
@@ -725,7 +730,10 @@ async fn test_call_rate_limited_without_retry_after_sets_backoff_and_some_future
 
     let handle = gateway.rate_limit_handle();
     let guard = handle.lock().expect("mutex poisoned");
-    assert!(guard.backoff_active, "backoff_active must be set true on 429");
+    assert!(
+        guard.backoff_active,
+        "backoff_active must be set true on 429"
+    );
     assert!(
         guard.window_reset.is_some_and(|reset| reset > before_call),
         "window_reset must be set to some instant after the call started, \
@@ -744,7 +752,9 @@ async fn test_call_during_active_backoff_window_short_circuits_without_calling_p
         }),
         // If the provider is (incorrectly) invoked a second time, it would
         // return Ok — the test asserts call_count stays at 1 to catch this.
-        Ok(structured_response(serde_json::json!({ "should not appear": true }))),
+        Ok(structured_response(
+            serde_json::json!({ "should not appear": true }),
+        )),
     ]));
     let call_count_handle = Arc::clone(&provider.call_count);
     let gateway = LlmGateway::new(provider);

@@ -275,7 +275,11 @@ impl LlmGateway {
         }
 
         // Step 3: assemble the system message (constitutional content leading).
-        let system = format!("{}\n\n{}", prompt.constitutional_content(), prompt.system_prompt());
+        let system = format!(
+            "{}\n\n{}",
+            prompt.constitutional_content(),
+            prompt.system_prompt()
+        );
 
         // Step 4: convert context items to user messages, skipping empty content.
         let messages: Vec<ChatMessage> = context
@@ -285,7 +289,10 @@ impl LlmGateway {
             .collect();
 
         // Step 5: the actual HTTP call — no lock held.
-        let result = self.provider.complete(&system, &messages, schema, model).await;
+        let result = self
+            .provider
+            .complete(&system, &messages, schema, model)
+            .await;
 
         match result {
             Ok(response) => {
@@ -298,8 +305,7 @@ impl LlmGateway {
                 // Step 7: record the new backoff window and propagate.
                 let mut guard = crate::lock_or_recover(&self.rate_limit);
                 guard.backoff_active = true;
-                guard.window_reset =
-                    Some(Instant::now() + retry_after.unwrap_or(DEFAULT_BACKOFF));
+                guard.window_reset = Some(Instant::now() + retry_after.unwrap_or(DEFAULT_BACKOFF));
                 Err(LlmError::RateLimited { retry_after })
             }
             // Step 8: any other error is propagated unchanged.
