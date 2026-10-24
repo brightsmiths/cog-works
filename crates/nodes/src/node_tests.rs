@@ -229,7 +229,27 @@ const RACE_WORKER_COUNT: usize = 50;
 /// produces zero false positives. A TOCTOU-racy implementation's failure
 /// window is probabilistic per trial; repeating multiplies the chance of
 /// observing at least one over-approval within this test run.
-const RACE_TRIAL_COUNT: usize = 5;
+///
+/// ## Why `60`, not `5` (QA audit finding, 2026-10-24)
+///
+/// A manual adversarial mutant was constructed that splits `try_acquire`'s
+/// single continuous lock hold into two separate `lock()` calls — one for
+/// the `acquire_budget` check, one for the `*accumulated += *estimated`
+/// update — reopening the TOCTOU window the atomicity contract exists to
+/// close. Against that mutant, with `RACE_TRIAL_COUNT = 5` (the original
+/// value), this test (both the `std::thread` and `tokio::task` variants
+/// combined) only detected the race in **8 of 20** independent full test
+/// runs (40%) — i.e. a 60% chance of the mutant passing CI undetected on
+/// any given run, because the critical section reopened by the mutant is so
+/// short that real OS thread scheduling rarely preempts inside it. Raising
+/// `RACE_TRIAL_COUNT` to `60` raised detection to **15 of 15** runs (100%)
+/// in the same experiment, with zero false positives against the correct
+/// (non-mutated) implementation across 10 repeated runs. The exact-dyadic-
+/// fraction design (see below) means the extra trials add negligible
+/// wall-clock cost (whole-suite run time for this test file remained in the
+/// low single-digit seconds) while making this specific defect class
+/// reliably catchable rather than merely probable.
+const RACE_TRIAL_COUNT: usize = 60;
 
 /// Runs one trial: `RACE_WORKER_COUNT` std threads, synchronised to all start
 /// `try_acquire` at approximately the same instant via a [`std::sync::Barrier`]
