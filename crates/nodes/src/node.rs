@@ -225,7 +225,10 @@ pub struct BudgetTracker {
 impl BudgetTracker {
     /// Creates a new `BudgetTracker` with zero accumulated cost and `limit`.
     pub fn new(limit: CostBudget) -> Self {
-        todo!("See docs/spec/interfaces/nodes.md §BudgetTracker")
+        Self {
+            accumulated: Arc::new(Mutex::new(TokenCost::zero())),
+            limit,
+        }
     }
 
     /// Checks whether `estimated` fits within the remaining budget.
@@ -235,8 +238,26 @@ impl BudgetTracker {
     /// `docs/spec/interfaces/pipeline-execution.md §Budget Enforcement`.
     ///
     /// See `docs/spec/interfaces/nodes.md` §BudgetTracker.
-    pub fn try_acquire(&self, _estimated: &TokenCost) -> BudgetAcquisition {
-        todo!("See docs/spec/interfaces/nodes.md §BudgetTracker")
+    pub fn try_acquire(&self, estimated: &TokenCost) -> BudgetAcquisition {
+        let mut accumulated = self
+            .accumulated
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let decision = pipeline::acquire_budget(&accumulated, estimated, &self.limit, || {
+            pipeline::CostReport {
+                per_node: vec![],
+                per_sub_work_item: vec![],
+                total: *accumulated,
+                budget_limit: self.limit,
+            }
+        });
+
+        if let BudgetAcquisition::Approved { .. } = decision {
+            *accumulated += *estimated;
+        }
+
+        decision
     }
 }
 
