@@ -214,3 +214,7 @@ impl LlmGateway {
         todo!("See docs/spec/interfaces/nodes.md §LlmGateway::call")
     }
 }
+
+#[cfg(test)]
+#[path = "gateway_tests.rs"]
+mod tests;

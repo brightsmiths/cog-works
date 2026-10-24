@@ -271,3 +271,7 @@ impl WorkingCopyManager {
         self.repository.as_ref()
     }
 }
+
+#[cfg(test)]
+#[path = "node_tests.rs"]
+mod tests;
