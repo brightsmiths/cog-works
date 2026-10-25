@@ -640,6 +640,16 @@ pub trait IssueTracker: Send + Sync {
     /// state (see `nodes::executor::steps::reconstruct_state`, THREAT-022) —
     /// the numeric ID is unforgeable, unlike a login string.
     ///
+    /// This identity does not change for the lifetime of a credential, and
+    /// `reconstruct_state` calls this once on every `run_step` invocation —
+    /// implementations SHOULD cache the result (e.g. for the lifetime of the
+    /// process or the credential) rather than making a fresh API call every
+    /// step, per `docs/spec/constraints.md` §Performance ("GitHub API
+    /// efficiency: minimize API calls per invocation"). No caching is
+    /// implemented at the call site in `nodes::executor` today, since the
+    /// only concrete implementation of this trait (`GithubClient`) is itself
+    /// still a `todo!()` skeleton (#63) with nothing yet to measure or cache.
+    ///
     /// # Errors
     ///
     /// - [`GitHubOperationError::Transient`] — transient network failure.
