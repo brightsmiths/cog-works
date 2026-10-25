@@ -20,14 +20,15 @@ handlebars = { workspace = true }
 # production code (not under `#[cfg(test)]`), so `async-trait` must be a
 # regular dependency, not a dev-dependency.
 async-trait = { workspace = true }
+# Used by `executor.rs` to compute the constitutional-rules content hash
+# (`ConstitutionalRules::source_hash`) and the `PipelineStateComment::graph_hash`
+# digest. `pipeline::security`'s own SHA-256 helper is private to that crate,
+# so `nodes::executor` computes its own hash using the same crate/algorithm
+# for consistency (task #57). No longer test-only — promoted from
+# dev-dependencies now that production code in this crate needs it.
+sha2 = { workspace = true }
 
 [dev-dependencies]
-# Test-only: compute the SHA-256 hash of constitutional rules content so test
-# fixtures can construct `ConstitutionalRules` values that pass
-# `validate_constitutional_prompt`'s hash check, and to compute the expected
-# `PipelineStateComment::graph_hash` for resume fixtures (executor_tests.rs).
-# Never used from production code in this crate.
-sha2 = { workspace = true }
 # Property-based tests for `BudgetTracker` concurrency invariants (PR 9) and
 # for `HandlebarsTemplateEngine` (templates.rs, from master).
 proptest = { workspace = true }
