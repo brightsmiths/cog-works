@@ -459,6 +459,11 @@ pub struct IssueComment {
     pub id: u64,
     /// Login name of the comment author.
     pub author: String,
+    /// Numeric GitHub user ID of the comment author — unforgeable, unlike
+    /// `author` (login string). Used by
+    /// `nodes::executor::steps::reconstruct_state` to verify comment
+    /// authenticity (THREAT-022).
+    pub author_id: u64,
     /// Comment body (Markdown).
     pub body: String,
     /// When the comment was created (UTC).
@@ -628,6 +633,29 @@ pub trait IssueTracker: Send + Sync {
         &self,
         id: WorkItemId,
     ) -> Result<Vec<IssueComment>, GitHubOperationError>;
+
+    /// Returns the numeric GitHub user ID that CogWorks itself is authenticated as.
+    ///
+    /// Used to verify the authorship of comments that are trusted as pipeline
+    /// state (see `nodes::executor::steps::reconstruct_state`, THREAT-022) —
+    /// the numeric ID is unforgeable, unlike a login string.
+    ///
+    /// This identity does not change for the lifetime of a credential, and
+    /// `reconstruct_state` calls this once on every `run_step` invocation —
+    /// implementations SHOULD cache the result (e.g. for the lifetime of the
+    /// process or the credential) rather than making a fresh API call every
+    /// step, per `docs/spec/constraints.md` §Performance ("GitHub API
+    /// efficiency: minimize API calls per invocation"). No caching is
+    /// implemented at the call site in `nodes::executor` today, since the
+    /// only concrete implementation of this trait (`GithubClient`) is itself
+    /// still a `todo!()` skeleton (#63) with nothing yet to measure or cache.
+    ///
+    /// # Errors
+    ///
+    /// - [`GitHubOperationError::Transient`] — transient network failure.
+    /// - [`GitHubOperationError::PermissionDenied`] — the configured token
+    ///   cannot be resolved to an authenticated identity.
+    async fn authenticated_bot_user_id(&self) -> Result<u64, GitHubOperationError>;
 
     /// Return the current lifecycle state of an issue without fetching all fields.
     ///

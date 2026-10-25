@@ -15,17 +15,24 @@ tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 handlebars = { workspace = true }
+# Required for the `pub(crate) trait NodeRunner` dyn-compatible async-fn seam
+# in `executor.rs` (task #57, RED-phase scaffolding) — this trait lives in
+# production code (not under `#[cfg(test)]`), so `async-trait` must be a
+# regular dependency, not a dev-dependency.
+async-trait = { workspace = true }
+# Used by `executor.rs` to compute the constitutional-rules content hash
+# (`ConstitutionalRules::source_hash`) and the `PipelineStateComment::graph_hash`
+# digest. `pipeline::security`'s own SHA-256 helper is private to that crate,
+# so `nodes::executor` computes its own hash using the same crate/algorithm
+# for consistency (task #57). No longer test-only — promoted from
+# dev-dependencies now that production code in this crate needs it.
+sha2 = { workspace = true }
 
 [dev-dependencies]
-# Test-only: implement the `LlmProvider` port trait for mock providers used by
-# the LlmGateway integration tests (gateway_tests.rs). Mirrors the pattern
-# already used in `pipeline`'s own test suite.
-async-trait = { workspace = true }
-# Test-only: compute the SHA-256 hash of constitutional rules content so test
-# fixtures can construct `ConstitutionalRules` values that pass
-# `validate_constitutional_prompt`'s hash check. Never used from production
-# code in this crate.
-sha2 = { workspace = true }
-# Property-based tests for `BudgetTracker` concurrency invariants (this task)
-# and for `HandlebarsTemplateEngine` (templates.rs, from master).
+# Property-based tests for `BudgetTracker` concurrency invariants (PR 9) and
+# for `HandlebarsTemplateEngine` (templates.rs, from master).
 proptest = { workspace = true }
+# Test-only: construct `pipeline::github::IssueComment::created_at` values
+# (`chrono::DateTime<Utc>`) for `MockIssueTracker` fixtures in
+# executor_tests.rs (task #57). Never used from production code in this crate.
+chrono = { workspace = true }

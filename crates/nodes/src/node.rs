@@ -33,7 +33,7 @@ use serde_json::Value;
 use pipeline::{
     BranchName, BudgetAcquisition, CodeRepository, CostBudget, InterfaceRegistryLoader,
     LoadedContextPacks, NodeOutput, PipelineError, PipelineGraph, PipelineName, PipelineRunId,
-    PipelineState, RetryPolicy, SummaryCache, TokenCost,
+    PipelineState, RepositoryId, RetryPolicy, SummaryCache, TokenCost,
 };
 
 // ─── Node I/O types ───────────────────────────────────────────────────────────
@@ -126,6 +126,12 @@ pub struct CliConfig {
     /// Only the default branch (or an explicitly approved list) is accepted.
     /// Feature branches and forks are rejected.
     pub approved_branch: BranchName,
+    /// The repository this pipeline run operates against.
+    ///
+    /// Passed to `CodeRepository::read_file` when loading the constitutional
+    /// rules document (`run_step` step 1) and any other repository access
+    /// performed during the step.
+    pub repository: RepositoryId,
 }
 
 // ─── Coordinator types ────────────────────────────────────────────────────────

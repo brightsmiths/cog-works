@@ -204,6 +204,11 @@ impl IssueTracker for GithubClient {
     }
 
     #[instrument(skip(self))]
+    async fn authenticated_bot_user_id(&self) -> Result<u64, GitHubOperationError> {
+        todo!("IssueTracker::authenticated_bot_user_id — implemented in PR 10")
+    }
+
+    #[instrument(skip(self))]
     async fn get_issue_state(&self, _id: WorkItemId) -> Result<IssueState, GitHubOperationError> {
         todo!("IssueTracker::get_issue_state — implemented in PR 10")
     }
