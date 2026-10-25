@@ -33,4 +33,17 @@ ignore = [
     # Remediation: remove this ignore once queue-runtime migrates to a
     #              Service Bus client built on azure_core >=1.0.0.
     "RUSTSEC-2026-0275",
+    # RUSTSEC-2026-0387: timing variability in crypto-bigint constant-time operations
+    # Severity: see https://github.com/RustCrypto/crypto-bigint/pull/1365
+    # Affected path: crypto-bigint 0.5.5 <- elliptic-curve 0.13.8 <- ecdsa/p256/p384
+    #                <- jsonwebtoken 10.4.0 <- github-bot-sdk 0.2.1 (github, listener, cli)
+    # Status: fix requires crypto-bigint >=0.7.6, which needs a breaking bump through
+    #         elliptic-curve/ecdsa/p256/p384/jsonwebtoken; github-bot-sdk 0.2.1 is
+    #         still the latest available release and has not picked this up.
+    # Risk acceptance: CogWorks does not call crypto-bigint directly; the affected
+    #                  code is reached only through github-bot-sdk's JWT-based
+    #                  GitHub App authentication. Noted 2026-10-24.
+    # Remediation: remove this ignore once github-bot-sdk upgrades its JWT/ECDSA
+    #              dependency chain.
+    "RUSTSEC-2026-0387",
 ]

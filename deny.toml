@@ -8,8 +8,9 @@
 db-urls = ["https://github.com/rustsec/advisory-db"]
 
 # Ignore specific advisories (use with caution and document why)
-# All are transitive through third-party deps (azure_core <- queue-runtime).
-# No upstream fix is available for any of them as of 2026-05-14.
+# Most are transitive through third-party deps (azure_core <- queue-runtime).
+# No upstream fix is available for any of them as of 2026-05-14, except where
+# noted individually.
 ignore = [
     # RUSTSEC-2023-0071: Marvin Attack timing side-channel in rsa 0.9.x
     # Source: rsa <- github-bot-sdk (webhook signature verification only;
@@ -48,6 +49,16 @@ ignore = [
     # affected log statements are not emitted. Risk: low.
     # Revisit when queue-runtime migrates to a Service Bus client built on azure_core >=1.0.0.
     { id = "RUSTSEC-2026-0275" },
+    # RUSTSEC-2026-0387: timing variability in crypto-bigint constant-time operations
+    # Source: crypto-bigint 0.5.5 <- elliptic-curve 0.13.8 <- ecdsa/p256/p384 <-
+    #         jsonwebtoken 10.4.0 <- github-bot-sdk 0.2.1 (github, listener, cli).
+    # Fix requires crypto-bigint >=0.7.6, which needs a breaking bump through
+    # elliptic-curve/ecdsa/p256/p384/jsonwebtoken; github-bot-sdk 0.2.1 is still
+    # the latest available release and has not picked this up. CogWorks does not
+    # call crypto-bigint directly; the affected code is reached only through
+    # github-bot-sdk's JWT-based GitHub App authentication. Noted 2026-10-24.
+    # Revisit when github-bot-sdk upgrades its JWT/ECDSA dependency chain.
+    { id = "RUSTSEC-2026-0387" },
 ]
 
 [licenses]
