@@ -15,6 +15,7 @@ Pipeline node implementations and LLM gateway — Intake through Integration nod
 | `ConstraintValidator` | struct | `crates/nodes/src/node.rs:170` | struct in crates/nodes/src/node.rs | nodes, pipeline |
 | `ContextAssembler` | struct | `crates/nodes/src/node.rs:146` | struct in crates/nodes/src/node.rs | nodes, pipeline |
 | `ContextPackLoader` | struct | `crates/nodes/src/node.rs:193` | struct in crates/nodes/src/node.rs | nodes, pipeline |
+| `DefaultNodeRunner` | struct | `crates/nodes/src/executor/runner.rs:78` | Production `NodeRunner` impl dispatching to each node module's `execute` fn by `NodeId`; built once per `run_step` call | nodes, pipeline, executor |
 | `HandlebarsTemplateEngine` | struct | `crates/nodes/src/templates.rs:77` | struct in crates/nodes/src/templates.rs | nodes, pipeline |
 | `IntakeNode` | struct | `crates/nodes/src/intake.rs:29` | struct in crates/nodes/src/intake.rs | nodes, pipeline |
 | `IntegrationNode` | struct | `crates/nodes/src/integration.rs:27` | struct in crates/nodes/src/integration.rs | nodes, pipeline |
@@ -23,12 +24,13 @@ Pipeline node implementations and LLM gateway — Intake through Integration nod
 | `NodeExecutionResult` | enum | `crates/nodes/src/node.rs:86` | enum in crates/nodes/src/node.rs | nodes, pipeline |
 | `NodeFailure` | struct | `crates/nodes/src/node.rs:69` | struct in crates/nodes/src/node.rs | nodes, pipeline |
 | `NodeInput` | struct | `crates/nodes/src/node.rs:49` | struct in crates/nodes/src/node.rs | nodes, pipeline |
-| `NodeRunner` | trait | `crates/nodes/src/executor.rs:1089` | trait in crates/nodes/src/executor.rs | nodes, pipeline, trait |
+| `NodeRunner` | trait | `crates/nodes/src/executor/runner.rs:38` | `pub(crate)` test seam: dispatches one node's `execute` fn by `NodeId`/`NodeInput`, letting `run_step_with_runner`'s orchestration be tested against a mock without touching real (still-`todo!()`) node bodies | nodes, pipeline, trait, executor |
 | `PipelineConfig` | struct | `crates/nodes/src/node.rs:103` | struct in crates/nodes/src/node.rs | nodes, pipeline |
-| `PipelineExecutor` | struct | `crates/nodes/src/executor.rs:105` | struct in crates/nodes/src/executor.rs | nodes, pipeline |
+| `PipelineExecutor` | struct | `crates/nodes/src/executor/mod.rs:113` | Holds every infrastructure `Arc<dyn Trait>` dependency for one pipeline service instance; constructed once at startup and shared across all `run_step` calls | nodes, pipeline, executor |
 | `PlanningNode` | struct | `crates/nodes/src/planning.rs:28` | struct in crates/nodes/src/planning.rs | nodes, pipeline |
 | `RateLimitState` | struct | `crates/nodes/src/gateway.rs:92` | struct in crates/nodes/src/gateway.rs | nodes, pipeline |
 | `ReviewNode` | struct | `crates/nodes/src/review.rs:29` | struct in crates/nodes/src/review.rs | nodes, pipeline |
+| `run_step_with_runner` | fn | `crates/nodes/src/executor/mod.rs:256` | `pub(crate)` 8-step pipeline state-machine driver, parameterised over a `NodeRunner` so orchestration (steps 1-5, 7-8, delegated to the `steps`/`dispatch`/`completion` submodules) can be tested independent of real node bodies; `run_step` is a thin wrapper that supplies `DefaultNodeRunner` | nodes, pipeline, executor |
 | `SpawningNode` | struct | `crates/nodes/src/spawning.rs:36` | struct in crates/nodes/src/spawning.rs | nodes, pipeline |
-| `StepResult` | enum | `crates/nodes/src/executor.rs:56` | enum in crates/nodes/src/executor.rs | nodes, pipeline |
+| `StepResult` | enum | `crates/nodes/src/executor/mod.rs:64` | enum in crates/nodes/src/executor/mod.rs | nodes, pipeline |
 | `WorkingCopyManager` | struct | `crates/nodes/src/node.rs:274` | struct in crates/nodes/src/node.rs | nodes, pipeline |
