@@ -264,6 +264,7 @@ lifetime of a service-mode run.
 | `working_dir` | `PathBuf` | Working directory for this pipeline run |
 | `pipeline_name` | `Option<PipelineName>` | Named pipeline to use; default pipeline if `None` |
 | `approved_branch` | `BranchName` | The branch approved for loading constitutional rules |
+| `repository` | `RepositoryId` | The repository this pipeline run operates against; passed to `CodeRepository::read_file` for the constitutional-rules load in `run_step` step 1 |
 
 ---
 

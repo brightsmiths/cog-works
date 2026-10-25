@@ -1,0 +1,11 @@
+---
+"nodes": minor
+---
+
+Implement `PipelineExecutor::run_step` — the full 8-step pipeline step-function loop — completing the orchestration layer that drives every pipeline run (`crates/nodes/src/executor/`, split into `mod.rs`, `steps.rs`, `dispatch.rs`, `completion.rs`, `runner.rs`).
+
+- **Full step-function loop**: each `run_step` call now (1) loads and validates the constitutional rules from the approved branch, (2) loads the named or default pipeline configuration, (3) reconstructs `PipelineState` from the issue's prior `PipelineStateComment`, (4) checks for configuration-hash drift since that state was last persisted, (5) determines the next actions for the current state, (6) dispatches and executes the eligible node(s) — serially or in parallel — (7) resolves any LLM-evaluated outgoing edges and evaluates all outgoing edges, and (8) persists the updated state back to the issue as a new comment. Both fresh runs (no prior state comment) and mid-run resumption (continuing from the latest persisted state) are supported.
+- **Security fix (THREAT-022)**: pipeline state reconstructed from GitHub issue comments is now verified before being trusted. Previously, any GitHub user who could comment on the work-item issue could forge a `PipelineStateComment` and redirect or corrupt a pipeline run. State reconstruction now requires that a candidate comment's numeric author ID matches the authenticated CogWorks bot identity (`IssueTracker::authenticated_bot_user_id`) *and* that the comment's embedded work-item ID matches the issue being processed, before that comment is accepted as the latest state snapshot. Comments failing either check are skipped as ordinary discussion, not treated as corrupt state.
+- `CliConfig` gained a new `repository: RepositoryId` field, needed so step 1's constitutional-rules load can call `CodeRepository::read_file` against the correct repository. See `docs/spec/interfaces/nodes.md` §CliConfig.
+
+This crate is not yet wired up to the `cli` binary (tracked separately in #71) — there is no new end-user command-line surface in this change. `run_step` and `PipelineExecutor` remain internal orchestration APIs consumed by the forthcoming CLI composition root.
