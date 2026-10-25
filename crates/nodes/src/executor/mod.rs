@@ -36,9 +36,8 @@ use std::sync::Arc;
 use pipeline::{
     AuditStore, CodeRepository, ConstitutionalRules, DomainServiceClient, EscalationReason,
     InterfaceRegistryLoader, IssueTracker, LlmProvider, NodeId, NodeOutput,
-    PipelineConfigurationLoader, PipelineError, PipelineGraph, PipelineRunId,
-    PullRequestManager, RetryPolicy, SummaryCache, ToolProfileStore, WorkItemId,
-    determine_next_actions,
+    PipelineConfigurationLoader, PipelineError, PipelineGraph, PipelineRunId, PullRequestManager,
+    RetryPolicy, SummaryCache, ToolProfileStore, WorkItemId, determine_next_actions,
 };
 use tracing::instrument;
 

@@ -103,11 +103,17 @@ pub(super) async fn resolve_pipeline_graph(
     };
 
     let graph = match &config.pipeline_name {
-        Some(name) => executor
+        Some(name) => match executor
             .config_loader
             .get_named_pipeline(&configuration, name)
-            .cloned()
-            .unwrap_or_else(|| executor.config_loader.get_default_pipeline(&configuration)),
+        {
+            Some(graph) => graph.clone(),
+            None => {
+                return Err(StepResult::Halted(PipelineError::GraphInvalid {
+                    message: format!("named pipeline '{name}' not found in configuration"),
+                }));
+            }
+        },
         None => executor.config_loader.get_default_pipeline(&configuration),
     };
     Ok(graph)
@@ -246,6 +252,11 @@ pub(super) async fn finalize_graph_hash_drift(
     comment: &PipelineStateComment,
 ) -> StepResult {
     let reason = graph_hash_drift_escalation(comment, &ctx.graph_hash);
-    super::completion::persist_terminal_state(ctx, &comment.state, &comment.gate_config).await;
-    StepResult::Escalated(reason)
+    // A persist failure here is a more urgent problem than the drift itself
+    // (PR #176 review finding #5) — propagate it as the returned StepResult.
+    match super::completion::persist_terminal_state(ctx, &comment.state, &comment.gate_config).await
+    {
+        Ok(()) => StepResult::Escalated(reason),
+        Err(persist_halted) => persist_halted,
+    }
 }

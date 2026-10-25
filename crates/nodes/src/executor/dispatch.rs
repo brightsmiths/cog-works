@@ -135,12 +135,20 @@ pub(super) async fn dispatch_action(
         None => super::completion::finish_run_complete(ctx, state, &gate_config).await,
         Some(NextAction::Wait) => build_wait_result(state, &ctx.graph, &gate_config),
         Some(NextAction::Escalate(reason)) => {
-            super::completion::persist_terminal_state(ctx, state, &gate_config).await;
-            StepResult::Escalated(reason)
+            // If we can't even persist the escalation notice, that's a more
+            // urgent problem than the original escalation reason (PR #176
+            // review finding #5): the caller still gets a `Halted` result
+            // either way, so nothing is silently lost.
+            match super::completion::persist_terminal_state(ctx, state, &gate_config).await {
+                Ok(()) => StepResult::Escalated(reason),
+                Err(persist_halted) => persist_halted,
+            }
         }
         Some(NextAction::HaltWithError(err)) => {
-            super::completion::persist_terminal_state(ctx, state, &gate_config).await;
-            StepResult::Halted(err)
+            match super::completion::persist_terminal_state(ctx, state, &gate_config).await {
+                Ok(()) => StepResult::Halted(err),
+                Err(persist_halted) => persist_halted,
+            }
         }
         Some(NextAction::ExecuteNode(id)) => {
             execute_single(ctx, runner, state, &gate_config, id).await

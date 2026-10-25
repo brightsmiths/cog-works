@@ -10,31 +10,41 @@ use std::collections::HashMap;
 use pipeline::{
     ConstitutionalRules, ContextPackage, EdgeConditionKind, EdgeId, GateConfig, ModelConfig,
     NaturalLanguageCondition, NodeOutput, NodeState, NodeStatus, OutputSchema, PipelineGraph,
-    PipelineState, PipelineStateComment, SchemaVersion, Timestamp, TokenCount,
-    WorkItemId, evaluate_edge_condition,
+    PipelineState, PipelineStateComment, SchemaVersion, Timestamp, TokenCount, WorkItemId,
+    evaluate_edge_condition,
 };
 
-use super::{PipelineExecutor, StepContext, sentinel_node_id};
+use super::{PipelineExecutor, StepContext, StepResult, infra_halt, sentinel_node_id};
 
-/// Serialises and posts `comment` to the work-item issue. Failures are logged
-/// (not propagated): by the time this is called, any node work has already
-/// happened, and there is no `StepResult` variant for "succeeded but could
-/// not persist" — this is a known limitation, flagged for follow-up.
+/// Serialises and posts `comment` to the work-item issue.
+///
+/// Returns `Err(StepResult::Halted(..))` on either a serialisation failure or
+/// a `post_comment` failure (PR #176 review finding #5): by the time this is
+/// called, any node work has already happened, and silently swallowing a
+/// persist failure would make the caller believe the state was durably
+/// recorded when it was not — the single source of truth for resume (and the
+/// THREAT-022 trust anchor) would then be stale or missing.
 async fn persist_comment(
     executor: &PipelineExecutor,
     work_item_id: WorkItemId,
     comment: &PipelineStateComment,
-) {
-    let body = match serde_json::to_string(comment) {
-        Ok(b) => b,
-        Err(err) => {
-            tracing::error!(error = %err, "failed to serialise PipelineStateComment; state not persisted");
-            return;
-        }
-    };
-    if let Err(err) = executor.issues.post_comment(work_item_id, &body).await {
-        tracing::error!(error = %err, "failed to post PipelineStateComment to issue");
-    }
+) -> Result<(), StepResult> {
+    let body = serde_json::to_string(comment).map_err(|err| {
+        infra_halt(
+            "pipeline-state-persistence",
+            format!("failed to serialise PipelineStateComment; state not persisted: {err}"),
+        )
+    })?;
+    executor
+        .issues
+        .post_comment(work_item_id, &body)
+        .await
+        .map_err(|err| {
+            infra_halt(
+                "pipeline-state-persistence",
+                format!("failed to post PipelineStateComment to issue: {err}"),
+            )
+        })
 }
 
 /// Builds and persists a `PipelineStateComment` reflecting the current
@@ -44,7 +54,7 @@ pub(super) async fn persist_terminal_state(
     ctx: &StepContext<'_>,
     state: &PipelineState,
     gate_config: &GateConfig,
-) {
+) -> Result<(), StepResult> {
     let comment = PipelineStateComment {
         schema_version: SchemaVersion::current(),
         pipeline_run_id: ctx.run_id,
@@ -54,7 +64,7 @@ pub(super) async fn persist_terminal_state(
         graph_hash: ctx.graph_hash.clone(),
         written_at: Timestamp::now(),
     };
-    persist_comment(ctx.executor, ctx.work_item_id, &comment).await;
+    persist_comment(ctx.executor, ctx.work_item_id, &comment).await
 }
 
 /// Finds the best-effort "representative" completed node to report when
@@ -88,7 +98,9 @@ pub(super) async fn finish_run_complete(
     state: &PipelineState,
     gate_config: &GateConfig,
 ) -> super::StepResult {
-    persist_terminal_state(ctx, state, gate_config).await;
+    if let Err(halted) = persist_terminal_state(ctx, state, gate_config).await {
+        return halted;
+    }
     let (node_id, output) = representative_completion(state);
     super::StepResult::Completed { node_id, output }
 }
@@ -180,7 +192,7 @@ pub(super) async fn resolve_llm_edge(
             .content()
             .get("result")
             .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true),
+            .unwrap_or(false),
         Err(err) => {
             tracing::warn!(error = %err, "LlmGateway call failed resolving LlmEvaluated edge; defaulting to false");
             false
@@ -315,7 +327,9 @@ pub(super) async fn apply_completions_and_persist(
         now,
     );
 
-    persist_terminal_state(ctx, state, gate_config).await;
+    if let Err(halted) = persist_terminal_state(ctx, state, gate_config).await {
+        return halted;
+    }
 
     build_completion_result(completions)
 }

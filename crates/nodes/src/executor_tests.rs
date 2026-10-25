@@ -120,8 +120,8 @@ use pipeline::{
     IssueState, IssueTracker, Label, LlmError, LlmProvider, LoadedContextPacks, MergedGuidance,
     Milestone, MilestoneId, ModelConfig, NaturalLanguageCondition, NodeDefinition, NodeGate,
     NodeId, NodeOutput, NodeState, NodeStatus, NodeType, NormaliseResult, OutputSchema,
-    PipelineConfiguration, PipelineConfigurationLoader, PipelineError, PipelineGraph,
-    PipelineName, PipelineRunId, PipelineSettings, PipelineState, PipelineStateComment,
+    PipelineConfiguration, PipelineConfigurationLoader, PipelineError, PipelineGraph, PipelineName,
+    PipelineRunId, PipelineSettings, PipelineState, PipelineStateComment,
     PipelineToolProfileConfig, ProfileError, ProfileName, PullRequest, PullRequestFilter,
     PullRequestId, PullRequestManager, PyramidSummary, RegistryError, RepositoryId, RetryPolicy,
     ReviewStatus, SatisfactionScore, Scenario, SchemaVersion, SimulationResults,
@@ -2050,8 +2050,9 @@ async fn test_run_step_with_runner_parallel_branch_executes_concurrently_and_pre
     // make a *later* `determine_next_actions` call see a parallel branch that
     // is, in fact, already fully resolved).
     let posted = issues.posted_bodies();
-    let persisted: PipelineStateComment = serde_json::from_str(posted.last().expect("a comment was posted"))
-        .expect("posted body must deserialise as PipelineStateComment");
+    let persisted: PipelineStateComment =
+        serde_json::from_str(posted.last().expect("a comment was posted"))
+            .expect("posted body must deserialise as PipelineStateComment");
     assert!(
         persisted.state.active_parallel_branches.is_empty(),
         "the completed parallel branch must be removed from active_parallel_branches, got {:?}",
@@ -2499,7 +2500,9 @@ async fn test_run_step_with_runner_already_complete_run_reports_most_recently_ac
                  Completed node ('y'), not an arbitrary/sentinel one"
             );
         }
-        other => panic!("expected StepResult::Completed for an already-complete run, got {other:?}"),
+        other => {
+            panic!("expected StepResult::Completed for an already-complete run, got {other:?}")
+        }
     }
     assert!(
         runner.calls().is_empty(),
@@ -2585,8 +2588,9 @@ async fn test_resolve_llm_edge_wrong_type_result_value_resolves_to_false() {
     let rules = valid_constitutional_rules();
     let condition = NaturalLanguageCondition::new("Does the output look acceptable?")
         .expect("non-empty condition text");
-    let llm_provider =
-        Arc::new(ConfigurableLlmProvider::new(serde_json::json!({ "result": "yes" })));
+    let llm_provider = Arc::new(ConfigurableLlmProvider::new(
+        serde_json::json!({ "result": "yes" }),
+    ));
     let issues = Arc::new(MockIssueTracker::empty());
     let code_repository = Arc::new(MockCodeRepository::not_found());
     let config_loader = Arc::new(single_graph_loader(linear_graph(&["unused"])));
@@ -2688,66 +2692,23 @@ async fn test_default_node_runner_run_node_unrecognised_node_id_returns_failure_
     }
 }
 
-// ── Finding #3 (new validation): step 2 must validate node names ───────────────
+// ── Finding #3 (step-2 node-name allowlist): deliberately NOT implemented ──────
 //
-// Not yet implemented at all today. The Coder will add a check (in
-// `steps::resolve_pipeline_graph`, or immediately after it in
-// `run_step_with_runner`) that every `NodeId` in the resolved `PipelineGraph`
-// is one of the 8 known node names, halting with
-// `StepResult::Halted(PipelineError::GraphInvalid{..})` before any node is
-// ever dispatched if not. This makes finding #2's panic path structurally
-// unreachable for any graph that passes step 2.
-//
-// A `NodeRunner` response IS configured for the offending node ("frobnicate")
-// so that, until this validation lands, the current code actually dispatches
-// and completes it — producing a clean wrong-`StepResult`-variant RED failure
-// (`Completed` instead of `Halted`) rather than relying on
-// `MockNodeRunner`'s stub-killing panic.
-
-/// A `PipelineGraph` referencing a node name outside the 8 known node names
-/// must halt with `GraphInvalid` before any node is dispatched or any state
-/// is reconstructed/persisted.
-#[tokio::test]
-async fn test_run_step_with_runner_graph_with_unknown_node_name_halts_before_any_dispatch() {
-    let graph = graph_from(vec![auto_node("frobnicate")], vec![]);
-    let issues = Arc::new(MockIssueTracker::empty());
-    let code_repository = Arc::new(MockCodeRepository::with_content(
-        &valid_constitutional_rules_content(),
-    ));
-    let config_loader = Arc::new(single_graph_loader(graph));
-    let llm_provider = Arc::new(MockLlmProvider::new());
-    let executor = build_executor(issues.clone(), code_repository, config_loader, llm_provider);
-
-    // Configured (not left empty) so that the pre-fix code path — which
-    // dispatches "frobnicate" because no step-2 name validation exists yet —
-    // produces a clean wrong-variant failure instead of a stub-killing panic.
-    let mut responses = HashMap::new();
-    responses.insert(node_id("frobnicate"), node_output("should-never-run"));
-    let runner = MockNodeRunner::new(responses);
-
-    let config = cli_config(None);
-    let result = run_step_with_runner(&executor, work_item(), &config, &runner).await;
-
-    assert!(
-        matches!(result, StepResult::Halted(PipelineError::GraphInvalid { .. })),
-        "a graph referencing a node name outside the 8 known node names must \
-         halt with GraphInvalid before any dispatch, got {result:?}"
-    );
-    assert!(
-        runner.calls().is_empty(),
-        "an unrecognised node name must never reach dispatch"
-    );
-    assert_eq!(
-        issues.list_comments_call_count(),
-        0,
-        "state reconstruction must not occur once the graph fails validation"
-    );
-    assert_eq!(
-        issues.post_comment_call_count(),
-        0,
-        "no state comment may be posted when the graph itself is invalid"
-    );
-}
+// The runner.rs:238 review comment's "ideally validate node names in step 2"
+// suggestion was considered and rejected: a step-2 allowlist against the 8
+// hardcoded production node names would re-couple the generic orchestrator
+// (`run_step_with_runner`, exercised throughout this file via the `NodeRunner`
+// test seam with arbitrary fixture ids such as "a", "solo", "review-gate")
+// to a specific node-module list, cutting against `NodeId` being a free-form
+// string type and against the orchestration-logic-independent-of-node-modules
+// design this test seam exists for. The review comment's actual safety
+// concern — a panic taking down unrelated concurrent pipelines — is already
+// fully addressed by finding #2 alone: `DefaultNodeRunner::run_node` now
+// returns `NodeExecutionResult::Failure` instead of panicking, so an
+// unrecognised node id reaching dispatch becomes a graceful
+// `StepResult::Halted(NodeFailed)` rather than a crash. See the commit
+// message for the full reasoning communicated back on the PR #176 review
+// thread.
 
 // ── Finding #4 (steps.rs:110): silent fallback to the default pipeline ─────────
 //
@@ -2791,11 +2752,16 @@ async fn test_run_step_with_runner_pipeline_name_explicit_not_found_halts_withou
     responses.insert(node_id("default-entry"), node_output("default"));
     let runner = MockNodeRunner::new(responses);
 
-    let config = cli_config(Some(PipelineName::new("foo").expect("non-empty pipeline name")));
+    let config = cli_config(Some(
+        PipelineName::new("foo").expect("non-empty pipeline name"),
+    ));
     let result = run_step_with_runner(&executor, work_item(), &config, &runner).await;
 
     assert!(
-        matches!(result, StepResult::Halted(PipelineError::GraphInvalid { .. })),
+        matches!(
+            result,
+            StepResult::Halted(PipelineError::GraphInvalid { .. })
+        ),
         "an explicitly-requested pipeline name that cannot be found must halt \
          with GraphInvalid, not silently fall back to the default pipeline, \
          got {result:?}"

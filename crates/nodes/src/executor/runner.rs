@@ -9,14 +9,14 @@ use std::sync::Arc;
 
 use pipeline::{
     AuditStore, CodeRepository, CostBudget, DomainServiceClient, InterfaceRegistryLoader,
-    IssueTracker, NodeId, PipelineGraph, PipelineRunId, PipelineSettings,
-    PipelineToolProfileConfig, ProfileName, PullRequestManager, SummaryCache,
+    IssueTracker, NodeId, PipelineError, PipelineGraph, PipelineRunId, PipelineSettings,
+    PipelineToolProfileConfig, ProfileName, PullRequestManager, RetryPolicy, SummaryCache,
 };
 
 use crate::gateway::LlmGateway;
 use crate::node::{
     BudgetTracker, CliConfig, ConstraintValidator, ContextAssembler, ContextPackLoader,
-    NodeExecutionResult, NodeInput, PipelineConfig, WorkingCopyManager,
+    NodeExecutionResult, NodeFailure, NodeInput, PipelineConfig, WorkingCopyManager,
 };
 
 use super::PipelineExecutor;
@@ -218,8 +218,7 @@ impl DefaultNodeRunner {
     }
 
     async fn run_spawning(&self, input: NodeInput) -> NodeExecutionResult {
-        crate::spawning::SpawningNode::execute(input, &self.llm_gateway, self.issues.as_ref())
-            .await
+        crate::spawning::SpawningNode::execute(input, &self.llm_gateway, self.issues.as_ref()).await
     }
 }
 
@@ -235,10 +234,17 @@ impl NodeRunner for DefaultNodeRunner {
             "review" => self.run_review(input).await,
             "integration" => self.run_integration(input).await,
             "spawning" => self.run_spawning(input).await,
-            other => panic!(
-                "DefaultNodeRunner: unknown node id {other:?} — the pipeline graph referenced a \
-                 node name with no corresponding node module"
-            ),
+            other => NodeExecutionResult::Failure(NodeFailure {
+                error: PipelineError::NodeFailed {
+                    node_id: node_id.clone(),
+                    error: format!(
+                        "no node module registered for node id {other:?} — the pipeline graph \
+                         referenced a node name with no corresponding node module"
+                    ),
+                    retry_policy: RetryPolicy::NonRetryable,
+                },
+                retry_policy: RetryPolicy::NonRetryable,
+            }),
         }
     }
 }
