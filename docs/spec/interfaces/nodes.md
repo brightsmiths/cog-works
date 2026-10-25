@@ -607,11 +607,23 @@ pub async fn run_step(
    Validate the graph; validation failure → `StepResult::Halted(PipelineError::GraphInvalid { ... })`.
 
 3. **Reconstruct pipeline state** — call `executor.issues.list_comments(work_item_id)`
-   and scan the returned list (newest first) for a comment whose body is valid JSON
-   that deserialises as a `PipelineStateComment` (the `schema_version` field must be
-   present). The first matching comment is the latest state snapshot. Deserialise both
-   `state` and `gate_config` from it. If no matching comment exists, initialise a fresh
-   `PipelineState` and an empty `GateConfig` (new run).
+   and scan the returned list (newest first) for a comment that is authentic and
+   current:
+   - **Author check** (THREAT-022): `comment.author_id` must equal
+     `executor.issues.authenticated_bot_user_id()` — the comment's numeric GitHub
+     user ID, not the spoofable `author` login string. A comment from any other
+     account is skipped, regardless of content.
+   - **Parse check**: the body must be valid JSON that deserialises as a
+     `PipelineStateComment` (the `schema_version` field must be present).
+   - **Self-consistency check** (THREAT-022, defense in depth): the deserialised
+     `PipelineStateComment.work_item_id` must equal the `work_item_id` being
+     processed.
+
+   The first comment (scanning newest first) that passes all three checks is the
+   latest state snapshot; deserialise both `state` and `gate_config` from it. If no
+   comment passes all three checks, initialise a fresh `PipelineState` and an empty
+   `GateConfig` (new run). See `docs/spec/security.md` §THREAT-022 for the full
+   threat model.
 
 4. **Determine next actions** — call
    `determine_next_actions(&state, &graph, &gate_config)`.

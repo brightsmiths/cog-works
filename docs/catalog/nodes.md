@@ -30,6 +30,7 @@ Pipeline node implementations and LLM gateway — Intake through Integration nod
 | `PlanningNode` | struct | `crates/nodes/src/planning.rs:28` | struct in crates/nodes/src/planning.rs | nodes, pipeline |
 | `RateLimitState` | struct | `crates/nodes/src/gateway.rs:92` | struct in crates/nodes/src/gateway.rs | nodes, pipeline |
 | `ReviewNode` | struct | `crates/nodes/src/review.rs:29` | struct in crates/nodes/src/review.rs | nodes, pipeline |
+| `run_step` | fn | `crates/nodes/src/executor/mod.rs:334` | Public entry point driving one step of the pipeline state machine; thin wrapper over `run_step_with_runner` using `DefaultNodeRunner` | nodes, pipeline, executor |
 | `run_step_with_runner` | fn | `crates/nodes/src/executor/mod.rs:256` | `pub(crate)` 8-step pipeline state-machine driver, parameterised over a `NodeRunner` so orchestration (steps 1-5, 7-8, delegated to the `steps`/`dispatch`/`completion` submodules) can be tested independent of real node bodies; `run_step` is a thin wrapper that supplies `DefaultNodeRunner` | nodes, pipeline, executor |
 | `SpawningNode` | struct | `crates/nodes/src/spawning.rs:36` | struct in crates/nodes/src/spawning.rs | nodes, pipeline |
 | `StepResult` | enum | `crates/nodes/src/executor/mod.rs:64` | enum in crates/nodes/src/executor/mod.rs | nodes, pipeline |
