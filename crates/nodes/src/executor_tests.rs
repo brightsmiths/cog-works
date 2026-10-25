@@ -245,6 +245,27 @@ fn auto_node(id: &str) -> NodeDefinition {
     }
 }
 
+/// A `HumanGated` node awaiting approval — used by the step-6 `Wait`/`Gated`
+/// kill tests added during the #57 mutation audit (see
+/// `test_run_step_with_runner_human_gated_node_awaiting_approval_returns_gated_without_dispatch`).
+fn gated_node(id: &str) -> NodeDefinition {
+    NodeDefinition {
+        gate: NodeGate::HumanGated,
+        ..auto_node(id)
+    }
+}
+
+/// An `AutoProceed` node declaring its own `cost_budget` override — used by
+/// the `check_budget` node-matching kill test added during the #57 mutation
+/// audit (see
+/// `test_run_step_with_runner_budget_check_uses_dispatched_nodes_own_cost_budget_not_a_sibling`).
+fn node_with_cost_budget(id: &str, cost_budget: CostBudget) -> NodeDefinition {
+    NodeDefinition {
+        cost_budget: Some(cost_budget),
+        ..auto_node(id)
+    }
+}
+
 fn forward_edge(id: &str, source: &str, target: &str) -> EdgeDefinition {
     EdgeDefinition {
         id: EdgeId::new(id).expect("non-empty edge id"),
@@ -280,6 +301,32 @@ fn graph_from(nodes: Vec<NodeDefinition>, edges: Vec<EdgeDefinition>) -> Pipelin
         settings: PipelineSettings {
             default_timeout: None,
             default_cost_budget: Some(CostBudget::new(1_000.0).expect("positive budget")),
+            max_node_retries: 3,
+        },
+        tool_profiles: PipelineToolProfileConfig {
+            default_profile: ProfileName::new("default").expect("non-empty profile name"),
+            node_overrides: HashMap::new(),
+        },
+    }
+}
+
+/// Like [`graph_from`], but with an explicit `default_cost_budget` instead of
+/// the fixed `1_000.0` headroom — used by the `check_budget` kill tests added
+/// during the #57 mutation audit, which need to control the pipeline-level
+/// budget precisely (including setting it low enough to be exceeded).
+fn graph_from_with_default_budget(
+    nodes: Vec<NodeDefinition>,
+    edges: Vec<EdgeDefinition>,
+    default_cost_budget: Option<CostBudget>,
+) -> PipelineGraph {
+    PipelineGraph {
+        nodes,
+        edges,
+        evaluation_modes: HashMap::new(),
+        explicit_edge_lists: HashMap::new(),
+        settings: PipelineSettings {
+            default_timeout: None,
+            default_cost_budget,
             max_node_retries: 3,
         },
         tool_profiles: PipelineToolProfileConfig {
@@ -1104,6 +1151,30 @@ async fn test_run_step_with_runner_fresh_run_dispatches_first_node_via_runner() 
         1,
         "the new PipelineStateComment must be persisted exactly once"
     );
+
+    // `apply_node_output` must genuinely accumulate: a freshly-dispatched
+    // node starts with `attempt_count == 0` (see `fresh_node_state`) and must
+    // be incremented to exactly 1 after its first completion — not left at 0
+    // (a no-op `apply_node_output`) and not left unset entirely (a dropped
+    // node_states entry).
+    let posted = issues.posted_bodies();
+    let persisted: PipelineStateComment = serde_json::from_str(&posted[0])
+        .expect("posted body must deserialise as PipelineStateComment");
+    let intake_state = persisted
+        .state
+        .node_states
+        .get(&node_id("intake"))
+        .expect("the dispatched node's state must be recorded after completion");
+    assert_eq!(
+        intake_state.attempt_count, 1,
+        "attempt_count must be incremented by exactly 1 on completion, got {}",
+        intake_state.attempt_count
+    );
+    assert_eq!(
+        intake_state.status,
+        NodeStatus::Completed,
+        "the dispatched node must be marked Completed after a successful run"
+    );
 }
 
 // ─── Tier 1: ASSERT-PSM-008 — default pipeline resolution ──────────────────────
@@ -1511,7 +1582,7 @@ async fn test_run_step_with_runner_parallel_branch_executes_concurrently_and_pre
     ));
     let config_loader = Arc::new(single_graph_loader(graph));
     let llm_provider = Arc::new(MockLlmProvider::new());
-    let executor = build_executor(issues, code_repository, config_loader, llm_provider);
+    let executor = build_executor(issues.clone(), code_repository, config_loader, llm_provider);
 
     let mut responses = HashMap::new();
     responses.insert(node_id("branch-b"), node_output("B"));
@@ -1550,6 +1621,19 @@ async fn test_run_step_with_runner_parallel_branch_executes_concurrently_and_pre
         "the two branch nodes did not overlap in wall-clock time \
          (interval 1: {start_1:?}..{end_1:?}, interval 2: {start_2:?}..{end_2:?}) — \
          this indicates the parallel batch executed sequentially instead of concurrently"
+    );
+
+    // The branch must be removed from `active_parallel_branches` once every
+    // node in it has completed — it must not be left dangling (which would
+    // make a *later* `determine_next_actions` call see a parallel branch that
+    // is, in fact, already fully resolved).
+    let posted = issues.posted_bodies();
+    let persisted: PipelineStateComment = serde_json::from_str(posted.last().expect("a comment was posted"))
+        .expect("posted body must deserialise as PipelineStateComment");
+    assert!(
+        persisted.state.active_parallel_branches.is_empty(),
+        "the completed parallel branch must be removed from active_parallel_branches, got {:?}",
+        persisted.state.active_parallel_branches
     );
 }
 
@@ -1721,3 +1805,293 @@ async fn test_run_step_public_wrapper_constitutional_failure_halts() {
          failure before any node dispatch, got {result:?}"
     );
 }
+
+// ─── Mutation-audit kill tests (task #57 QA audit) ─────────────────────────────
+//
+// Added after `cargo mutants -p nodes -f crates/nodes/src/executor/*.rs`
+// surfaced survivors not covered by the above RED-phase suite. Each test
+// below is annotated with which `missed.txt` mutant(s) it kills.
+
+/// Kills `dispatch.rs:32:5: replace find_gated_node -> Option<(NodeId, String)>
+/// with None` and `dispatch.rs:33:53: replace == with != in find_gated_node`.
+///
+/// `NextAction::Wait` (a `HumanGated` node awaiting approval, with no prior
+/// gate decision recorded) must resolve to `StepResult::Gated` carrying that
+/// node's id and a human-readable reason — and, critically, the pipeline must
+/// never dispatch any node while waiting. No existing test in this file
+/// exercises the `Wait` / `Gated` path at all.
+#[tokio::test]
+async fn test_run_step_with_runner_human_gated_node_awaiting_approval_returns_gated_without_dispatch()
+ {
+    let graph = graph_from(vec![gated_node("review-gate")], vec![]);
+    let issues = Arc::new(MockIssueTracker::empty());
+    let code_repository = Arc::new(MockCodeRepository::with_content(
+        &valid_constitutional_rules_content(),
+    ));
+    let config_loader = Arc::new(single_graph_loader(graph));
+    let llm_provider = Arc::new(MockLlmProvider::new());
+    let executor = build_executor(issues, code_repository, config_loader, llm_provider);
+
+    // No responses configured: any dispatch attempt panics — a deliberate
+    // stub-killer, matching this file's existing convention.
+    let runner = MockNodeRunner::new(HashMap::new());
+
+    let config = cli_config(None);
+    let result = run_step_with_runner(&executor, work_item(), &config, &runner).await;
+
+    match result {
+        StepResult::Gated {
+            node_id: id,
+            gate_reason,
+        } => {
+            assert_eq!(
+                id,
+                node_id("review-gate"),
+                "the Gated result must identify the specific node awaiting approval"
+            );
+            assert!(
+                gate_reason.contains("review-gate"),
+                "the gate reason must reference the waiting node, got {gate_reason:?}"
+            );
+        }
+        other => panic!("expected StepResult::Gated, got {other:?}"),
+    }
+    assert!(
+        runner.calls().is_empty(),
+        "a HumanGated node awaiting approval must never be dispatched"
+    );
+}
+
+/// Kills `dispatch.rs:107:5: replace check_budget -> Option<pipeline::PipelineError>
+/// with None`.
+///
+/// When the pipeline's cost budget is already exceeded by prior accumulated
+/// cost, `check_budget` must halt with `PipelineError::BudgetExceeded`
+/// *before* any node is dispatched. No existing test ever configures a
+/// budget that is actually exceeded.
+#[tokio::test]
+async fn test_run_step_with_runner_budget_exceeded_halts_without_dispatching_node() {
+    let graph = graph_from_with_default_budget(
+        vec![auto_node("solo")],
+        vec![],
+        Some(CostBudget::new(1.0).expect("positive, finite budget")),
+    );
+    let hash = graph_hash(&graph);
+    let run_id = PipelineRunId::new_random();
+    let wi = work_item();
+
+    let prior_comment = issue_comment(
+        1,
+        serde_json::to_string(&state_comment(
+            run_id,
+            wi,
+            HashMap::new(),
+            vec![],
+            TokenCost::new(5.0).expect("finite, non-negative"),
+            hash,
+        ))
+        .expect("state comment serialises"),
+    );
+
+    let issues = Arc::new(MockIssueTracker::new(vec![prior_comment]));
+    let code_repository = Arc::new(MockCodeRepository::with_content(
+        &valid_constitutional_rules_content(),
+    ));
+    let config_loader = Arc::new(single_graph_loader(graph));
+    let llm_provider = Arc::new(MockLlmProvider::new());
+    let executor = build_executor(issues, code_repository, config_loader, llm_provider);
+
+    // No responses configured: a dispatch attempt would panic.
+    let runner = MockNodeRunner::new(HashMap::new());
+
+    let config = cli_config(None);
+    let result = run_step_with_runner(&executor, wi, &config, &runner).await;
+
+    assert!(
+        matches!(
+            result,
+            StepResult::Halted(PipelineError::BudgetExceeded { .. })
+        ),
+        "an already-exceeded cost budget must halt with BudgetExceeded, got {result:?}"
+    );
+    assert!(
+        runner.calls().is_empty(),
+        "no node may be dispatched once the cost budget is already exceeded"
+    );
+}
+
+/// Kills `dispatch.rs:113:33: replace == with != in check_budget`.
+///
+/// `check_budget` resolves the applicable limit by finding the *dispatched*
+/// node's own `cost_budget` override (falling back to the pipeline default
+/// when the node declares none). With a sibling node present in the graph
+/// that declares a *different*, lower `cost_budget`, a flipped `==`/`!=` in
+/// the node-lookup predicate would make `check_budget` match the sibling's
+/// definition instead of the dispatched node's own — picking the wrong limit
+/// and spuriously halting.
+#[tokio::test]
+async fn test_run_step_with_runner_budget_check_uses_dispatched_nodes_own_cost_budget_not_a_sibling()
+ {
+    let solo = auto_node("solo"); // declares no cost_budget override
+    let decoy = node_with_cost_budget("decoy", CostBudget::new(1.0).expect("positive"));
+    // "decoy" must not be eligible this round (it would otherwise fan out
+    // into a parallel batch alongside "solo"), so it is placed downstream.
+    let edges = vec![forward_edge("e-solo-decoy", "solo", "decoy")];
+    let graph = graph_from_with_default_budget(
+        vec![solo, decoy],
+        edges,
+        Some(CostBudget::new(1_000.0).expect("positive")),
+    );
+    let hash = graph_hash(&graph);
+    let run_id = PipelineRunId::new_random();
+    let wi = work_item();
+
+    // 5.0 sits strictly between "decoy"'s override (1.0 — would wrongly
+    // trigger BudgetExceeded if matched) and the pipeline default (1_000.0 —
+    // the correct limit for "solo", which declares no override of its own).
+    let prior_comment = issue_comment(
+        1,
+        serde_json::to_string(&state_comment(
+            run_id,
+            wi,
+            HashMap::new(),
+            vec![],
+            TokenCost::new(5.0).expect("finite, non-negative"),
+            hash,
+        ))
+        .expect("state comment serialises"),
+    );
+
+    let issues = Arc::new(MockIssueTracker::new(vec![prior_comment]));
+    let code_repository = Arc::new(MockCodeRepository::with_content(
+        &valid_constitutional_rules_content(),
+    ));
+    let config_loader = Arc::new(single_graph_loader(graph));
+    let llm_provider = Arc::new(MockLlmProvider::new());
+    let executor = build_executor(issues, code_repository, config_loader, llm_provider);
+
+    let mut responses = HashMap::new();
+    responses.insert(node_id("solo"), node_output("solo-output"));
+    let runner = MockNodeRunner::new(responses);
+
+    let config = cli_config(None);
+    let result = run_step_with_runner(&executor, wi, &config, &runner).await;
+
+    match result {
+        StepResult::Completed { node_id: id, .. } => {
+            assert_eq!(
+                id,
+                node_id("solo"),
+                "solo must dispatch under its own (absent) cost budget"
+            );
+        }
+        other => panic!(
+            "expected StepResult::Completed — \"solo\" declares no cost_budget \
+             override, so the pipeline default (1_000.0) applies and 5.0 \
+             accumulated cost must NOT trigger a halt; got {other:?}. This \
+             indicates check_budget matched a sibling node's cost_budget \
+             (e.g. \"decoy\"'s 1.0) instead of the dispatched node's own."
+        ),
+    }
+}
+
+/// Kills `completion.rs:72:37: replace == with != in representative_completion`.
+///
+/// When every node in the graph is already `Completed` on entry (a resumed
+/// run with nothing left to do), `determine_next_actions` returns an empty
+/// vec and `finish_run_complete` must report the most-recently-activated
+/// `Completed` node as the representative `StepResult::Completed`. This
+/// genuinely-reachable terminal path (flagged, but deliberately left
+/// untested, as spec-gap note #3 at the top of this file) is exercised here
+/// specifically to pin down `representative_completion`'s current documented
+/// fallback behaviour against mutation.
+#[tokio::test]
+async fn test_run_step_with_runner_already_complete_run_reports_most_recently_activated_node() {
+    let graph = linear_graph(&["x", "y"]);
+    let hash = graph_hash(&graph);
+    let run_id = PipelineRunId::new_random();
+    let wi = work_item();
+
+    let t1 = Timestamp::now();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let t2 = Timestamp::now();
+
+    let mut node_states = HashMap::new();
+    node_states.insert(
+        node_id("x"),
+        NodeState {
+            status: NodeStatus::Completed,
+            attempt_count: 1,
+            rework_count: 0,
+            current_error: None,
+            rework_edge_traversals: HashMap::new(),
+            activated_at: Some(t1),
+        },
+    );
+    node_states.insert(
+        node_id("y"),
+        NodeState {
+            status: NodeStatus::Completed,
+            attempt_count: 1,
+            rework_count: 0,
+            current_error: None,
+            rework_edge_traversals: HashMap::new(),
+            activated_at: Some(t2),
+        },
+    );
+
+    let prior_comment = issue_comment(
+        1,
+        serde_json::to_string(&state_comment(
+            run_id,
+            wi,
+            node_states,
+            vec![],
+            TokenCost::zero(),
+            hash,
+        ))
+        .expect("state comment serialises"),
+    );
+
+    let issues = Arc::new(MockIssueTracker::new(vec![prior_comment]));
+    let code_repository = Arc::new(MockCodeRepository::with_content(
+        &valid_constitutional_rules_content(),
+    ));
+    let config_loader = Arc::new(single_graph_loader(graph));
+    let llm_provider = Arc::new(MockLlmProvider::new());
+    let executor = build_executor(issues, code_repository, config_loader, llm_provider);
+
+    // No node is eligible (both already Completed): any dispatch attempt
+    // would panic.
+    let runner = MockNodeRunner::new(HashMap::new());
+
+    let config = cli_config(None);
+    let result = run_step_with_runner(&executor, wi, &config, &runner).await;
+
+    match result {
+        StepResult::Completed { node_id: id, .. } => {
+            assert_eq!(
+                id,
+                node_id("y"),
+                "the already-complete run must report the most-recently-activated \
+                 Completed node ('y'), not an arbitrary/sentinel one"
+            );
+        }
+        other => panic!("expected StepResult::Completed for an already-complete run, got {other:?}"),
+    }
+    assert!(
+        runner.calls().is_empty(),
+        "no node may execute once the run is already fully complete"
+    );
+}
+
+// NOTE: `completion.rs:207:5` ("replace log_edge_evaluations with ()"),
+// `completion.rs:208:12` ("delete ! in log_edge_evaluations"), and
+// `completion.rs:211:70` ("replace == with != in log_edge_evaluations") are
+// NOT killed by this suite — see the "Accepted mutation-audit gaps" note in
+// the #57 QA audit report for rationale (a `tracing_subscriber` event-capture
+// harness was built and did correctly kill all three in isolation, but was
+// demonstrably flaky — it failed the *unmutated baseline* intermittently —
+// under `cargo-mutants`' full-crate test invocation due to a global
+// `tracing` callsite-interest-cache race across concurrently running test
+// threads, and was reverted rather than landing a flaky test).
