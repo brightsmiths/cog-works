@@ -16,7 +16,7 @@
 //!
 //! ```text
 //! // In run_step (after constitutional rules are loaded):
-//! let prompt = assemble_constitutional_prompt(&rules, NODE_SYSTEM_PROMPT);
+//! let prompt = assemble_constitutional_prompt(&rules, NODE_SYSTEM_PROMPT)?;
 //! let response = gateway.call(prompt, &context, &schema, &model).await?;
 //! ```
 //!
@@ -28,12 +28,19 @@
 //! See `docs/spec/interfaces/nodes.md` §LLM Gateway for the full contract.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use pipeline::{
-    ConstitutionalRules, ContextPackage, LlmError, LlmProvider, ModelConfig, OutputSchema,
-    StructuredResponse,
+    ApprovedBranches, ChatMessage, ConstitutionalError, ConstitutionalRules, ContextPackage,
+    LlmError, LlmProvider, ModelConfig, OutputSchema, PromptAssembly, StructuredResponse,
+    validate_constitutional_prompt,
 };
 use tracing::instrument;
+
+/// Fallback backoff window applied when a [`LlmError::RateLimited`] response
+/// does not include a `retry_after` hint. Chosen as a conservative default
+/// that avoids hammering a provider that has not told us when to retry.
+const DEFAULT_BACKOFF: Duration = Duration::from_secs(60);
 
 // ─── ConstitutionallyWrappedPrompt ───────────────────────────────────────────
 
@@ -145,6 +152,13 @@ pub struct LlmGateway {
 /// the opaque [`ConstitutionallyWrappedPrompt`] token required by
 /// [`LlmGateway::call`].
 ///
+/// Delegates to [`validate_constitutional_prompt`] (checked against
+/// [`ApprovedBranches::default`]) to verify that `rules` is sourced from an
+/// approved branch, has not been tampered with, and contains every required
+/// constitutional rule signature. On success the validated rules content is
+/// re-wrapped into the opaque [`ConstitutionallyWrappedPrompt`] token; on
+/// failure no token is produced.
+///
 /// # Arguments
 ///
 /// * `rules` — Constitutional rules loaded from the approved branch. Must have
@@ -157,12 +171,31 @@ pub struct LlmGateway {
 /// An opaque [`ConstitutionallyWrappedPrompt`] that can only be consumed by
 /// [`LlmGateway::call`].
 ///
+/// # Errors
+///
+/// Propagates any [`ConstitutionalError`] returned by
+/// [`validate_constitutional_prompt`] — `MissingRules`, `InvalidSourceBranch`,
+/// or `HashMismatch`. No [`ConstitutionallyWrappedPrompt`] is ever produced on
+/// these paths.
+///
 /// See `docs/spec/interfaces/nodes.md` §assemble_constitutional_prompt.
 pub fn assemble_constitutional_prompt(
-    _rules: &ConstitutionalRules,
-    _system_prompt: &str,
-) -> ConstitutionallyWrappedPrompt {
-    todo!("See docs/spec/interfaces/nodes.md §assemble_constitutional_prompt")
+    rules: &ConstitutionalRules,
+    system_prompt: &str,
+) -> Result<ConstitutionallyWrappedPrompt, ConstitutionalError> {
+    validate_constitutional_prompt(
+        rules,
+        PromptAssembly {
+            system_prompt: system_prompt.to_string(),
+            user_content: String::new(),
+        },
+        &ApprovedBranches::default(),
+    )?;
+
+    Ok(ConstitutionallyWrappedPrompt {
+        constitutional_content: rules.content.clone(),
+        system_prompt: system_prompt.to_string(),
+    })
 }
 
 impl LlmGateway {
@@ -187,6 +220,12 @@ impl LlmGateway {
 
     /// Sends the constitutional prompt with assembled context to the LLM provider.
     ///
+    /// The shared rate-limit mutex is held only for the pre-flight backoff
+    /// check and for recording the outcome of the call afterwards. It is
+    /// **never** held across the `provider.complete().await` point, so
+    /// concurrent nodes sharing this gateway can make their HTTP calls in
+    /// parallel even while one of them is waiting on a response.
+    ///
     /// # Arguments
     ///
     /// * `prompt` — Constitutional wrapped prompt. Consumed by this call; build
@@ -197,20 +236,84 @@ impl LlmGateway {
     ///
     /// # Errors
     ///
-    /// * `LlmError::RateLimited` — Backoff is active and the window has not yet reset.
-    /// * `LlmError::Timeout` — Provider did not respond within the configured deadline.
-    /// * `LlmError::InvalidSchema` — The completion did not conform to `schema`.
-    /// * `LlmError::ProviderError` — Unrecoverable provider-side error.
+    /// * `LlmError::RateLimited` — Backoff is active and the window has not yet
+    ///   reset (short-circuits without calling the provider), or the provider
+    ///   itself returned a 429-equivalent response.
+    /// * `LlmError::ApiError` — Provider returned a non-2xx response.
+    /// * `LlmError::SchemaValidationFailed` — The completion did not conform to `schema`.
+    /// * `LlmError::NetworkError` — Transport failure before a response was received.
+    /// * `LlmError::ContextWindowExceeded` — The assembled prompt exceeds the model's context window.
     ///
     /// See `docs/spec/interfaces/nodes.md` §LlmGateway::call.
-    #[instrument(skip_all, fields(model_id = %_model.model_id))]
+    #[instrument(skip_all, fields(model_id = %model.model_id))]
     pub async fn call(
         &self,
-        _prompt: ConstitutionallyWrappedPrompt,
-        _context: &ContextPackage,
-        _schema: &OutputSchema,
-        _model: &ModelConfig,
+        prompt: ConstitutionallyWrappedPrompt,
+        context: &ContextPackage,
+        schema: &OutputSchema,
+        model: &ModelConfig,
     ) -> Result<StructuredResponse, LlmError> {
-        todo!("See docs/spec/interfaces/nodes.md §LlmGateway::call")
+        // Step 1-2: pre-flight backoff check. The lock is scoped to this block
+        // only and is released before the provider is ever called.
+        {
+            let guard = crate::lock_or_recover(&self.rate_limit);
+            if guard.backoff_active
+                && guard
+                    .window_reset
+                    .is_some_and(|reset| Instant::now() < reset)
+            {
+                // `window_reset` was in the future at the check above, but wall
+                // clock time keeps advancing while the guard is held; use the
+                // saturating form so a reset that elapses between the check and
+                // here returns a zero duration instead of panicking on
+                // `Instant` subtraction underflow.
+                let retry_after = guard
+                    .window_reset
+                    .map(|reset| reset.saturating_duration_since(Instant::now()));
+                return Err(LlmError::RateLimited { retry_after });
+            }
+        }
+
+        // Step 3: assemble the system message (constitutional content leading).
+        let system = format!(
+            "{}\n\n{}",
+            prompt.constitutional_content(),
+            prompt.system_prompt()
+        );
+
+        // Step 4: convert context items to user messages, skipping empty content.
+        let messages: Vec<ChatMessage> = context
+            .items
+            .iter()
+            .filter_map(|item| ChatMessage::user(item.content.clone()))
+            .collect();
+
+        // Step 5: the actual HTTP call — no lock held.
+        let result = self
+            .provider
+            .complete(&system, &messages, schema, model)
+            .await;
+
+        match result {
+            Ok(response) => {
+                // Step 6: clear any stale backoff flag on success.
+                let mut guard = crate::lock_or_recover(&self.rate_limit);
+                guard.backoff_active = false;
+                Ok(response)
+            }
+            Err(LlmError::RateLimited { retry_after }) => {
+                // Step 7: record the new backoff window and propagate.
+                let mut guard = crate::lock_or_recover(&self.rate_limit);
+                guard.backoff_active = true;
+                guard.window_reset = Some(Instant::now() + retry_after.unwrap_or(DEFAULT_BACKOFF));
+                Err(LlmError::RateLimited { retry_after })
+            }
+            // Step 8: any other error is propagated unchanged.
+            Err(other) => Err(other),
+        }
     }
 }
+
+#[cfg(test)]
+#[path = "gateway_tests.rs"]
+mod tests;

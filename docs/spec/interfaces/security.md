@@ -254,8 +254,8 @@ pub fn validate_constitutional_prompt(
 | | `validate_constitutional_prompt` | `assemble_constitutional_prompt` |
 |---|---|---|
 | Crate | `pipeline` | `nodes` |
-| Input | `ConstitutionalRules` + `PromptAssembly` + `ApprovedBranches` | `ConstitutionalRules` + `system_prompt: &str` + `ApprovedBranches` |
-| Output | `Result<ValidatedPrompt, ConstitutionalError>` | `ConstitutionallyWrappedPrompt` |
+| Input | `ConstitutionalRules` + `PromptAssembly` + `ApprovedBranches` | `ConstitutionalRules` + `system_prompt: &str` (uses `ApprovedBranches::default()` internally) |
+| Output | `Result<ValidatedPrompt, ConstitutionalError>` | `Result<ConstitutionallyWrappedPrompt, ConstitutionalError>` |
 | Purpose | Validates rules are intact and complete | Validates (via calling `validate_constitutional_prompt`) **and** packages for LLM dispatch |
 
 **`assemble_constitutional_prompt` calls `validate_constitutional_prompt` internally

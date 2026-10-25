@@ -17,4 +17,15 @@ serde_json = { workspace = true }
 handlebars = { workspace = true }
 
 [dev-dependencies]
+# Test-only: implement the `LlmProvider` port trait for mock providers used by
+# the LlmGateway integration tests (gateway_tests.rs). Mirrors the pattern
+# already used in `pipeline`'s own test suite.
+async-trait = { workspace = true }
+# Test-only: compute the SHA-256 hash of constitutional rules content so test
+# fixtures can construct `ConstitutionalRules` values that pass
+# `validate_constitutional_prompt`'s hash check. Never used from production
+# code in this crate.
+sha2 = { workspace = true }
+# Property-based tests for `BudgetTracker` concurrency invariants (this task)
+# and for `HandlebarsTemplateEngine` (templates.rs, from master).
 proptest = { workspace = true }

@@ -11,7 +11,7 @@ Pipeline node implementations and LLM gateway — Intake through Integration nod
 | `BudgetTracker` | struct | `crates/nodes/src/node.rs:220` | struct in crates/nodes/src/node.rs | nodes, pipeline |
 | `CliConfig` | struct | `crates/nodes/src/node.rs:119` | struct in crates/nodes/src/node.rs | nodes, pipeline |
 | `CodeGenerationNode` | struct | `crates/nodes/src/code_generation.rs:29` | struct in crates/nodes/src/code_generation.rs | nodes, pipeline |
-| `ConstitutionallyWrappedPrompt` | struct | `crates/nodes/src/gateway.rs:52` | struct in crates/nodes/src/gateway.rs | nodes, pipeline |
+| `ConstitutionallyWrappedPrompt` | struct | `crates/nodes/src/gateway.rs:59` | struct in crates/nodes/src/gateway.rs | nodes, pipeline |
 | `ConstraintValidator` | struct | `crates/nodes/src/node.rs:164` | struct in crates/nodes/src/node.rs | nodes, pipeline |
 | `ContextAssembler` | struct | `crates/nodes/src/node.rs:140` | struct in crates/nodes/src/node.rs | nodes, pipeline |
 | `ContextPackLoader` | struct | `crates/nodes/src/node.rs:187` | struct in crates/nodes/src/node.rs | nodes, pipeline |
@@ -19,15 +19,15 @@ Pipeline node implementations and LLM gateway — Intake through Integration nod
 | `IntakeNode` | struct | `crates/nodes/src/intake.rs:29` | struct in crates/nodes/src/intake.rs | nodes, pipeline |
 | `IntegrationNode` | struct | `crates/nodes/src/integration.rs:27` | struct in crates/nodes/src/integration.rs | nodes, pipeline |
 | `InterfaceDesignNode` | struct | `crates/nodes/src/interface_design.rs:29` | struct in crates/nodes/src/interface_design.rs | nodes, pipeline |
-| `LlmGateway` | struct | `crates/nodes/src/gateway.rs:137` | struct in crates/nodes/src/gateway.rs | nodes, pipeline |
+| `LlmGateway` | struct | `crates/nodes/src/gateway.rs:144` | struct in crates/nodes/src/gateway.rs | nodes, pipeline |
 | `NodeExecutionResult` | enum | `crates/nodes/src/node.rs:86` | enum in crates/nodes/src/node.rs | nodes, pipeline |
 | `NodeFailure` | struct | `crates/nodes/src/node.rs:69` | struct in crates/nodes/src/node.rs | nodes, pipeline |
 | `NodeInput` | struct | `crates/nodes/src/node.rs:49` | struct in crates/nodes/src/node.rs | nodes, pipeline |
 | `PipelineConfig` | struct | `crates/nodes/src/node.rs:103` | struct in crates/nodes/src/node.rs | nodes, pipeline |
 | `PipelineExecutor` | struct | `crates/nodes/src/executor.rs:90` | struct in crates/nodes/src/executor.rs | nodes, pipeline |
 | `PlanningNode` | struct | `crates/nodes/src/planning.rs:28` | struct in crates/nodes/src/planning.rs | nodes, pipeline |
-| `RateLimitState` | struct | `crates/nodes/src/gateway.rs:85` | struct in crates/nodes/src/gateway.rs | nodes, pipeline |
+| `RateLimitState` | struct | `crates/nodes/src/gateway.rs:92` | struct in crates/nodes/src/gateway.rs | nodes, pipeline |
 | `ReviewNode` | struct | `crates/nodes/src/review.rs:29` | struct in crates/nodes/src/review.rs | nodes, pipeline |
 | `SpawningNode` | struct | `crates/nodes/src/spawning.rs:36` | struct in crates/nodes/src/spawning.rs | nodes, pipeline |
 | `StepResult` | enum | `crates/nodes/src/executor.rs:41` | enum in crates/nodes/src/executor.rs | nodes, pipeline |
-| `WorkingCopyManager` | struct | `crates/nodes/src/node.rs:250` | struct in crates/nodes/src/node.rs | nodes, pipeline |
+| `WorkingCopyManager` | struct | `crates/nodes/src/node.rs:268` | struct in crates/nodes/src/node.rs | nodes, pipeline |
