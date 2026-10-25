@@ -397,6 +397,29 @@ This document identifies security threats to CogWorks and specifies mitigations.
 
 ---
 
+### THREAT-022: Pipeline State Comment Forgery
+
+**Description**: `PipelineState` and `GateConfig` are reconstructed on every pipeline step by scanning `IssueTracker::list_comments` (newest first) for the first comment whose body deserialises as a `PipelineStateComment` (schema documented in `docs/spec/interfaces/pipeline-execution.md`). The reconstruction performs **no author check** — `IssueComment::author` (a spoofable login string; no numeric GitHub user ID is even exposed on the type) is never consulted — and the `PipelineStateComment` payload carries no signature, MAC, or other cryptographic integrity marker. Per the trust-boundary diagram above, GitHub Issue content (including comments) is explicitly **untrusted**, yet this reconstruction path treats any well-formed comment as authoritative pipeline state.
+
+**Impact**: Any GitHub account with comment-write access to the work-item issue (which, depending on repository visibility, may be any authenticated GitHub user) can post a forged `PipelineStateComment` and have it adopted as ground truth on the next `run_step` call. This allows an attacker to, in a single comment:
+
+1. Forge `GateConfig::gated_nodes` entries as `GateStatus::Approved { approved_by: "<arbitrary>" }` for any `HumanGated` node — completely bypassing the mandatory human-review gate that THREAT-002, THREAT-012, THREAT-014, and THREAT-016 all rely on as their primary or backstop mitigation for safety-critical work items.
+2. Reset or fabricate `PipelineState::cost_accumulator` — defeating the THREAT-005 cost-budget mitigation (reset to zero for unlimited spend) or inflating it to force spurious `BudgetExceeded` halts (denial of service against a legitimate run).
+3. Forge `graph_hash` to match the freshly computed hash of the current pipeline graph — silencing the graph-hash-drift escalation (Architectural Decision #4) that is meant to catch stale/tampered state after a `.cogworks/pipeline.toml` change (THREAT-018).
+4. Fabricate arbitrary `NodeState` entries (e.g. marking nodes `Completed` that never executed), corrupting downstream edge evaluation and node dispatch.
+
+**Mitigations**:
+
+1. **Author verification (required)**: `PipelineState` reconstruction must only trust comments authored by the CogWorks bot's identity, verified via the GitHub **numeric user ID** (unforgeable), following the same pattern already specified for the THREAT-007 lock comment. `IssueComment` must expose this numeric ID, and `nodes::executor::steps::reconstruct_state` must filter on it before attempting JSON deserialisation.
+2. **Self-consistency check (defense-in-depth)**: Reject any candidate comment whose `work_item_id` does not match the work item being processed, even though `IssueTracker::list_comments` is expected to already scope results to one issue.
+3. **Integrity marker (future hardening)**: Consider adding a MAC over the serialised `PipelineStateComment` body, keyed with a secret available only to the CogWorks process, so that even a compromised bot-identity check (e.g. GitHub account takeover) is not sufficient on its own — out of scope for the initial author-verification fix but tracked here for follow-up.
+
+**Residual risk**: Author-ID verification assumes the bot's own GitHub account/token is not compromised (see THREAT-003). Until the MAC hardening above is implemented, a compromised bot credential could still forge state, but that is a strictly smaller attack surface than "any commenter."
+
+**Status**: Identified during the #57 Security Review (2026-10-25) as a gap in this document; `nodes::executor` step 3 (`reconstruct_state`) had no mitigation in place as of that review. **Fixed** (2026-10-25): mitigations #1 (author-ID verification) and #2 (work-item-id self-consistency check) are now implemented in `nodes::executor::steps::reconstruct_state` and covered by unit tests. `IssueComment` now exposes `author_id` and `IssueTracker` exposes `authenticated_bot_user_id`. Mitigation #3 (MAC hardening) remains future work, out of scope for this fix — see the Residual risk note above. Originally tracked as a Critical finding — see `.llm/security-review/2026-10-25-pipeline-executor-57.md`.
+
+---
+
 ### THREAT-021: LLM API Rate Limit Exhaustion
 
 **Description**: CogWorks exhausts the LLM provider's API rate limit — either through legitimate heavy usage (many parallel nodes, large work items) or through an attacker crafting work items that maximize LLM calls. Unlike GitHub API rate limits (THREAT-008), LLM rate limits directly block all pipeline progress since every LLM node depends on API availability.
@@ -441,3 +464,4 @@ This document identifies security threats to CogWorks and specifies mitigations.
 | Tool scope defence in depth | Three independent enforcement layers (filtering, scope validation, OS sandbox) | Integration tests for each layer; E2E test for combined enforcement |
 | Skill review lifecycle | Skills require human review before activation | Lifecycle state machine enforcement + audit trail |
 | Adapter scope integration | Generated adapters participate in same scope enforcement as built-in tools | Unit tests for adapter tool registration + scope enforcement |
+| Pipeline state comment authenticity | `PipelineStateComment` reconstruction must verify the authoring GitHub numeric user ID and the payload's `work_item_id` before trusting a comment as pipeline state (THREAT-022) | Implemented in `nodes::executor::steps::reconstruct_state`; unit tests covering forged-author and work-item-id-mismatch rejection |

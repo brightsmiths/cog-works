@@ -459,6 +459,11 @@ pub struct IssueComment {
     pub id: u64,
     /// Login name of the comment author.
     pub author: String,
+    /// Numeric GitHub user ID of the comment author — unforgeable, unlike
+    /// `author` (login string). Used by
+    /// `nodes::executor::steps::reconstruct_state` to verify comment
+    /// authenticity (THREAT-022).
+    pub author_id: u64,
     /// Comment body (Markdown).
     pub body: String,
     /// When the comment was created (UTC).
@@ -628,6 +633,19 @@ pub trait IssueTracker: Send + Sync {
         &self,
         id: WorkItemId,
     ) -> Result<Vec<IssueComment>, GitHubOperationError>;
+
+    /// Returns the numeric GitHub user ID that CogWorks itself is authenticated as.
+    ///
+    /// Used to verify the authorship of comments that are trusted as pipeline
+    /// state (see `nodes::executor::steps::reconstruct_state`, THREAT-022) —
+    /// the numeric ID is unforgeable, unlike a login string.
+    ///
+    /// # Errors
+    ///
+    /// - [`GitHubOperationError::Transient`] — transient network failure.
+    /// - [`GitHubOperationError::PermissionDenied`] — the configured token
+    ///   cannot be resolved to an authenticated identity.
+    async fn authenticated_bot_user_id(&self) -> Result<u64, GitHubOperationError>;
 
     /// Return the current lifecycle state of an issue without fetching all fields.
     ///

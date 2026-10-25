@@ -118,10 +118,24 @@ pub(super) async fn resolve_pipeline_graph(
 /// Reconstructs [`PipelineState`] and [`GateConfig`] from the latest
 /// `PipelineStateComment` on the work-item issue (step 3).
 ///
-/// Scans comments **newest first** for the first one whose body parses as a
-/// [`PipelineStateComment`]; non-JSON comments (human discussion) are skipped
-/// without error. No match means a fresh run: a new [`PipelineState`] and the
-/// default [`GateConfig`] are returned, along with a freshly generated
+/// Scans comments **newest first** for the first one that passes three
+/// checks, in order (THREAT-022):
+///
+/// 1. **Author verification**: `comment.author_id` must match the
+///    authenticated bot identity returned by
+///    [`pipeline::IssueTracker::authenticated_bot_user_id`] — comments from
+///    any other author are untrusted and skipped.
+/// 2. **Deserialisation**: the body must parse as a [`PipelineStateComment`];
+///    non-JSON comments (human discussion) are skipped without error.
+/// 3. **Self-consistency**: the deserialised `work_item_id` must match
+///    `work_item_id` — defense in depth against a misscoped or mismatched
+///    comment, even though `list_comments` is expected to already scope to
+///    one issue.
+///
+/// A comment that fails any check is skipped (not treated as "no state
+/// found") and the scan continues to older comments. No match after scanning
+/// every comment means a fresh run: a new [`PipelineState`] and the default
+/// [`GateConfig`] are returned, along with a freshly generated
 /// [`PipelineRunId`].
 pub(super) async fn reconstruct_state(
     executor: &PipelineExecutor,
@@ -135,6 +149,17 @@ pub(super) async fn reconstruct_state(
     ),
     StepResult,
 > {
+    let bot_user_id = executor
+        .issues
+        .authenticated_bot_user_id()
+        .await
+        .map_err(|err| {
+            infra_halt(
+                "pipeline-state-reconstruction",
+                format!("failed to resolve authenticated bot user id: {err}"),
+            )
+        })?;
+
     let comments = executor
         .issues
         .list_comments(work_item_id)
@@ -146,10 +171,16 @@ pub(super) async fn reconstruct_state(
             )
         })?;
 
-    let prior_comment = comments
-        .iter()
-        .rev()
-        .find_map(|c| serde_json::from_str::<PipelineStateComment>(&c.body).ok());
+    let prior_comment = comments.iter().rev().find_map(|c| {
+        if c.author_id != bot_user_id {
+            return None;
+        }
+        let candidate = serde_json::from_str::<PipelineStateComment>(&c.body).ok()?;
+        if candidate.work_item_id != work_item_id {
+            return None;
+        }
+        Some(candidate)
+    });
 
     let (state, gate_config, run_id) = match &prior_comment {
         Some(comment) => (
