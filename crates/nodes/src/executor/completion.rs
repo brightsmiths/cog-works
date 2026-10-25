@@ -133,7 +133,23 @@ fn empty_context_package() -> ContextPackage {
 /// gateway. Any failure (prompt assembly or the gateway call itself) is
 /// treated conservatively as `false` and logged; this orchestration-level
 /// call must never halt the pipeline on its own.
-async fn resolve_llm_edge(
+///
+/// ## Test-scaffolding note (RED phase, PR #176 review finding #1)
+///
+/// Widened from module-private to `pub(super)` so `executor_tests.rs` can
+/// call this function directly and assert on its return value for malformed
+/// LLM response content. This is a pure visibility change — no behaviour is
+/// altered. It is necessary because the boolean this function returns has no
+/// other externally observable effect through `run_step_with_runner` today:
+/// it only flows into `log_edge_evaluations` below, which logs it via
+/// `tracing::debug` and discards the result (see that function's own doc
+/// comment). A full-pipeline test exercised through `run_step_with_runner`
+/// therefore cannot distinguish a fail-open (`.unwrap_or(true)`) bug from the
+/// fail-closed (`.unwrap_or(false)`) fix without a tracing-capture harness —
+/// and this file's own mutation-audit notes already document that approach
+/// as flaky under `cargo-mutants`' multi-threaded test invocation. Calling
+/// this function directly avoids that failure mode entirely.
+pub(super) async fn resolve_llm_edge(
     executor: &PipelineExecutor,
     rules: &ConstitutionalRules,
     condition: &NaturalLanguageCondition,

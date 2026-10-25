@@ -113,24 +113,25 @@ use async_trait::async_trait;
 use chrono::Utc;
 use pipeline::{
     ApiVersion, ArtifactPath, BranchName, CacheError, ChatMessage, CodeRepository, CommitSha,
-    ConfigError, CostBudget, Diagnostics, DirectoryEntry, DomainServiceClient, DomainServiceError,
-    DomainServiceName, EdgeConditionKind, EdgeDefinition, EdgeId, Expression, FileContent,
-    GateConfig, GateStatus, GitHubOperationError, GitObjectSha, HandshakeResult, HealthStatus,
-    InterfaceDefinition, InterfaceMap, InterfaceRegistryLoader, Issue, IssueComment, IssueState,
-    IssueTracker, Label, LlmError, LlmProvider, Milestone, MilestoneId, ModelConfig,
-    NaturalLanguageCondition, NodeDefinition, NodeGate, NodeId, NodeOutput, NodeState, NodeStatus,
-    NodeType, NormaliseResult, OutputSchema, PipelineConfiguration, PipelineConfigurationLoader,
-    PipelineError, PipelineGraph, PipelineName, PipelineRunId, PipelineSettings, PipelineState,
-    PipelineStateComment, PipelineToolProfileConfig, ProfileError, ProfileName, PullRequest,
-    PullRequestFilter, PullRequestId, PullRequestManager, PyramidSummary, RegistryError,
-    RepositoryId, ReviewStatus, Scenario, SchemaVersion, SimulationResults, StructuredResponse,
-    SubIssue, SummaryCache, SummaryLevel, Timestamp, TokenCost, TokenCount, ToolOverrides,
-    ToolProfile, ToolProfileStore, TwinSpec, TypedLink, TypedLinkKind, ValidationKind,
-    ValidationResult, WorkItemId,
+    ConfigError, ConstitutionalRules, CostBudget, Diagnostics, DirectoryEntry, DomainServiceClient,
+    DomainServiceError, DomainServiceName, EdgeConditionKind, EdgeDefinition, EdgeId, Expression,
+    FileContent, GateConfig, GateStatus, GitHubOperationError, GitObjectSha, HandshakeResult,
+    HealthStatus, InterfaceDefinition, InterfaceMap, InterfaceRegistryLoader, Issue, IssueComment,
+    IssueState, IssueTracker, Label, LlmError, LlmProvider, LoadedContextPacks, MergedGuidance,
+    Milestone, MilestoneId, ModelConfig, NaturalLanguageCondition, NodeDefinition, NodeGate,
+    NodeId, NodeOutput, NodeState, NodeStatus, NodeType, NormaliseResult, OutputSchema,
+    PipelineConfiguration, PipelineConfigurationLoader, PipelineError, PipelineGraph,
+    PipelineName, PipelineRunId, PipelineSettings, PipelineState, PipelineStateComment,
+    PipelineToolProfileConfig, ProfileError, ProfileName, PullRequest, PullRequestFilter,
+    PullRequestId, PullRequestManager, PyramidSummary, RegistryError, RepositoryId, RetryPolicy,
+    ReviewStatus, SatisfactionScore, Scenario, SchemaVersion, SimulationResults,
+    StructuredResponse, SubIssue, SummaryCache, SummaryLevel, Timestamp, TokenCost, TokenCount,
+    ToolOverrides, ToolProfile, ToolProfileStore, TwinSpec, TypedLink, TypedLinkKind,
+    ValidationKind, ValidationResult, WorkItemId,
 };
 use pipeline::{DependencyGraph, DependencyResult};
 
-use crate::node::{CliConfig, NodeExecutionResult, NodeInput};
+use crate::node::{CliConfig, NodeExecutionResult, NodeFailure, NodeInput};
 
 use super::{NodeRunner, PipelineExecutor, StepResult, run_step, run_step_with_runner};
 
@@ -210,6 +211,19 @@ fn valid_constitutional_rules_content() -> String {
 /// missing exactly one required rule signature (`SCOPE_BINDING`).
 fn constitutional_rules_missing_scope_binding() -> String {
     valid_constitutional_rules_content().replace("RULE: SCOPE_BINDING", "")
+}
+
+/// Builds a `ConstitutionalRules` value that passes `validate_constitutional_prompt`
+/// against the default approved branches (`"main"`/`"master"`) — used by the
+/// direct `resolve_llm_edge` unit tests (PR #176 review finding #1) so that
+/// prompt assembly succeeds and the mocked LLM gateway is actually reached.
+fn valid_constitutional_rules() -> ConstitutionalRules {
+    let content = valid_constitutional_rules_content();
+    ConstitutionalRules {
+        source_hash: sha256_hex(content.as_bytes()),
+        content,
+        source_branch: approved_branch(),
+    }
 }
 
 fn file_content(content: &str) -> FileContent {
@@ -485,6 +499,11 @@ struct MockIssueTracker {
     /// for THREAT-022 scenarios that need a different bot identity.
     bot_user_id: u64,
     log: Mutex<IssueTrackerCallLog>,
+    /// When `true`, `post_comment` records the call (so tests can still
+    /// assert it was attempted) but returns `Err(..)` instead of `Ok(())`.
+    /// Used by the PR #176 review finding #5 test (persist-failure must
+    /// surface as `StepResult::Halted`, not be swallowed).
+    fail_post_comment: bool,
 }
 
 impl MockIssueTracker {
@@ -493,6 +512,7 @@ impl MockIssueTracker {
             comments,
             bot_user_id: BOT_USER_ID,
             log: Mutex::new(IssueTrackerCallLog::default()),
+            fail_post_comment: false,
         }
     }
 
@@ -504,6 +524,13 @@ impl MockIssueTracker {
     /// `bot_user_id`.
     fn with_bot_user_id(mut self, bot_user_id: u64) -> Self {
         self.bot_user_id = bot_user_id;
+        self
+    }
+
+    /// Configures `post_comment` to fail. See the field doc on
+    /// `fail_post_comment`.
+    fn with_failing_post_comment(mut self) -> Self {
+        self.fail_post_comment = true;
         self
     }
 
@@ -592,6 +619,11 @@ impl IssueTracker for MockIssueTracker {
             .unwrap()
             .post_comment
             .push((id, body.to_string()));
+        if self.fail_post_comment {
+            return Err(GitHubOperationError::NotFound {
+                resource: "mock: post_comment configured to fail".to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -816,6 +848,49 @@ impl LlmProvider for MockLlmProvider {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         Ok(StructuredResponse::new(
             serde_json::json!({ "result": true }),
+            TokenCount::new(4),
+            TokenCount::new(2),
+            5,
+        ))
+    }
+}
+
+/// Hand-rolled mock `LlmProvider` whose response *content* is configured
+/// per-test, unlike [`MockLlmProvider`] which always returns the fixed
+/// `{"result": true}` content. Used by the `resolve_llm_edge` direct unit
+/// tests (PR #176 review finding #1) to supply malformed response content
+/// (missing the `"result"` key, or giving it the wrong type) and observe how
+/// `resolve_llm_edge` resolves it.
+struct ConfigurableLlmProvider {
+    content: serde_json::Value,
+    call_count: AtomicUsize,
+}
+
+impl ConfigurableLlmProvider {
+    fn new(content: serde_json::Value) -> Self {
+        Self {
+            content,
+            call_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl LlmProvider for ConfigurableLlmProvider {
+    async fn complete(
+        &self,
+        _system_prompt: &str,
+        _messages: &[ChatMessage],
+        _schema: &OutputSchema,
+        _model: &ModelConfig,
+    ) -> Result<StructuredResponse, LlmError> {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        Ok(StructuredResponse::new(
+            self.content.clone(),
             TokenCount::new(4),
             TokenCount::new(2),
             5,
@@ -2442,3 +2517,352 @@ async fn test_run_step_with_runner_already_complete_run_reports_most_recently_ac
 // under `cargo-mutants`' full-crate test invocation due to a global
 // `tracing` callsite-interest-cache race across concurrently running test
 // threads, and was reverted rather than landing a flaky test).
+
+// ─── RED tests for PR #176 human code-review findings ─────────────────────────
+//
+// Follow-up cycle on the already-merged-to-branch, already-PR'd task #57
+// (PipelineExecutor/run_step). See PR https://github.com/pvandervelde/cog_works/pull/176
+// for the full review thread. Each test below is annotated with which
+// specific finding it targets and, where the current (pre-fix) code produces
+// a result other than a clean build failure, what RED outcome to expect.
+
+// ── Finding #1 (completion.rs:167): `resolve_llm_edge` fails open ──────────────
+//
+// `.get("result").and_then(serde_json::Value::as_bool).unwrap_or(true)`
+// contradicts its own doc comment ("treated conservatively as `false`") and
+// its two sibling error branches, which both return `false`. The fix changes
+// `.unwrap_or(true)` to `.unwrap_or(false)`.
+//
+// These two tests call `resolve_llm_edge` directly (widened to `pub(super)`
+// as RED-phase test scaffolding — see the visibility note on its definition
+// in `completion.rs`) rather than driving it through `run_step_with_runner`.
+// That is a deliberate deviation from exercising the full orchestration
+// path: the boolean `resolve_llm_edge` returns has no externally observable
+// effect through `run_step_with_runner` today — it only flows into
+// `log_edge_evaluations`, which logs it via `tracing::debug` and discards
+// the result (see that function's own doc comment, and spec-gap note #2 at
+// the top of this file). A full-pipeline test built on
+// `test_run_step_with_runner_llm_evaluated_edge_resolves_via_gateway_during_step_six`'s
+// pattern cannot distinguish the fail-open bug from the fail-closed fix
+// without a tracing-capture harness — and the NOTE immediately above already
+// documents that approach as flaky under `cargo-mutants`' multi-threaded test
+// invocation. Calling the function directly avoids that failure mode while
+// still exercising the exact code path the review flagged.
+
+/// An LLM response whose JSON content is `{}` (missing the `"result"` key
+/// entirely) must resolve the edge to `false`, not `true`.
+#[tokio::test]
+async fn test_resolve_llm_edge_missing_result_key_resolves_to_false() {
+    let rules = valid_constitutional_rules();
+    let condition = NaturalLanguageCondition::new("Does the output look acceptable?")
+        .expect("non-empty condition text");
+    let llm_provider = Arc::new(ConfigurableLlmProvider::new(serde_json::json!({})));
+    let issues = Arc::new(MockIssueTracker::empty());
+    let code_repository = Arc::new(MockCodeRepository::not_found());
+    let config_loader = Arc::new(single_graph_loader(linear_graph(&["unused"])));
+    let executor = build_executor(issues, code_repository, config_loader, llm_provider.clone());
+
+    let resolved = super::completion::resolve_llm_edge(&executor, &rules, &condition).await;
+
+    assert!(
+        !resolved,
+        "an LLM response whose content is `{{}}` (missing the \"result\" key \
+         entirely) must resolve to false, per resolve_llm_edge's own doc \
+         comment (\"treated conservatively as false\"), not true"
+    );
+    assert_eq!(
+        llm_provider.call_count(),
+        1,
+        "the gateway must actually have been reached (not short-circuited \
+         earlier, e.g. by a prompt-assembly failure)"
+    );
+}
+
+/// An LLM response whose `"result"` value is a string (`"yes"`), not a bool,
+/// must also resolve the edge to `false`.
+#[tokio::test]
+async fn test_resolve_llm_edge_wrong_type_result_value_resolves_to_false() {
+    let rules = valid_constitutional_rules();
+    let condition = NaturalLanguageCondition::new("Does the output look acceptable?")
+        .expect("non-empty condition text");
+    let llm_provider =
+        Arc::new(ConfigurableLlmProvider::new(serde_json::json!({ "result": "yes" })));
+    let issues = Arc::new(MockIssueTracker::empty());
+    let code_repository = Arc::new(MockCodeRepository::not_found());
+    let config_loader = Arc::new(single_graph_loader(linear_graph(&["unused"])));
+    let executor = build_executor(issues, code_repository, config_loader, llm_provider.clone());
+
+    let resolved = super::completion::resolve_llm_edge(&executor, &rules, &condition).await;
+
+    assert!(
+        !resolved,
+        "an LLM response whose \"result\" value is a JSON string (\"yes\"), \
+         not a bool, must resolve to false (serde_json::Value::as_bool \
+         returns None for a non-bool value and the fallback must be false), \
+         not true"
+    );
+    assert_eq!(
+        llm_provider.call_count(),
+        1,
+        "the gateway must actually have been reached (not short-circuited \
+         earlier, e.g. by a prompt-assembly failure)"
+    );
+}
+
+// ── Finding #2 (runner.rs:238): DefaultNodeRunner::run_node panics on an ───────
+// ── unrecognised NodeId ─────────────────────────────────────────────────────
+//
+// Node ids ultimately come from pipeline configuration (user-supplied data
+// via `.cogworks/pipeline.toml`), so this is reachable from config, not just
+// a theoretical bug. In service mode (one shared `PipelineExecutor` across
+// concurrent runs), a panic here can take down unrelated pipelines. The fix
+// returns `NodeExecutionResult::Failure(..)` with a `NonRetryable` retry
+// policy instead of panicking.
+//
+// Constructed directly against the real `DefaultNodeRunner` (bypassing
+// `run_step`/`run_step_with_runner` entirely): "totally-unrecognised-node"
+// never reaches any real (still-`todo!()`) node body, so this is safe to
+// exercise on the production struct per the task brief.
+
+/// `DefaultNodeRunner::run_node` must return `NodeExecutionResult::Failure`
+/// for a `NodeId` outside the 8 known node names, not panic.
+#[tokio::test]
+async fn test_default_node_runner_run_node_unrecognised_node_id_returns_failure_not_panic() {
+    let issues = Arc::new(MockIssueTracker::empty());
+    let code_repository = Arc::new(MockCodeRepository::with_content(
+        &valid_constitutional_rules_content(),
+    ));
+    let config_loader = Arc::new(single_graph_loader(linear_graph(&["a"])));
+    let llm_provider = Arc::new(MockLlmProvider::new());
+    let executor = build_executor(issues, code_repository, config_loader, llm_provider);
+    let config = cli_config(None);
+
+    let runner = super::runner::DefaultNodeRunner::new(&executor, &config);
+
+    let input = NodeInput {
+        artifacts: HashMap::new(),
+        pipeline_state: PipelineState {
+            run_id: PipelineRunId::new_random(),
+            node_states: HashMap::new(),
+            active_parallel_branches: vec![],
+            cost_accumulator: TokenCost::zero(),
+        },
+        loaded_context_packs: LoadedContextPacks {
+            matched_packs: vec![],
+            merged_guidance: MergedGuidance::default(),
+            strictest_threshold: SatisfactionScore::new(0.0)
+                .expect("0.0 is always a valid SatisfactionScore"),
+        },
+    };
+
+    let result = runner
+        .run_node(&node_id("totally-unrecognised-node"), input)
+        .await;
+
+    match result {
+        NodeExecutionResult::Failure(NodeFailure {
+            error,
+            retry_policy,
+        }) => {
+            assert_eq!(
+                retry_policy,
+                RetryPolicy::NonRetryable,
+                "an unrecognised node id must be reported as NonRetryable"
+            );
+            assert!(
+                matches!(
+                    error,
+                    PipelineError::NodeFailed {
+                        retry_policy: RetryPolicy::NonRetryable,
+                        ..
+                    }
+                ),
+                "the failure's PipelineError must be NodeFailed with a \
+                 NonRetryable retry_policy, got {error:?}"
+            );
+        }
+        other => panic!(
+            "DefaultNodeRunner::run_node must return NodeExecutionResult::Failure \
+             for an unrecognised node id, not panic (and not Success); got {other:?}"
+        ),
+    }
+}
+
+// ── Finding #3 (new validation): step 2 must validate node names ───────────────
+//
+// Not yet implemented at all today. The Coder will add a check (in
+// `steps::resolve_pipeline_graph`, or immediately after it in
+// `run_step_with_runner`) that every `NodeId` in the resolved `PipelineGraph`
+// is one of the 8 known node names, halting with
+// `StepResult::Halted(PipelineError::GraphInvalid{..})` before any node is
+// ever dispatched if not. This makes finding #2's panic path structurally
+// unreachable for any graph that passes step 2.
+//
+// A `NodeRunner` response IS configured for the offending node ("frobnicate")
+// so that, until this validation lands, the current code actually dispatches
+// and completes it — producing a clean wrong-`StepResult`-variant RED failure
+// (`Completed` instead of `Halted`) rather than relying on
+// `MockNodeRunner`'s stub-killing panic.
+
+/// A `PipelineGraph` referencing a node name outside the 8 known node names
+/// must halt with `GraphInvalid` before any node is dispatched or any state
+/// is reconstructed/persisted.
+#[tokio::test]
+async fn test_run_step_with_runner_graph_with_unknown_node_name_halts_before_any_dispatch() {
+    let graph = graph_from(vec![auto_node("frobnicate")], vec![]);
+    let issues = Arc::new(MockIssueTracker::empty());
+    let code_repository = Arc::new(MockCodeRepository::with_content(
+        &valid_constitutional_rules_content(),
+    ));
+    let config_loader = Arc::new(single_graph_loader(graph));
+    let llm_provider = Arc::new(MockLlmProvider::new());
+    let executor = build_executor(issues.clone(), code_repository, config_loader, llm_provider);
+
+    // Configured (not left empty) so that the pre-fix code path — which
+    // dispatches "frobnicate" because no step-2 name validation exists yet —
+    // produces a clean wrong-variant failure instead of a stub-killing panic.
+    let mut responses = HashMap::new();
+    responses.insert(node_id("frobnicate"), node_output("should-never-run"));
+    let runner = MockNodeRunner::new(responses);
+
+    let config = cli_config(None);
+    let result = run_step_with_runner(&executor, work_item(), &config, &runner).await;
+
+    assert!(
+        matches!(result, StepResult::Halted(PipelineError::GraphInvalid { .. })),
+        "a graph referencing a node name outside the 8 known node names must \
+         halt with GraphInvalid before any dispatch, got {result:?}"
+    );
+    assert!(
+        runner.calls().is_empty(),
+        "an unrecognised node name must never reach dispatch"
+    );
+    assert_eq!(
+        issues.list_comments_call_count(),
+        0,
+        "state reconstruction must not occur once the graph fails validation"
+    );
+    assert_eq!(
+        issues.post_comment_call_count(),
+        0,
+        "no state comment may be posted when the graph itself is invalid"
+    );
+}
+
+// ── Finding #4 (steps.rs:110): silent fallback to the default pipeline ─────────
+//
+// Currently: `config.pipeline_name == Some(name)`, `get_named_pipeline(..., name)`
+// returns `None` -> falls back to `get_default_pipeline` with no halt and no
+// warning. If a user requests `--pipeline foo` and mistypes it, they
+// silently get a different workflow than requested. The fix halts with
+// `StepResult::Halted(PipelineError::GraphInvalid{..})` instead of falling
+// back. This is distinct from (and must not regress) the two *legitimate*
+// default-pipeline paths already covered by
+// `test_run_step_with_runner_pipeline_name_none_uses_default_pipeline_graph`
+// and `test_run_step_with_runner_missing_config_file_falls_back_to_default_pipeline`
+// (`pipeline_name: None`, and `ConfigError::NotFound` respectively) — neither
+// of those tests is touched here.
+//
+// A `NodeRunner` response IS configured for the default graph's entry node
+// so that, until this fix lands, the current silent-fallback code actually
+// dispatches and completes it — producing a clean wrong-variant RED failure.
+
+/// An explicitly-requested pipeline name that cannot be resolved via
+/// `get_named_pipeline` must halt with `GraphInvalid`, not silently fall back
+/// to the default pipeline.
+#[tokio::test]
+async fn test_run_step_with_runner_pipeline_name_explicit_not_found_halts_without_fallback_to_default()
+ {
+    let default_graph = linear_graph(&["default-entry"]);
+    // "foo" is deliberately absent from named_graphs.
+    let loader = Arc::new(MockPipelineConfigurationLoader::new(
+        LoadOutcome::Ok,
+        HashMap::new(),
+        default_graph,
+    ));
+    let issues = Arc::new(MockIssueTracker::empty());
+    let code_repository = Arc::new(MockCodeRepository::with_content(
+        &valid_constitutional_rules_content(),
+    ));
+    let llm_provider = Arc::new(MockLlmProvider::new());
+    let executor = build_executor(issues.clone(), code_repository, loader, llm_provider);
+
+    let mut responses = HashMap::new();
+    responses.insert(node_id("default-entry"), node_output("default"));
+    let runner = MockNodeRunner::new(responses);
+
+    let config = cli_config(Some(PipelineName::new("foo").expect("non-empty pipeline name")));
+    let result = run_step_with_runner(&executor, work_item(), &config, &runner).await;
+
+    assert!(
+        matches!(result, StepResult::Halted(PipelineError::GraphInvalid { .. })),
+        "an explicitly-requested pipeline name that cannot be found must halt \
+         with GraphInvalid, not silently fall back to the default pipeline, \
+         got {result:?}"
+    );
+    assert!(
+        runner.calls().is_empty(),
+        "the default graph's entry node must never be dispatched when the \
+         explicitly requested pipeline is not found"
+    );
+    assert_eq!(
+        issues.post_comment_call_count(),
+        0,
+        "no state comment may be posted when halting on an unresolvable \
+         explicit pipeline name"
+    );
+}
+
+// ── Finding #5 (completion.rs:26): persist_comment swallows post_comment ───────
+// ── failures ─────────────────────────────────────────────────────────────────
+//
+// Since the GitHub state comment is the single source of truth for resume
+// (and the bot's own THREAT-022 trust anchor), losing a persist silently
+// means the next `run_step` call re-executes the just-completed node,
+// losing cost-accounting and potentially re-running side effects. The fix
+// makes `persist_comment`/`persist_terminal_state` return
+// `Result<(), StepResult>`, and every call site propagates that failure as
+// the step's actual `StepResult` instead of returning
+// `Completed`/`Escalated`/the original `Halted` as if persistence had
+// succeeded. This test targets `apply_completions_and_persist` specifically
+// (the path the review comment flags): a node runs successfully, but the
+// state write fails.
+
+/// A `post_comment` failure after a node completed successfully must
+/// surface as `StepResult::Halted`, not `StepResult::Completed`.
+#[tokio::test]
+async fn test_run_step_with_runner_apply_completions_persist_failure_halts_not_completed() {
+    let graph = linear_graph(&["intake", "architecture"]);
+    let issues = Arc::new(MockIssueTracker::empty().with_failing_post_comment());
+    let code_repository = Arc::new(MockCodeRepository::with_content(
+        &valid_constitutional_rules_content(),
+    ));
+    let config_loader = Arc::new(single_graph_loader(graph));
+    let llm_provider = Arc::new(MockLlmProvider::new());
+    let executor = build_executor(issues.clone(), code_repository, config_loader, llm_provider);
+
+    let mut responses = HashMap::new();
+    responses.insert(node_id("intake"), node_output("intake-output"));
+    let runner = MockNodeRunner::new(responses);
+
+    let config = cli_config(None);
+    let result = run_step_with_runner(&executor, work_item(), &config, &runner).await;
+
+    assert_eq!(
+        runner.calls(),
+        vec![node_id("intake")],
+        "the node must actually have run before the persist failure is hit — \
+         this test is about a *successful* node whose state write then fails"
+    );
+    assert!(
+        matches!(result, StepResult::Halted(_)),
+        "a state-write failure after a successful node completion must be \
+         surfaced as Halted, not Completed (which would make the caller \
+         believe the node's output/cost was durably recorded), got {result:?}"
+    );
+    assert_eq!(
+        issues.post_comment_call_count(),
+        1,
+        "exactly one post_comment attempt must be made (and must fail)"
+    );
+}
