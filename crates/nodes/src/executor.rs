@@ -27,7 +27,7 @@ use pipeline::{
 use tracing::instrument;
 
 use crate::gateway::LlmGateway;
-use crate::node::CliConfig;
+use crate::node::{CliConfig, NodeExecutionResult, NodeInput};
 
 // ─── StepResult ──────────────────────────────────────────────────────────────
 
@@ -182,3 +182,63 @@ pub async fn run_step(
 ) -> StepResult {
     todo!("See docs/spec/interfaces/nodes.md §run_step")
 }
+
+// ─── NodeRunner seam (RED-phase scaffolding, task #57) ───────────────────────
+//
+// `docs/spec/interfaces/nodes.md` step 6 says `run_step` must "dispatch to
+// the appropriate node execute function," but all seven concrete node bodies
+// (`IntakeNode::execute`, etc.) are still `todo!()` stubs tracked under
+// separate, still-open issues (#58-#62) — not dependencies of this task (#57).
+//
+// `NodeRunner` is the seam that lets `run_step_with_runner`'s orchestration
+// logic (state reconstruction, budget checks, edge evaluation, state
+// persistence) be exercised by the Tester's integration suite against a
+// `MockNodeRunner`, without ever touching the real `todo!()` node bodies.
+//
+// The Coder's GREEN implementation is expected to:
+//   1. Implement the full 8-step body of `run_step_with_runner` below.
+//   2. Add a `DefaultNodeRunner` that really dispatches to the node modules
+//      (expected to panic until #58-#62 land — that's fine, out of scope here).
+//   3. Rewrite the public `run_step` as a thin wrapper that builds a
+//      `DefaultNodeRunner` and delegates to `run_step_with_runner`.
+//
+// Both items below are intentionally minimal: signatures only, `todo!()`
+// bodies. No orchestration logic is implemented here — that is the Coder's
+// job in the GREEN phase.
+
+/// Dispatches a single node's `execute` function given its [`NodeId`] and
+/// [`NodeInput`].
+///
+/// Exists solely as a test seam (see module-level note above). `async_trait`
+/// is required here (not just in `[dev-dependencies]`) because this trait is
+/// used from production code in [`run_step_with_runner`] via `&dyn NodeRunner`,
+/// which requires object safety that a native `async fn` in a trait does not
+/// provide on its own.
+#[async_trait::async_trait]
+pub(crate) trait NodeRunner: Send + Sync {
+    /// Executes the node identified by `node_id` with the given `input`.
+    async fn run_node(&self, node_id: &NodeId, input: NodeInput) -> NodeExecutionResult;
+}
+
+/// Drives one step of the pipeline state machine for `work_item_id`, routing
+/// node dispatch (step 6) through the injected `runner` rather than calling
+/// the real node `execute` functions directly.
+///
+/// This holds the complete 8-step sequence documented on [`run_step`] above.
+/// The public `run_step` function is expected to become a thin wrapper around
+/// this function once the Coder lands the GREEN implementation.
+///
+/// See `docs/spec/interfaces/nodes.md` §run_step for the detailed decision
+/// table this function must implement.
+pub(crate) async fn run_step_with_runner(
+    _executor: &PipelineExecutor,
+    _work_item_id: WorkItemId,
+    _config: &CliConfig,
+    _runner: &dyn NodeRunner,
+) -> StepResult {
+    todo!("See docs/spec/interfaces/nodes.md §run_step — GREEN phase, task #57")
+}
+
+#[cfg(test)]
+#[path = "executor_tests.rs"]
+mod tests;

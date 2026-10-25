@@ -2504,6 +2504,7 @@ name = "nodes"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "handlebars",
  "pipeline",
  "proptest",
