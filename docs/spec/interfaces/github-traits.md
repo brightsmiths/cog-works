@@ -59,6 +59,7 @@ calls `EventSource::next_event` and dispatches each variant.
 
 ```rust
 pub enum GitHubEvent {
+    WorkItemReady { work_item_id: WorkItemId },
     LabelApplied { work_item_id: WorkItemId, label: String },
     CommentPosted { work_item_id: WorkItemId, author: String, body: String },
     SubIssueStateChanged { sub_work_item_id: SubWorkItemId, new_state: IssueState },
@@ -70,15 +71,18 @@ pub enum GitHubEvent {
 
 | Variant | When delivered | Pipeline action |
 |---------|----------------|-----------------|
-| `LabelApplied` | GitHub fires `issues/labeled` webhook | Intake node start (`cogworks:run`) or status label changes |
-| `CommentPosted` | GitHub fires `issue_comment/created` webhook | Human-gate approval check |
-| `SubIssueStateChanged` | GitHub fires `issues/closed` on a sub-issue | Fan-in gate evaluation |
-| `PullRequestReviewed` | GitHub fires `pull_request_review/submitted` webhook | Integration gate evaluation |
+| `WorkItemReady` | EventSource determines that the work item meets the configured readiness condition | Intake node start |
+| `LabelApplied` | EventSource reports a label change | Update provider-specific work-item state; a particular label is not defined as the trigger |
+| `CommentPosted` | EventSource reports a comment | Process a supported work-item command or approval indication |
+| `SubIssueStateChanged` | EventSource reports a sub-work-item state change | Fan-in readiness evaluation |
+| `PullRequestReviewed` | EventSource reports a PR review update | Evaluate the relevant CogWorks node gate |
 
-**Label-to-`PipelineLabel` mapping**: `LabelApplied.label` is a raw string.
-PR 6 (`context.rs`) will introduce `PipelineLabel` enum; at that point the
-`cli` event dispatcher parses labels and filters unrecognised values before
-passing events to the pipeline state machine.
+**Readiness mapping**: `WorkItemReady` is the normalized event presented to the
+pipeline. The EventSource/GitHub adapter determines readiness from its provider
+configuration and current work-item state. This interface does not prescribe a
+label, project status, webhook event/action mapping, or GateKeeper/factory
+approval encoding. Such external approvals are distinct from CogWorks node
+gates and are passed through the work-item interface.
 
 ---
 
@@ -176,6 +180,11 @@ pub struct Milestone {
     pub due_on: Option<DateTime<Utc>>,
 }
 ```
+
+`IssueState` represents the provider's basic open/closed lifecycle only. Any
+readiness stage or external approval status used by the pipeline is normalized
+by the work-item/EventSource adapter; optional project-board fields are not a
+required source of pipeline readiness.
 
 ---
 

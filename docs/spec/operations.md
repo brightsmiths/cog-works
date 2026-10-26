@@ -6,40 +6,39 @@ This document covers deployment, monitoring, cost management, and operational ru
 
 ## Deployment Model
 
-### CogWorks Binary + Domain Services
+### CogWorks Binary, Job Runtime, and Domain Services
 
-CogWorks ships as a single Rust binary. Domain services are separate processes — each may be a separate binary, a container, or a script. The Rust domain service may be distributed alongside CogWorks for convenience but runs as a separate process.
+CogWorks ships as a Rust binary. For each implementation job, its orchestrator requests one ephemeral container through the configured infrastructure runtime provider and requests cleanup when the job terminates. The provider may use Docker, Kubernetes, or a cloud runtime; CogWorks does not bind the contract to a specific provider. Domain-specific validation remains delegated to separately managed domain services through the Extension API.
 
 **Required runtime dependencies:**
 
-- GitHub API access (token or GitHub App credentials)
-- LLM API access (Anthropic API key)
+- GitHub API and LLM provider access through the credential-provider interface
 - At least one registered domain service (running and reachable via configured transport)
+- An implementation-job container runtime provider
 - Network access (GitHub API, LLM API)
 
-**Domain service dependencies (owned by each domain service, NOT by CogWorks):**
+**Domain service dependencies (owned by each domain service):**
 
 - Working copy management (git clone, checkout, etc.)
 - Domain-specific toolchains (e.g., Rust toolchain for Rust domain service, KiCad for KiCad domain service)
 - Domain-specific fixtures and test infrastructure
 
-**No required infrastructure:**
+**Other infrastructure not required:**
 
 - No database
 - No message queue
 - No cache server
-- No container orchestration (for CLI mode)
 
 ### Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `COGWORKS_GITHUB_TOKEN` | Yes | GitHub API token (PAT or App installation token) |
-| `COGWORKS_LLM_API_KEY` | Yes | Anthropic API key |
 | `COGWORKS_LOG_LEVEL` | No | Log verbosity (default: `info`) |
 | `COGWORKS_LOG_FORMAT` | No | Log format: `json` (default) or `text` (for local dev) |
 | `COGWORKS_TEMP_DIR` | No | Base directory for temporary files (default: system temp) |
 | `COGWORKS_DOMAIN_SERVICES_CONFIG` | No | Path to domain service registration config (default: `.cogworks/services.toml`) |
+
+Credentials are resolved by the Vault library through the credential-provider interface. Credential authentication, rotation, and other lifecycle details are provider-owned and are not configured through a CogWorks-specific key field in this specification.
 
 Domain service configuration is specified in a registration file (default `.cogworks/services.toml`) rather than environment variables, to support multiple services with varying transports. The config contains only connection information — capabilities, artifact types, interface types, and domain are discovered dynamically via the handshake protocol:
 
@@ -71,7 +70,7 @@ On startup, CogWorks performs a handshake with each registered service to discov
 
 ```
 cogworks run --issue <number>               # Process a single work item (one step)
-cogworks run-all --repo <owner/repo>        # Scan repo for trigger labels, process each
+cogworks run-all --repo <owner/repo>        # Process work items reported ready by the configured event/work-item adapter
 cogworks run-all --repo <owner/repo> --milestone "v2.0"  # Process only work items in a specific milestone
 cogworks status --issue <number>            # Display current pipeline state (read-only)
 cogworks cost-report --issue <number>       # Display cost report for a pipeline
@@ -121,7 +120,7 @@ All log output is structured JSON. Every log entry includes:
 
 ### Key Metrics (for future service mode)
 
-When running as a service, expose these metrics:
+The following are possible external analysis views, not named metrics that CogWorks promises to expose. CogWorks records stable pipeline fields through `tracing`: run ID, node ID, event kind (start, completion, retry, or rework), total USD cost at node completion, retry root cause, and rework misalignment type. External systems may derive only measurements supported by the data actually exported.
 
 | Metric | Type | Description |
 |--------|------|-------------|
@@ -154,7 +153,7 @@ When running as a service, expose these metrics:
 | `cogworks_semantic_stalling_total` | Counter | Semantic stalling escalations (same error category across consecutive retries, by node) |
 | `cogworks_project_sync_failures_total` | Counter | GitHub Project board update failures (should not affect pipeline; alert if high) |
 
-For CLI mode, these are logged as structured events. For service mode, they are exposed as Prometheus metrics.
+The CLI sends structured tracing output to JSON console logging and configures the OpenTelemetry OTLP exporter. Metric series, dashboards, aggregation, and alerting are responsibilities of external observability systems.
 
 ### Audit Trail on GitHub
 
@@ -256,24 +255,23 @@ Remaining                269,200    $6.56
 
 ### Metrics Architecture
 
-CogWorks emits structured metric data points at pipeline boundaries for external consumption. CogWorks itself does not store, aggregate, or dashboard metrics — these concerns are delegated to purpose-built external tools.
+CogWorks records pipeline observability fields through structured `tracing` spans and events. The CLI routes these to JSON console output and the configured OpenTelemetry OTLP exporter. CogWorks does not define a separate metric sink, compute a separate metric data-point model, store metrics, aggregate metrics, or provide dashboards.
 
 ```mermaid
 graph TD
-    A[CogWorks Pipeline] -->|emits data points| B[Metric Sink Abstraction]
-    B --> C[Prometheus Push Gateway]
-    B --> D[OpenTelemetry Collector]
-    B --> E[Structured Log Output]
-    C --> F[Metrics Backend<br/>Prometheus / Mimir / InfluxDB]
-    D --> F
-    F --> G[Dashboard<br/>Grafana / equivalent]
+   A[CogWorks Pipeline] -->|tracing spans and events| B[CLI tracing subscriber]
+   B --> C[JSON console output]
+   B --> D[OpenTelemetry OTLP exporter]
+   D --> E[OpenTelemetry Collector]
+   E --> F[External observability backend]
+   F --> G[Dashboard / alerting]
 ```
 
-When no external metric sink is configured, CogWorks logs data points to structured output. The pipeline operates identically whether or not a sink is configured — no metrics system is required for CogWorks to function.
+External systems derive metric views from the span fields available to them. CogWorks operation does not depend on an external metrics backend.
 
 ### Metric Categories
 
-CogWorks emits raw data points. The following categories define how external systems should organize and aggregate these data points.
+The following categories are examples of external operational analysis. They are not a promise that CogWorks exports every listed measurement; queries must be limited to fields actually available from tracing and other external sources.
 
 #### Pipeline Effectiveness Metrics
 
@@ -352,25 +350,9 @@ Measure → Detect → Diagnose → Improve → Verify
 
 Improvements identified through the review cadence process should be tracked as regular GitHub Issues tagged with the `process:improvement` label. This keeps improvement work visible alongside feature work and allows CogWorks pipeline runs to implement process improvements when appropriate.
 
-### Metric Sink Configuration
+### OpenTelemetry Export
 
-The metric sink is configured in `.cogworks/config.toml`:
-
-```toml
-[metrics]
-# No sink configured: metrics appear in structured log output only
-# sink = "none"
-
-# Prometheus Push Gateway
-# sink = "prometheus"
-# prometheus_gateway_url = "http://localhost:9091"
-# prometheus_job = "cogworks"
-
-# OpenTelemetry Collector
-# sink = "otlp"
-# otlp_endpoint = "http://localhost:4317"
-# otlp_protocol = "grpc"  # or "http"
-```
+The CLI configures the OpenTelemetry OTLP exporter endpoint. The collector and downstream backend determine routing, aggregation, retention, dashboards, and alerting. CogWorks has no `[metrics]` sink configuration section.
 
 ---
 

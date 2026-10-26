@@ -2,7 +2,7 @@
 
 ## What CogWorks Is
 
-CogWorks is a deterministic orchestration system that receives GitHub Issues, executes a structured SDLC pipeline (classify → design → plan → implement → review), and produces Pull Requests with fully reviewed code. It coordinates LLM calls for reasoning tasks and conventional tooling for everything else.
+CogWorks is a deterministic orchestration system that receives engineering work items, executes a structured pipeline (classify → design → plan → test-first implementation → validate and iterate → review), and prepares changes for human-controlled integration. It supports software and other engineering domains by coordinating LLM reasoning, deterministic tools, and domain-specific validation behind interfaces.
 
 ## Design Philosophy
 
@@ -10,7 +10,7 @@ These principles are load-bearing — they constrain every architectural decisio
 
 1. **Deterministic by default.** Every step that can be performed by conventional tooling MUST be. LLMs are invoked only for reasoning, synthesis, or natural language understanding. This controls cost and makes the system debuggable.
 
-2. **Quality through iteration.** One implementation with maximum context, iterated based on structured feedback. Not many candidates in parallel.
+2. **Quality through test-first iteration.** Establish tests or equivalent domain acceptance checks before implementation, then iterate on structured validation feedback. One implementation with maximum context, not many candidates in parallel.
 
 3. **Structured I/O at every boundary.** Every LLM call has defined input and output schemas. Outputs are validated before the pipeline proceeds.
 
@@ -41,8 +41,8 @@ This design choice has several consequences:
 | Mode | Phase | Description |
 |------|-------|-------------|
 | **CLI** | Phase 1 | Direct invocation: `cogworks run --issue <number>` |
-| **Poll** | Phase 2+ | Periodic scan for trigger labels, invokes step function per work item |
-| **Webhook** | Phase 3+ | GitHub App events via smee.io (dev) or direct (prod), invokes step function per event |
+| **Poll** | Phase 2+ | Periodically asks the work-item adapter for ready work, then invokes the step function |
+| **Webhook** | Phase 3+ | Provider events via a configured adapter invoke the step function; readiness mapping stays behind the EventSource interface |
 
 All three modes share the same core step function. The difference is only in how and when the step function is triggered.
 
@@ -154,7 +154,7 @@ Multiple named pipelines can be defined in a single configuration file. The Inta
 
 ## Data Flow Across Nodes
 
-Each node produces artifacts that flow into downstream nodes via the pipeline working directory or GitHub:
+Each node produces artifacts that flow into downstream nodes via durable repository/work-item records or a job-local workspace:
 
 | Node | Input | Output | Storage |
 |------|-------|--------|---------|
@@ -162,7 +162,7 @@ Each node produces artifacts that flow into downstream nodes via the pipeline wo
 | 2. Architecture | Classification + repo context + loaded Context Packs | Specification document (Markdown) | Pull Request |
 | 3. Interface Design | Approved spec + repo context | Interface definition files (source code) | Pull Request |
 | 4. Planning | Approved spec + approved interfaces | Sub-work-item issues with dependency graph | GitHub Issues |
-| 5. Code Generation | Sub-work-item + spec + interfaces + prior SWI outputs | Implementation code + tests | Working directory → branch |
+| 5. Code Generation | Sub-work-item + spec + interfaces + prior SWI outputs | Tests or equivalent acceptance checks, then implementation | Ephemeral implementation container → repository branch |
 | 6. Review Gate | Generated code | Review results (pass/fail + findings) | Pipeline state (fed back to Code Gen or forward to Integration) |
 | 7. Integration | Reviewed code | Pull Request | GitHub PR |
 
@@ -178,8 +178,9 @@ CogWorks needs file access in two distinct modes:
 
 Strategy:
 
-- **Pipeline working directory**: Each pipeline run has a dedicated git worktree checked out from the target repository. Intermediate artifacts (specs, interface definitions, plans, generated code) are written to the working directory before being committed as PRs. The working directory persists across all nodes within a single pipeline run and is cleaned up on completion. The working directory is a **performance optimisation** — pipeline state is always recoverable from GitHub artifacts (PRs, issue comments) in case of failure.
-- **Domain services manage their own working copies.** CogWorks provides repository information to domain services via the Extension API request envelope (`repository.path` and `repository.ref`). The `path` field is the local filesystem path to the repository root or a clone URL depending on deployment; the `ref` field is the git ref to validate against. Domain services handle cloning or checkout as needed. For co-located services (Unix socket), a shared filesystem path may be used; for remote services (HTTP), the domain service clones from the provided URL.
-- **Shared libraries**: CogWorks publishes shared libraries that domain services can use for common operations: shallow clone management, branch creation, temporary directory lifecycle, commit/push. These are optional — domain services may implement their own.
+- **Implementation job containers**: The orchestrator requests one ephemeral container per implementation job through a runtime-provider interface. CogWorks owns the request and cleanup lifecycle; the selected provider owns runtime-specific operations. The container is temporary and is not a pipeline-state store.
+- **Domain-specific validation**: Tests, toolchains, and validation are delegated through the Domain Service Client. CogWorks defines the generic test-first, implementation, validation, and iteration flow but does not select domain-specific tools.
+- **Durable outputs**: Specifications, interfaces, plans, implementation outputs, and pipeline state are persisted through the repository and work-item interfaces as required by the current pipeline. Container-local files are cleaned up with the job.
 - **Branch per artifact**: `cogworks/<work-item-number>/<node-slug>` (e.g., `cogworks/42/spec`, `cogworks/42/interfaces`, `cogworks/42/swi-3`)
-- **Cleanup**: The pipeline working directory is removed when the pipeline run completes. Domain service temporary directories are removed after each domain service operation. Branches cleaned up after PR merge (standard GitHub settings).
+
+CogWorks does not merge changes, own releases, or publish artifacts. External factory/GateKeeper approvals are represented through the work-item interface and remain distinct from CogWorks' configurable node gates and safety overrides.

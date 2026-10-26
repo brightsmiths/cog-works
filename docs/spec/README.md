@@ -1,13 +1,13 @@
 # CogWorks Architecture Specification
 
-This folder contains the living architecture specification for CogWorks — a deterministic orchestration system that manages autonomous code generation through a structured SDLC pipeline.
+This folder contains the living architecture specification for CogWorks — a deterministic orchestration system for software and other engineering work, coordinated through a structured test-first pipeline.
 
 ## How to Read This Spec
 
 Start with **overview.md** for the big picture, then **vocabulary.md** to understand the domain language. From there, the documents can be read in any order depending on what you need.
 
 | Document | Purpose |
-|----------|---------|
+| ---------- | --------- |
 | [overview.md](overview.md) | System context, scope, design philosophy, high-level data flow |
 | [vocabulary.md](vocabulary.md) | Domain concepts with precise definitions and constraints |
 | [requirements.md](requirements.md) | Functional requirements (REQ-* IDs) — what the system must do |
@@ -36,7 +36,7 @@ CogWorks provides advanced validation, context management, and extensibility cap
 
 3. **Pyramid Summaries** — Multi-level context representation (L1: one-line, L2: paragraph, L3: full interface, L4: source) that enables efficient LLM context assembly. Dependencies further from the work scope get higher-level summaries; direct dependencies get full source.
 
-4. **Domain Generalisation** — CogWorks is domain-ignorant. It does not contain code for any specific domain. Domain services (software, electrical, mechanical, etc.) are external processes that communicate through the Extension API. The Rust domain service ships as a reference implementation.
+4. **Domain Generalisation** — CogWorks is domain-agnostic across software and other engineering. It owns the generic test-first, implementation, validation, and iteration flow; domain-specific tests, toolchains, and validation remain behind the Extension API. The Rust domain service ships as a reference implementation.
 
 5. **Cross-Domain Interface Registry** — A version-controlled, human-authored repository of interface contracts that span domains (CAN bus, power rails, mounting points, etc.). Enables deterministic validation that changes in one domain respect constraints from others.
 
@@ -48,7 +48,7 @@ CogWorks provides advanced validation, context management, and extensibility cap
 
 9. **Constitutional Security Layer** — Non-overridable behavioral rules loaded as a privileged system prompt component on every pipeline run, before context assembly and before any LLM call. Prevents prompt injection, scope violations, and unauthorized capability generation. Injection detection halts the pipeline immediately; work items enter a hold state requiring human review.
 
-10. **Performance Metrics Emission** — CogWorks emits structured metric data points at pipeline boundaries (per-node and per-pipeline) as structured `tracing` events whose field names follow OpenTelemetry semantic conventions. The OpenTelemetry SDK exporter configured in `cli` ships these events to any OTel-compatible backend (Prometheus, Grafana, etc.). No custom `MetricSink` abstraction or pluggable backend interface exists in CogWorks itself — metric routing and aggregation are handled entirely by the OTel SDK and the operator's chosen exporter. Metric emission is non-blocking; the pipeline operates identically with or without a configured exporter.
+10. **Tracing-Based Observability** — CogWorks records structured pipeline fields through `tracing`. The CLI configures JSON console logging and an OpenTelemetry OTLP exporter. External systems derive metrics and dashboards from available exported fields; CogWorks has no custom metric-sink abstraction or metrics storage.
 
 11. **Tool Access Control** — Each pipeline node receives a scoped tool profile controlling which tools (filesystem, git, domain service, shell, network) it can access and with what constraints. Defence-in-depth enforcement operates at three independent layers: orchestrator filtering (unscoped tools never appear in LLM calls), tool-level scope validation (each tool validates parameters against constraints), and OS-level sandboxing for write-capable nodes. Only Code Generation has write access by default.
 

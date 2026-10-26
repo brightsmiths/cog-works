@@ -13,7 +13,7 @@ A configurable directed graph of nodes that takes a work item from intake to PR 
 - Identified by: The parent work item's GitHub Issue number
 - Contains: A directed graph of nodes connected by edges, defined in `.cogworks/pipeline.toml` or the built-in default
 - State: Represented by GitHub labels on the parent work item and a structured state comment (JSON) updated at each node boundary
-- Lifespan: From `cogworks:run` label application to terminal node completion or pipeline failure
+- Lifespan: From the EventSource/work-item adapter reporting readiness to terminal node completion or pipeline failure
 - Default: Repositories with no `.cogworks/pipeline.toml` get the default linear pipeline (Intake → Architecture → Interface Design → Planning → Code Generation → Review → Integration)
 - See also: Named Pipeline, Pipeline Configuration
 
@@ -99,6 +99,7 @@ A configurable decision point after a node completes where the pipeline may paus
 - Override: Safety-critical work items force `human-gated` for all code-producing nodes regardless of configuration
 - Shift work boundary: Sets a default gate policy per work item classification — nodes before the boundary default to `human-gated`, nodes after default to `auto-proceed`
 - Represented by: `cogworks:awaiting-review` label when waiting
+- Boundary: This is a CogWorks pipeline-advancement mechanism. External factory or GateKeeper approvals are separate statuses passed through the work-item interface; they do not replace or redefine configured CogWorks gates.
 
 ### Step Function
 
@@ -118,7 +119,7 @@ A GitHub Issue that represents a unit of work to be implemented by CogWorks.
 
 - Identified by: GitHub Issue number
 - Contains: Title, description, optional structured fields (affected components, priority, type)
-- Trigger: Pipeline starts when `cogworks:run` label is applied
+- Trigger: Pipeline starts when the EventSource/work-item adapter reports that the work item meets its configured readiness condition; no particular label, project status, or webhook mapping is prescribed
 - State labels: `cogworks:node:<node-name>`, `cogworks:safety-critical`, `cogworks:processing`, `cogworks:awaiting-review`
 - Milestone: If the work item has a GitHub Milestone set, it is preserved and inherited by sub-work-items (see Milestone)
 
@@ -344,15 +345,22 @@ A configurable limit on total LLM tokens consumed per pipeline run.
 - Reporting: Per-node and per-sub-work-item breakdown
 - Parallel execution: Shared across concurrent nodes; budget checks are atomic
 
-### Pipeline Working Directory
+### Implementation Job Container
 
-A dedicated git worktree maintained by the orchestrator for the duration of a pipeline run.
+One ephemeral container requested by CogWorks' orchestrator for a single implementation job through an infrastructure runtime-provider interface.
 
-- Purpose: Accumulates intermediate artifacts (specs, interface definitions, plans, generated code) across nodes within a single pipeline run
-- Persistence: Persists across all nodes within a single pipeline run; cleaned up on pipeline completion
-- Recovery: State MUST be recoverable from GitHub artifacts (PRs, issue comments) in case of failure — the working directory is a performance optimisation, not a durability mechanism
-- Relationship to domain service working copies: The pipeline working directory is orchestrator-level state. Domain services still manage their own working copies for toolchain operations (compile, simulate, etc.) via the Extension API context.
-- Not a substitute for GitHub: All durable state MUST be written to GitHub (PRs, issue comments, labels) before cleanup
+- Ownership: The orchestrator requests the job and requests cleanup on success, failure, or cancellation; the provider performs runtime-specific operations
+- Provider neutrality: Docker, Kubernetes, and cloud runtimes are possible implementations, not CogWorks contract choices
+- Durability: Container-local state is temporary; pipeline state and deliverables remain recoverable through repository and work-item interfaces
+- Validation: Tests and domain-specific validation are selected through the Domain Service Client
+
+### Implementation Job
+
+A single test-first engineering task executed by one ephemeral container.
+
+- Sequence: Establish tests or equivalent domain acceptance checks, implement, validate, then iterate on structured feedback within the configured budgets
+- Scope: Applies to software and other engineering domains
+- Tool access: Validation and Git operations requested by an LLM use deterministic, scoped tools rather than arbitrary shell commands
 
 ### Pipeline Configuration
 
@@ -425,23 +433,13 @@ A complete record of every decision, LLM call, validation result, and state tran
 - Storage: GitHub issue comments or linked artifacts
 - Purpose: ISO 9001 traceability, systematic improvement, debugging
 
-### Performance Metric
+### Observability Field
 
-A structured data point emitted by CogWorks at pipeline run boundaries for consumption by external metrics systems.
+A stable structured field recorded on a tracing span by CogWorks' observability hooks.
 
-- Emitted at: Each node boundary and pipeline completion
-- Contents: Per-node wall-clock timings, retry counts with root cause categories, LLM token usage per node, domain service invocation timings, satisfaction scores, final disposition, total pipeline cost
-- Dimensions: Pipeline run ID, work item ID, classification, safety classification, repository identifier, node name, timestamp
-- Purpose: Enable external tools (Prometheus, Mimir, InfluxDB, Grafana) to compute trend metrics (convergence rate, first-pass success rate, cost efficiency, etc.)
-- CogWorks does NOT store, aggregate, or dashboard metrics — it emits raw data points and delegates those concerns to purpose-built external tools
-
-### Metric Sink
-
-An abstraction through which CogWorks emits performance metric data points to an external metrics backend.
-
-- Implementations: Prometheus push gateway, OpenTelemetry collector, InfluxDB line protocol, structured log output (fallback)
-- Optional: CogWorks operates correctly without a configured metric sink; metrics appear in structured logs but are not pushed externally
-- Analogy: Similar to how the LLM Provider trait abstracts LLM API access, the Metric Sink trait abstracts metrics emission
+- Current fields include pipeline run ID, node ID, event kind, total USD cost at node completion, retry root cause, and rework misalignment type
+- Export: The CLI routes tracing through JSON console output and the OpenTelemetry OTLP exporter
+- Derived metrics: External observability systems may aggregate fields actually exported; CogWorks does not define a metric-sink abstraction or promise unavailable measurements
 
 ### Improvement Backlog
 
