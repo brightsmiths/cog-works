@@ -17,7 +17,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 ## Risk Summary
 
 | ID | Risk | L | I | Score | Status |
-|----|------|---|---|-------|--------|
+| ---- | ------ | --- | --- | ------- | -------- |
 | CW-R01 | Subtle logic error in safety-critical firmware | 4 | 5 | 20 | Mitigations required |
 | CW-R02 | LLM reward-hacks the review process | 3 | 4 | 12 | Mitigations required |
 | CW-R03 | Security vulnerability in generated code | 3 | 4 | 12 | Mitigations required |
@@ -54,7 +54,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R01-M1 | Safety-critical modules require mandatory human review regardless of CogWorks review results (REQ-REVIEW-006, REQ-CLASS-002). No configuration option to bypass. | Preventive | Designed |
 | CW-R01-M2 | Maintain a catalogue of "LLM failure patterns" (sign errors, off-by-one, integer overflow at boundaries, unit confusion). Write specific scenarios targeting these patterns. Update catalogue from audit trail analysis. | Detective | Planned |
 | CW-R01-M3 | Implement property-based testing (proptest) for all safety-critical modules. Properties include: angle never exceeds physical limits, velocity never exceeds safe threshold, watchdog always triggers on comms loss, brake always engages on fault. | Detective | Planned |
@@ -79,7 +79,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R02-M1 | Use a different LLM model (or provider) for review passes than for code generation. Configure via model selection per node. | Preventive | Designed |
 | CW-R02-M2 | Prompt templates, scenario specifications, and the conformance test suite are in a protected path with CODEOWNERS requiring human approval for any change. CogWorks PRs touching these paths are automatically flagged. | Preventive | Planned |
 | CW-R02-M3 | Deterministic checks (compilation, linting, property tests, static analysis) are immune to LLM bias. Maximise the coverage of deterministic validation. | Preventive | Designed |
@@ -104,7 +104,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R03-M1 | Dedicated security review pass in the review gate (REQ-REVIEW-002) with a domain-specific security checklist covering: OTA authentication, CAN bus message authentication, bootloader integrity, panic paths in no-std, unbounded allocations, unsafe block justification. | Detective | Designed |
 | CW-R03-M2 | Deterministic security scanning as part of the Rust domain service: `cargo audit` (dependency CVEs), `cargo clippy` security lints, `cargo-geiger` (unsafe code auditing). These run before LLM review. | Detective | Planned |
 | CW-R03-M3 | Generated code must never contain credentials, tokens, or secrets. The constitutional layer explicitly prohibits this. CI checks scan for high-entropy strings and known credential patterns. | Preventive | Planned |
@@ -128,7 +128,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R04-M1 | Architecture compliance review pass checks pattern consistency, not just interface compliance. Existing code patterns are surfaced in context via pyramid summaries. | Detective | Designed |
 | CW-R04-M2 | Track code quality metrics (complexity, coupling, consistency) per CogWorks pipeline run. Alert on declining trends. | Detective | Planned |
 | CW-R04-M3 | Periodic human-driven refactoring work items to clean up accumulated debt. Schedule quarterly. | Corrective | Planned |
@@ -151,7 +151,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R05-M1 | Define clear label ownership: CogWorks owns `cogworks:*` labels. External systems own their own label namespaces (e.g., `state:*`, `process:*`). Neither system modifies the other's labels. | Preventive | Planned |
 | CW-R05-M2 | Use GitHub's event system for coordination: external systems react to PR creation webhooks, not polling. CogWorks acts, GitHub emits event, external system reacts — clear sequence. | Preventive | Planned |
 | CW-R05-M3 | Collision detection: if either system detects inconsistent label state, halt processing, post a warning comment, and escalate to human. Do not auto-resolve. | Detective | Planned |
@@ -174,7 +174,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R06-M1 | Extension API conformance test suite run in CI for every domain service release. | Preventive | Planned |
 | CW-R06-M2 | Sanity checks in the orchestrator: validate response consistency (pass=true with blocking diagnostics is a contradiction), check for suspicious results (zero tests run, zero artifacts checked). | Detective | Planned |
 | CW-R06-M3 | Circuit breaker: if a domain service fails N consecutive times, stop retrying and escalate. | Preventive | Planned |
@@ -197,7 +197,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R07-M1 | Domain services report `status: "incomplete"` when they cannot confidently extract all relevant values. Incomplete extraction is a warning requiring human review, not a silent pass. | Detective | Planned |
 | CW-R07-M2 | For critical constraints (bus load, power budget, thermal limits), require explicit declaration annotations in source code (e.g., `// @cogworks bus_load: 0.48`). The constraint validator checks the declaration against the contract, and the domain service's `review_rules` checks that the declaration matches reality. | Preventive | Planned |
 | CW-R07-M3 | Downstream manufacturing gates (external to CogWorks) require physical test results before production release. Physical test validation is the final line of defence for cross-domain constraints. | Detective | Planned |
@@ -220,7 +220,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R08-M1 | Each twin has a conformance test suite that runs against the real system (REQ-DTU-004). Schedule monthly and on every hardware/firmware revision. | Detective | Planned |
 | CW-R08-M2 | Track twin conformance status. If conformance tests fail, mark the twin as stale. Scenario validation results from stale twins are flagged as unverified. | Detective | Planned |
 | CW-R08-M3 | Downstream gate systems check twin conformance status before accepting scenario validation results for production releases. | Preventive | Planned |
@@ -243,7 +243,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R09-M1 | Twin specifications document fidelity boundaries: what behaviours are replicated and what is simplified or omitted. | Preventive | Planned |
 | CW-R09-M2 | Scenarios are tagged with required fidelity level. Scenarios requiring higher fidelity than the available twin are flagged as requiring physical test validation. | Preventive | Planned |
 | CW-R09-M3 | Twins support failure injection (REQ-DTU-003) to test degraded-mode behaviour even when base fidelity is limited. | Detective | Planned |
@@ -266,7 +266,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R10-M1 | Per-pipeline cost budget with automatic halt (REQ-CODE-004). | Preventive | Designed |
 | CW-R10-M2 | Per-call token limit so no single LLM invocation consumes a disproportionate share of the budget. | Preventive | Planned |
 | CW-R10-M3 | Hard billing alert at the LLM provider level (independent of CogWorks' own tracking). Defence-in-depth against bugs in cost tracking. | Detective | Planned |
@@ -290,7 +290,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R11-M1 | CogWorks runs in an isolated environment with access only to: its GitHub token (minimum required scopes), LLM API key, and domain service sockets. No production database, manufacturing, or cloud service credentials. | Preventive | Planned |
 | CW-R11-M2 | GitHub token scoped to minimum permissions: repo contents read/write, issues read/write, pull requests read/write. No admin, no org-level access. | Preventive | Planned |
 | CW-R11-M3 | Domain service test execution runs in a network-restricted sandbox — no outbound network except to DTU twins on localhost. | Preventive | Planned |
@@ -316,9 +316,9 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R12-M1 | CogWorks only processes issues from authorised users (configurable allowlist or restricted to repository collaborators). | Preventive | Planned |
-| CW-R12-M2 | Trigger label (`cogworks:run`) can only be applied by authorised users (enforced via GitHub branch protection or CODEOWNERS). | Preventive | Planned |
+| CW-R12-M2 | The configured readiness signal (default label mapping: `cogworks:run`) can only be applied by authorised users, as enforced by the work-item provider's permissions. | Preventive | Planned |
 | CW-R12-M3 | Constitutional layer treats all issue body content as data, not instructions. Injection attempts are detected and halt the pipeline (see CW-R18 mitigations). | Preventive | Planned |
 | CW-R12-M4 | Security review pass in the review gate checks for common backdoor patterns, unauthorized network calls, and data exfiltration indicators. | Detective | Designed |
 | CW-R12-M5 | Scope enforcement prevents generation of capabilities not in the approved specification. | Preventive | Planned |
@@ -341,7 +341,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R13-M1 | Audit trail completeness check at pipeline completion: verify all expected events were recorded. Missing events trigger a warning in the final cost/status comment. | Detective | Planned |
 | CW-R13-M2 | Include a content hash in each audit comment linking to the previous comment's hash, creating a lightweight tamper-detection chain. Editing a comment breaks the hash chain. | Detective | Planned |
 | CW-R13-M3 | Retry audit comment posting with backoff on API failure. Buffer events in memory and batch-post if individual posts fail. | Preventive | Planned |
@@ -364,7 +364,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R14-M1 | Safety-critical modules require human review (REQ-REVIEW-006). This forces engagement with the most important code. | Preventive | Designed |
 | CW-R14-M2 | CogWorks-generated specifications and PR descriptions include rationale and design decisions, making the generated code's intent understandable. | Preventive | Designed |
 | CW-R14-M3 | Periodic human-driven refactoring work items (see CW-R04-M3). Refactoring requires understanding the code, maintaining comprehension. | Corrective | Planned |
@@ -387,7 +387,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R15-M1 | Staleness detection is mandatory before using any cached summary. File hash comparison detects changes. Stale summaries are never used (see constraints.md). | Preventive | Designed |
 | CW-R15-M2 | Context packages are logged in the audit trail (file list and summary levels used). Post-hoc review can identify context quality issues. | Detective | Designed |
 | CW-R15-M3 | Deterministic priority-based truncation ensures the most relevant files are always included. Truncation decisions are logged. | Preventive | Designed |
@@ -410,7 +410,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R16-M1 | Prompt templates are version-controlled and subject to code review (existing design). | Preventive | Designed |
 | CW-R16-M2 | Protected path status: prompt templates require human-approved PR to change. CogWorks cannot modify its own templates (see CW-R18). | Preventive | Planned |
 | CW-R16-M3 | Track output quality metrics per template version. A quality regression after a template change indicates the change should be reverted or refined. | Detective | Planned |
@@ -433,7 +433,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R17-M1 | LLM Provider abstraction trait enables switching providers without changing business logic (existing design). | Preventive | Designed |
 | CW-R17-M2 | Pin model versions in configuration. Do not use "latest" model aliases. Test against specific model versions. | Preventive | Planned |
 | CW-R17-M3 | Multi-provider support planned (see tradeoffs.md). Adding a second provider (e.g., OpenAI) provides failover capability. | Preventive | Future |
@@ -458,7 +458,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R18-M1 | Define protected path patterns: constitutional rules, prompt templates, scenario specifications, conformance test suite, output schemas, Extension API schemas. CogWorks MUST NOT create or modify files matching these patterns. | Preventive | Planned |
 | CW-R18-M2 | CODEOWNERS rules require human approval for any change to protected paths. CogWorks-generated PRs touching protected paths are automatically flagged and require additional human review. | Preventive | Planned |
 | CW-R18-M3 | Constitutional layer rule: specification scope is binding. CogWorks cannot implement capabilities not in the approved spec. A work item would need to explicitly specify changes to protected files, which human reviewers would catch. | Preventive | Planned |
@@ -483,7 +483,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R19-M1 | Load-time DAG validation: cycle detection (with `max_traversals` as the only allowed back-edges), reachability analysis (every node has a path to a terminal node). Configuration that fails validation is rejected before any execution. | Preventive | Designed |
 | CW-R19-M2 | Hard cap on rework loop traversals enforced in executor code regardless of what the configuration specifies (code-level guard cannot be overridden by configuration). | Preventive | Designed |
 | CW-R19-M3 | LLM-evaluated edge conditions MUST have a deterministic fallback. A condition that returns no parseable result defaults to the fallback, not to infinite retry. | Preventive | Designed |
@@ -494,11 +494,11 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 
 ---
 
-### CW-R20: Metric Data Quality Degradation
+### CW-R20: Tracing Field Coverage Degradation
 
-**Description:** If audit trail data quality degrades (e.g., missing node timings, incomplete retry records), the emitted metric data points become unreliable. External dashboards and alerting based on these metrics may produce misleading conclusions, leading to incorrect process improvement decisions.
+**Description:** If tracing field coverage degrades (e.g., missing node lifecycle or retry/rework fields), external systems may derive incomplete measurements and produce misleading process-improvement conclusions.
 
-**Likelihood:** 2 (Unlikely — audit trail completeness is enforced by ASSERT-METRIC-001, ASSERT-METRIC-002 and constraints)
+**Likelihood:** 2 (Unlikely — tracing field coverage is specified by ASSERT-OBS-001 through ASSERT-OBS-003 and constraints)
 
 **Impact:** 3 (Moderate — incorrect improvement decisions waste effort but don't affect pipeline correctness)
 
@@ -507,12 +507,12 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
-| CW-R20-M1 | Metric data point computation validates required fields before emission. Incomplete data points are logged with specific missing fields identified. | Detective | Designed |
-| CW-R20-M2 | Audit trail completeness enforced by existing assertions (ASSERT-METRIC-001, ASSERT-METRIC-002) and constraints (Observability section). | Preventive | Designed |
-| CW-R20-M3 | External dashboards should include data quality indicators (e.g., “X% of runs have complete metric data”) to surface degradation early. | Detective | Recommendation |
+| ---- | ----------- | ------ | -------- |
+| CW-R20-M1 | Tracing hooks record the stable fields defined by the observability interface; absent span fields are not claimed as emitted measurements. | Detective | Designed |
+| CW-R20-M2 | Tracing field coverage is specified by ASSERT-OBS-001 through ASSERT-OBS-003 and constraints (Observability section). | Preventive | Designed |
+| CW-R20-M3 | External dashboards should include data quality indicators for the fields actually exported. | Detective | Recommendation |
 
-**Residual Risk:** Low. Audit trail completeness is a core invariant with strong enforcement.
+**Residual Risk:** Low. The tracing field contract is covered by focused observability assertions; external systems remain responsible for measuring data completeness.
 
 ---
 
@@ -529,7 +529,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 **Mitigations:**
 
 | ID | Mitigation | Type | Status |
-|----|-----------|------|--------|
+| ---- | ----------- | ------ | -------- |
 | CW-R21-M1 | Operations documentation provides recommended alert thresholds with graduated severity levels (info/warning/critical). | Preventive | Designed |
 | CW-R21-M2 | Review cadence process (weekly/monthly/quarterly) ensures metrics are reviewed by humans, not only by automated alerts. | Preventive | Designed |
 
@@ -542,7 +542,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 The following spec documents contain mitigations or design decisions informed by entries in this risk register:
 
 | Risk | Primary Spec Reference |
-|------|----------------------|
+| ------ | ---------------------- |
 | CW-R01 | constraints.md (testing), requirements.md (REQ-REVIEW-006, REQ-CLASS-002, REQ-CONST) |
 | CW-R02 | constraints.md (security), requirements.md (REQ-CONST, REQ-ALIGN-001, REQ-ALIGN-004), assertions.md (ASSERT-ALIGN-012) |
 | CW-R03 | security.md (THREAT-001, THREAT-002, THREAT-014), requirements.md (REQ-REVIEW-002) |
@@ -558,5 +558,5 @@ The following spec documents contain mitigations or design decisions informed by
 | CW-R18 | requirements.md (REQ-CONST, REQ-TOOL-011, REQ-ENFORCE), security.md (THREAT-015, THREAT-017, THREAT-019) |
 | CW-R17 | requirements.md (REQ-LLM-001 through REQ-LLM-004), security.md (THREAT-021), operations.md (LLM rate limit runbook) |
 | CW-R19 | edge-cases.md (EDGE-006a, EDGE-006b, EDGE-057, EDGE-058, EDGE-064), constraints.md (Pipeline Graph), assertions.md (ASSERT-GRAPH-004, ASSERT-GRAPH-005, ASSERT-GRAPH-006, ASSERT-GRAPH-014), security.md (THREAT-018) |
-| CW-R20 | constraints.md (Observability — metric completeness), assertions.md (ASSERT-METRIC-001, ASSERT-METRIC-002), operations.md (Performance Metrics) |
+| CW-R20 | constraints.md (Observability), assertions.md (ASSERT-OBS-001 through ASSERT-OBS-003), operations.md (Tracing and external analysis views) |
 | CW-R21 | operations.md (Review Cadence, Improvement Loop) |

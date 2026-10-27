@@ -11,7 +11,7 @@ The central coordinator. Knows the pipeline graph structure and executes it by t
 **Responsibilities:**
 
 - Knows: Pipeline graph definition (nodes, edges, conditions), node gate configuration (auto/human per node), current pipeline state (reconstructed from GitHub), constitutional rules file path, shift work boundary per classification, maximum concurrent LLM calls limit
-- Does: Loads constitutional rules at the start of every run (unconditional, before any other action), loads pipeline configuration (or falls back to default linear pipeline), determines the next action(s) for a given work item by traversing the graph, delegates to the appropriate node implementations, evaluates edge conditions to determine downstream activation, manages parallel fan-out and fan-in synchronisation, enforces node gate rules, manages the processing lock, writes pipeline state to GitHub at each node boundary, supports resume from failed node
+- Does: Loads constitutional rules at the start of every run (unconditional, before any other action), loads pipeline configuration (or falls back to default linear pipeline), determines the next action(s) for a given work item by traversing the graph, delegates to the appropriate node implementations, evaluates edge conditions to determine downstream activation, manages parallel fan-out and fan-in synchronisation, enforces CogWorks node gate rules, manages the processing lock, requests one ephemeral container per implementation job through the runtime provider and requests cleanup on every terminal path, writes pipeline state through the work-item interface at each node boundary, supports resume from failed node
 
 **Collaborators:**
 
@@ -232,14 +232,15 @@ Generates implementation artifacts for a single sub-work-item through an iterati
 
 **Responsibilities:**
 
-- Knows: Iterative refinement loop (generate → validate → simulate → retry), retry budget
-- Does: Assembles context (spec + interfaces + prior SWI outputs + sub-work-item description), invokes LLM to generate artifacts, writes output to pipeline working directory, runs deterministic checks via domain service, feeds errors back to LLM, iterates until pass or budget exhausted
+- Knows: Test-first iterative refinement loop (establish checks → implement → validate → iterate), retry budget, and implementation-job inputs/outputs
+- Does: Assembles context (spec + interfaces + prior SWI outputs + sub-work-item description), requests an implementation job from the orchestrator, establishes tests or equivalent domain acceptance checks before implementation, invokes the LLM to implement the requested change, runs deterministic tools and domain-specific validation, feeds structured errors back to the LLM, and iterates until pass or budget exhaustion
 
 **Collaborators:**
 
 - Context Assembler (builds context with full SWI history)
 - LLM Gateway (sends code generation prompt, receives source files)
-- Domain Service Client (normalise → validate → review_rules → simulate)
+- Domain Service Client (domain-specific normalise → validate → review_rules → simulate)
+- Implementation Job Runtime Provider (provider-backed ephemeral container execution)
 - Budget Tracker (checks cost budget before each LLM call)
 
 **Roles:**
@@ -549,29 +550,26 @@ Handles all GitHub API interaction. The system's sole interface to durable state
 
 ---
 
-## Working Copy Manager (Shared Library)
+## Implementation Job Runtime Provider (Infrastructure Interface)
 
-Provides shared working copy management capabilities that domain services can use, and manages the pipeline working directory for the orchestrator.
+Provides the runtime capability requested by the Pipeline Executor for implementation jobs. CogWorks owns orchestration and cleanup decisions; this provider owns runtime-specific container operations.
 
 **Responsibilities:**
 
-- Knows: Git operations (clone, worktree, branch, commit, push), temporary directory management, branch naming conventions
-- Does: Creates git worktrees for pipeline working directories, creates shallow clones to temp directories for domain services, creates and switches branches, commits files, pushes to remote, cleans up worktrees and temp directories
+- Knows: The selected container runtime/provider's job and cleanup capabilities
+- Does: Creates and operates the requested ephemeral container and performs provider-specific cleanup when requested by the orchestrator
 
 **Collaborators:**
 
-- Git CLI (subprocess execution)
-- Filesystem (worktree and temporary directory creation/deletion)
+- Pipeline Executor (implementation-job lifecycle requests)
+- Selected container runtime or hosting provider
 
 **Roles:**
 
-- Worktree manager: Creates and manages pipeline working directories as git worktrees
-- Clone manager: Creates and manages temporary repository checkouts for domain services
-- Branch manager: Handles branch creation per the naming convention (`cogworks/<work-item>/<node-slug>`)
-- Commit creator: Produces well-structured commits following repository conventions
-- Cleanup handler: Ensures worktrees and temp directories are removed after use
+- Runtime adapter: Translates the provider-neutral job request to the selected runtime
+- Container lifecycle adapter: Performs runtime-specific cleanup when requested
 
-**Note**: The pipeline working directory (git worktree) persists across all nodes within a pipeline run. Domain service working copies are separate and ephemeral. This is a shared library that domain services may optionally use for their own checkouts.
+**Note**: Exactly one ephemeral container is requested per implementation job. This provider does not define domain-specific validation and does not own CogWorks pipeline gates or pipeline state.
 
 ---
 
@@ -675,33 +673,30 @@ Records all pipeline activity for traceability and debugging.
 
 ---
 
-## Metric Emitter
+## Observability Instrumentation
 
-Computes and emits structured performance metric data points for consumption by external metrics systems. Contains zero metrics storage logic.
+Records stable structured pipeline lifecycle fields through the existing `tracing` instrumentation. The CLI configures console logging and OpenTelemetry export; external systems own metric derivation and aggregation.
 
 **Responsibilities:**
 
-- Knows: Metric data point schema, required dimensions (pipeline run ID, work item ID, classification, safety classification, repository, node, timestamp), root cause category enumeration
-- Does: Transforms raw audit trail data into structured metric data points, emits data points through the Metric Sink abstraction at each node boundary and pipeline completion, handles emission failures gracefully (logs, does not block pipeline)
+- Knows: The stable tracing field names and values defined by `pipeline::observability`
+- Does: Records node start/completion, retry, rework, and cost fields on tracing spans
 
 **Collaborators:**
 
-- Audit Recorder (provides raw audit data for metric computation)
-- Metric Sink (emits computed data points to external backend)
-- Configuration Manager (reads metric sink configuration)
+- Pipeline Executor and node implementations (create spans and invoke instrumentation hooks)
+- CLI composition root (configures the tracing subscriber and optional OTLP exporter)
 
 **Roles:**
 
-- Transformer: Converts audit trail events into structured metric data points with proper dimensions
-- Emitter: Pushes data points through the Metric Sink abstraction
-- Failure isolator: Ensures metric emission failures never block pipeline execution
+- Instrumentation: Records canonical structured fields on spans
+- Export integration: Routes spans through the configured tracing subscriber
 
 **Key behavior:**
 
-- Emission is non-blocking: metric sink failures produce log warnings, not pipeline failures
-- When no metric sink is configured, the emitter logs data points to structured output and takes no further action
-- Data point dimensions are populated deterministically from pipeline state — same pipeline state always produces same dimensions
-- Root cause categories are structured enums (compilation error, test failure, review finding, constraint violation, timeout), not free-form strings
+- No custom metric-sink trait or metric data-point computation is defined
+- The tracing helpers record only fields declared on the caller's span; callers must declare the expected fields
+- External monitoring systems derive metrics from the span fields actually exported
 
 ---
 

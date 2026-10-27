@@ -27,6 +27,7 @@ Business logic is pure — no I/O, no mocks needed. Test with direct input/outpu
 
 ### Pipeline State Machine
 
+- EventSource-reported readiness enters intake without depending on a particular provider signal
 - All valid node transitions via edge conditions
 - Invalid transitions (node activated without inputs available)
 - Human-gated vs. auto-proceed behavior
@@ -139,15 +140,13 @@ Business logic is pure — no I/O, no mocks needed. Test with direct input/outpu
 - Multiple packs, all requirements met → no findings
 - Multiple packs, one requirement missing → one blocking finding
 
-### Metric Data Point Computation
+### Tracing-Based Observability
 
-- Pipeline audit data with all fields present → correct metric data points with all dimensions populated
-- Pipeline audit data with missing optional fields → data points computed with available data, warning logged for missing fields
-- Multiple retry cycles with different root causes → root cause structured enum correctly assigned per retry
-- Zero-retry pipeline → metric data points show zero retry count, no retry root cause
-- Safety-classified vs non-safety-classified work item → safety classification dimension correctly populated
-- Same audit data input produces identical data points on repeated computation (determinism)
-- Each node boundary in audit data produces corresponding incremental data point
+- Node lifecycle hooks record run ID, node ID, and event kind when declared on the span
+- Node completion records total USD cost when declared on the span
+- Retry and rework hooks record stable event kinds and typed categories
+- CLI subscriber routes available spans/events to structured console output and configured OTLP exporter
+- Missing span fields are not synthesized into a separate metric data-point model
 
 ---
 
@@ -170,6 +169,8 @@ Node implementations orchestrate calls between business logic and abstractions. 
 - **Mock Constitutional Rules Loader**: Returns pre-configured rules payload; can simulate missing file, invalid content (missing required rule), and unreviewed branch rejection
 - **Mock Injection Detector**: Returns pre-configured detection results; can simulate detection with specific offending text, no detection, and borderline cases for testing pipeline halt behavior
 - **Mock Scope Enforcer**: Returns pre-configured scope validation results; can simulate SCOPE_UNDERSPECIFIED, SCOPE_AMBIGUOUS, PROTECTED_PATH_VIOLATION, and clean pass
+- **Mock Implementation Job Runtime Provider**: Tracks one container request per implementation job and can simulate startup, execution, cancellation, and cleanup failures
+- **Mock Credential Provider**: Supplies test credentials to infrastructure adapters and allows assertions that credentials never enter model content, audit records, or logs
 
 ### Test Scenarios per Node
 
@@ -204,7 +205,7 @@ Node implementations orchestrate calls between business logic and abstractions. 
 
 **Code Generator (Code Generation Node):**
 
-- Happy path: Generate → normalise → validate → review_rules → simulate → pass
+- Happy path: Establish tests or domain acceptance checks → implement → normalise → validate → review_rules → simulate → pass
 - Validation failure → feedback → retry → pass
 - Simulation failure (self-explanatory) → direct feedback → retry → pass
 - Simulation failure (non-obvious) → LLM interpretation → feedback → retry → pass
@@ -244,6 +245,8 @@ Node implementations orchestrate calls between business logic and abstractions. 
 - Rework max traversals reached → escalation or overflow edge
 - Pipeline cancellation → active nodes terminated, state persisted
 - Duplicate pipeline trigger → rejected with comment
+- Implementation job requests exactly one ephemeral container and requests cleanup on success, failure, and cancellation
+- External factory/GateKeeper status is passed through the work-item interface and does not replace CogWorks node gates
 
 ---
 
@@ -290,14 +293,20 @@ Each infrastructure implementation tested against the real external system or a 
 - Test: missing interfaces directory → empty registry (not error)
 - Test: version format validation
 
-### Metric Sink
+### Observability Hooks
 
-- Prometheus push gateway sink: emit data points to a mock push gateway → verify correct exposition format and label mapping
-- OpenTelemetry sink: emit data points to a mock collector → verify correct OTLP format
-- Configured sink unavailable → emission fails gracefully, returns warning (not error)
-- No sink configured → data points logged but no external emission attempted
-- Large batch of data points → verify all emitted without truncation or loss
-- Sink returns authentication error → logged as warning, pipeline unaffected
+- `record_node_start` records run ID, node ID, and `node_start` on a span that predeclares those fields
+- `record_node_complete` records run ID, node ID, `node_complete`, and numeric total USD cost
+- `record_retry` and `record_rework` record stable event kinds and typed categories
+- Undeclared span fields remain absent; tests verify callers declare the required fields
+- CLI subscriber configuration routes spans to JSON console output and the configured OTLP exporter
+
+### Implementation Job Runtime Provider
+
+- Exactly one container request is made per implementation job
+- Cleanup is requested after success, failure, and cancellation
+- Provider startup failure is surfaced without leaving a job active
+- Runtime-specific behavior is tested through a faithful fake/provider contract, without requiring a specific runtime in business-logic tests
 
 ---
 
@@ -343,7 +352,7 @@ Full pipeline tests against real GitHub and real LLM API. These are expensive an
 
 ### Scenarios
 
-- **Happy path**: Create issue → apply trigger label → verify all nodes complete → verify PRs created with correct content
+- **Happy path**: Create issue → configure the EventSource/work-item adapter to report readiness → verify the pipeline completes → verify PRs are created with correct content
 - **Safety-critical path**: Create issue touching safety-critical module → verify human gates enforced
 - **Escalation path**: Create issue with scope exceeding threshold → verify escalation comment posted
 - **Re-trigger path**: Fail a sub-work-item intentionally → re-trigger → verify recovery
@@ -515,7 +524,7 @@ For integration tests that do not need to exercise skill logic:
 ## Coverage Requirements
 
 | Layer | Coverage Target | Measured By |
-|-------|----------------|-------------|
+| ------- | ---------------- | ------------- |
 | Business logic | 100% line coverage | `cargo tarpaulin` or `grcov` |
 | Node implementations | 90% line coverage | `cargo tarpaulin` or `grcov` |
 | Infrastructure | 80% line coverage | `cargo tarpaulin` or `grcov` |

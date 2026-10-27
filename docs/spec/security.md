@@ -94,7 +94,7 @@ This document identifies security threats to CogWorks and specifies mitigations.
 **Mitigations**:
 
 1. **Minimum-privilege token**: The token must have only: `issues:write`, `pull_requests:write`, `contents:write` (for specific repos), and no admin or organization-level permissions.
-2. **GitHub App (preferred)**: Use a GitHub App installation token scoped to specific repositories, rather than a Personal Access Token. App tokens have more granular permissions and automatic rotation.
+2. **Vault-backed credential provider**: The Vault library behind the credential-provider interface handles authentication and key lifecycle. CogWorks relies on the provider and does not define its Vault protocol or rotation policy.
 3. **No token in context**: The token is never included in LLM context packages, audit trails, or generated code. It is used only by the GitHub Client infrastructure module.
 4. **Dependency auditing**: Regular `cargo audit` to detect known vulnerabilities in dependencies.
 
@@ -108,10 +108,10 @@ This document identifies security threats to CogWorks and specifies mitigations.
 
 **Mitigations**:
 
-1. **Environment variable only**: API key loaded from environment variable, never from configuration files or command-line arguments (which may be visible in process listings).
+1. **Provider-resolved credentials**: The Vault library resolves the API credential through the credential-provider interface; CogWorks does not prescribe direct environment-variable, configuration-file, or command-line key handling.
 2. **No key in logs**: Structured logging must redact any field matching known secret patterns.
-3. **No key in context**: Context assembly explicitly excludes environment variables and credentials from context packages.
-4. **No key in audit trail**: Audit events record the model name, not the API key.
+3. **No key in model content**: Credential material is used only for provider authentication and is never included in LLM prompts, context packages, or model-visible content.
+4. **No key in audit trail**: Audit events record non-secret provider metadata, not credential material.
 
 ---
 
@@ -127,7 +127,7 @@ This document identifies security threats to CogWorks and specifies mitigations.
 2. **Retry budget**: Per-sub-work-item retry limit (REQ-CODE-003). Escalation when exceeded.
 3. **Scope threshold**: Scope estimation triggers escalation for large work items (REQ-CLASS-003).
 4. **Granularity limit**: Maximum sub-work-items per work item (REQ-PLAN-004).
-5. **Trigger control**: Pipeline only starts on explicit label application (`cogworks:run`), not on issue creation.
+5. **Trigger control**: Pipeline starts only when the configured EventSource/work-item adapter reports readiness; CogWorks does not prescribe the provider-specific signal.
 
 ---
 
@@ -142,7 +142,7 @@ This document identifies security threats to CogWorks and specifies mitigations.
 1. **Response schema validation**: All domain service responses are validated against the Extension API JSON Schema. Responses that don't conform are rejected.
 2. **Structured diagnostics only**: Diagnostics fields (message, artifact, location) are treated as data, never as instructions. They are included in LLM context as structured data with clear delimiters.
 3. **Injection detection for domain service content**: Domain service diagnostic messages (which are included in LLM retry prompts) are scanned by the injection detector before inclusion. Detection triggers the same halt-and-hold response as issue body injection.
-4. **Domain service isolation**: Domain services run as separate processes. A compromised domain service cannot access CogWorks' memory, secrets, or GitHub token.
+4. **Execution isolation**: Domain services run as separate processes, and implementation jobs run in ephemeral containers. Neither receives CogWorks credential material; a compromised service or job cannot access CogWorks' memory, secrets, or GitHub credentials.
 5. **Human gates for safety-critical**: Safety-critical work items require human review — even if all automated validation passes, a human inspects the final PR.
 6. **Audit trail**: All domain service responses are recorded in the audit trail for post-hoc review.
 

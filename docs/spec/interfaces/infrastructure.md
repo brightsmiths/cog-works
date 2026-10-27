@@ -59,21 +59,20 @@ pub struct GithubClient {
 }
 ```
 
-`github_bot_sdk::GitHubClient` carries authentication (GitHub App private key +
-App ID), handles installation token refresh, exposes per-installation API
-handles, and manages built-in rate-limit back-off.
+The SDK is configured with credentials resolved by the credential-provider
+interface. The Vault library behind that interface owns authentication and key
+lifecycle. CogWorks does not define Vault calls, credential refresh, or rotation
+details. The SDK exposes per-installation API handles and manages its documented
+rate-limit behavior.
 
-**Construction** (in `cli`):
-
-```rust
-let sdk = github_bot_sdk::GitHubClient::new(app_id, private_key)?;
-let client = Arc::new(GithubClient::new(Arc::new(sdk)));
-```
+**Construction** occurs in `cli` after the credential provider resolves the
+credentials required by the SDK. The concrete acquisition and key lifecycle
+remain outside this interface contract.
 
 ### Trait → SDK Call Mapping
 
 | Trait method | SDK API call | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `IssueTracker::get_issue` | `sdk.issues().get(owner, repo, number)` | |
 | `IssueTracker::list_sub_issues` | *(SDK gap — see below)* | Returns `SdkCapabilityMissing` |
 | `IssueTracker::create_sub_issue` | *(SDK gap)* | Returns `SdkCapabilityMissing` |
@@ -112,7 +111,7 @@ Formal SDK addition requests must be filed against
 `https://github.com/pvandervelde/github-bot-sdk`:
 
 | Capability | PR description |
-|---|---|
+| --- | --- |
 | Sub-issues REST endpoint | Support `POST /repos/{owner}/{repo}/issues/{number}/sub_issues` |
 | GraphQL `issueLink` mutation | Expose typed issue link create/delete/query |
 | GitHub Contents API (read_file, list_directory, file_exists) | `GET /repos/{owner}/{repo}/contents/{path}` |
@@ -185,7 +184,7 @@ native TLS dependency.
       POST https://api.anthropic.com/v1/messages
       Headers:
         anthropic-version: 2023-06-01
-        x-api-key: <config.api_key>          ← NEVER logged
+        x-api-key: <provider-resolved credential>          ← NEVER logged or included in model content
         content-type: application/json
       Body (JSON):
         { "model": model.model_id,
@@ -209,12 +208,11 @@ native TLS dependency.
     On failure: return Err(LlmError::InvalidSchema { reason }).
 ```
 
-**Security**: `AnthropicConfig::api_key` is stored in a `String` field marked
-`#[allow(dead_code)]`. The `Debug` impl on `AnthropicConfig` redacts it as
-`"***"`. The field is never written to log output, structured events, or error
-messages. The API key is sourced from an environment variable or a secrets
-manager during `cli` startup — never from configuration files committed to
-version control.
+**Security**: The provider obtains credential material through the credential-
+provider interface backed by the Vault library. This document does not prescribe
+the provider's API or credential lifecycle. Credential material is used only
+for outbound authentication and MUST NOT be included in prompts, context,
+structured events, audit records, logs, or error messages.
 
 ### Multi-Provider Extension Point
 
@@ -309,7 +307,7 @@ attempts. `TransportError::ResponseParseError` is not retried.
 ### DomainServiceClient → Operation Mapping
 
 | Trait method | `operation` field | `payload` contents |
-|---|---|---|
+| --- | --- | --- |
 | `handshake` | `"handshake"` | `{}` |
 | `validate` | `"validate"` | `{ "artifact_paths": [...] }` |
 | `normalise` | `"normalise"` | `{ "artifact_paths": [...] }` |
@@ -395,19 +393,17 @@ body)` using a **constant-time comparison** (`subtle::ConstantTimeEq` or
 equivalent). Requests that fail verification return `EventSourceError::AuthError`
 and are **never** parsed. The raw body is discarded.
 
-**Security**: `WebhookConfig::secret` is excluded from the `Debug` impl (prints
-`"[REDACTED]"`). It is never written to tracing events or log lines.
+**Security**: The webhook credential is resolved through the credential-provider
+interface; it is not a field in `WebhookConfig`. The Vault library owns its
+authentication and key lifecycle. The listener receives the credential only
+for request authentication and MUST NOT log or expose it. Any transient
+credential wrapper MUST redact its `Debug` representation.
 
-**Event parsing**: After HMAC verification, the raw JSON body is parsed into
-a `GitHubEvent` variant based on the `X-GitHub-Event` header value:
-
-| Header value | Payload discriminant | `GitHubEvent` variant |
-|---|---|---|
-| `issues` | `action: "labeled"` | `LabelApplied` |
-| `issue_comment` | `action: "created"` | `CommentPosted` |
-| `issues` | `action: "closed"` (sub-issue) | `SubIssueStateChanged` |
-| `pull_request_review` | `action: "submitted"` | `PullRequestReviewed` |
-| (other) | — | silently skipped (not an error) |
+**Event normalization**: After authentication, the adapter parses provider
+events and maps configured work-item readiness into the normalized pipeline
+event contract. Exact webhook event/action mappings and readiness criteria are
+provider-specific and are not fixed by this specification. Unsupported events
+may be ignored by the adapter.
 
 **Internal channel**: The webhook server runs in a background task that sends
 parsed events to an `mpsc` channel. `next_event` reads from the receiver side
@@ -430,7 +426,7 @@ Implements `EventSource` using `queue-runtime`'s `QueueClient`.
 **Provider support**:
 
 | Provider | Status |
-|---|---|
+| --- | --- |
 | Azure Service Bus | Available in `queue-runtime` |
 | AWS SQS | Planned in `queue-runtime`; not yet available |
 
@@ -493,18 +489,15 @@ pub struct CogWorksConfig {
     pub pipeline_name:         Option<pipeline::PipelineName>,
     pub approved_branch:       pipeline::BranchName,
     pub otlp_endpoint:         String,
-    pub github_app_id:         u64,
-    pub github_private_key:    String,    // NEVER logged
-    pub anthropic_api_key:     String,    // NEVER logged
     pub anthropic_base_url:    String,
     pub llm_model_id:          String,
 }
 ```
 
-**Security**: `github_private_key` and `anthropic_api_key` are never written to
-log output, tracing events, or error messages. Their `Debug` representation
-must be `"[REDACTED]"`. The `Debug` impl for `CogWorksConfig` is manually
-implemented to enforce this.
+**Security**: Credentials are resolved by the Vault library through the
+credential-provider interface. Raw key material is not a `CogWorksConfig`
+field and must never appear in prompts, context, tracing events, audit records,
+logs, generated artifacts, or error messages.
 
 ### Observability Wiring
 
@@ -543,8 +536,8 @@ fn run_service(executor, config, event_source) -> !  // loops forever
 
 `run_single_shot`:
 
-1. Synthesise `GitHubEvent::LabelApplied { work_item_id, label }` from `issue_url`.
-2. Call `run_step(&executor, work_item_id, &cli_config).await`.
+1. Parse the work item ID from `issue_url`.
+2. Invoke `run_step(&executor, work_item_id, &cli_config).await` directly; no synthetic `GitHubEvent` variant is required.
 3. Match on `StepResult`:
    - `Completed` → loop: call `run_step` again until state machine reaches end.
    - `Gated` → print gate message and exit 0.
@@ -564,12 +557,8 @@ fn run_service(executor, config, event_source) -> !  // loops forever
 ```
 1. Parse CogWorksConfig from env / CLI flags / config file.
 2. init_observability(config.otlp_endpoint).
-3. Construct GithubClient:
-       sdk = github_bot_sdk::GitHubClient::new(config.github_app_id, &config.github_private_key)
-       github = Arc::new(github::GithubClient::new(Arc::new(sdk)))
-4. Construct AnthropicProvider:
-       anthro_cfg = llm::AnthropicConfig::new(config.anthropic_api_key, config.anthropic_base_url)
-       provider = Arc::new(llm::AnthropicProvider::new(anthro_cfg)?)
+3. Resolve infrastructure credentials through the credential-provider interface.
+4. Construct GithubClient and AnthropicProvider with provider-resolved credentials.
 5. Construct ExtensionApiClients from .cogworks/services.toml (one per registered service):
        clients: HashMap<DomainServiceName, Arc<dyn DomainServiceClient>>
 6. Construct service registry and select primary:
@@ -709,9 +698,31 @@ let registry_loader = Arc::new(TomlInterfaceRegistryLoader::new(registry_dir));
 - [ ] SDK gaps return `SdkCapabilityMissing`, not `todo!()`
 - [ ] HMAC validation documented as constant-time comparison
 - [ ] `QueueEventSource` documents session API usage
-- [ ] `AnthropicConfig.api_key` and `CogWorksConfig.github_private_key` redacted in `Debug` impls
-- [ ] `CogWorksConfig.anthropic_api_key` redacted in `Debug` impl
-- [ ] `WebhookConfig.secret` redacted in `Debug` impl
+- [ ] Credentials resolved through the credential provider and any transient credential wrapper is redacted in `Debug`; raw credentials are absent from configuration structs
 - [ ] Observability wiring produces a single composite subscriber
 - [ ] Composition root wiring order follows §cli above
 - [ ] `HandlebarsTemplateEngine` in `nodes`, not in a separate crate
+
+### Implementation Job Runtime Provider
+
+The Pipeline Executor requests one ephemeral container per implementation job
+through an infrastructure provider interface and requests cleanup after
+success, failure, or cancellation. The provider supplies runtime-specific
+operations. This interface specification intentionally does not define method
+signatures, request fields, or a Docker/Kubernetes/cloud mapping.
+
+### Credential Provider
+
+Infrastructure clients obtain credentials through an interface backed by the
+Vault library. The Vault library owns authentication and key lifecycle; the
+CogWorks contract assumes the provider resolves credentials as required. This
+document does not define Vault APIs, authentication flows, or rotation policy.
+
+### Attestation Provider
+
+The attestation provider verifies required upstream attestations against the
+content and trust policy supplied by the pipeline, and signs CogWorks action
+attestations. Signing capability is resolved through the credential provider.
+It returns verification outcomes or signed attestation content, never private
+key material. Signed content is published through `IssueTracker::post_comment`;
+the provider protocol and signature format are implementation choices.

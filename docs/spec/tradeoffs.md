@@ -9,7 +9,7 @@ This document records the significant design alternatives considered and the rat
 **Decision**: GitHub is the only durable state store.
 
 | Factor | GitHub-Only | Local Database |
-|--------|-------------|----------------|
+| -------- | ------------- | ---------------- |
 | **Crash recovery** | Trivial — restart and read GitHub | Requires DB recovery, migration, backup |
 | **Observability** | Full state visible in GitHub UI | State split between GitHub and DB |
 | **Deployment** | Single binary, no DB dependency | Binary + database (Postgres/SQLite) |
@@ -28,7 +28,7 @@ This document records the significant design alternatives considered and the rat
 **Decision**: CLI-first. Each invocation is a stateless step function.
 
 | Factor | CLI-First | Service-First |
-|--------|-----------|---------------|
+| -------- | ----------- | --------------- |
 | **Simplicity** | Each invocation is independent | Needs connection pools, graceful shutdown, health checks |
 | **Testability** | Test one step at a time | Must test lifecycle, concurrency, state management |
 | **Crash recovery** | Restart and re-invoke | Must handle in-flight requests, reconnection |
@@ -47,7 +47,7 @@ This document records the significant design alternatives considered and the rat
 **Decision**: Single Rust binary for CogWorks orchestrator, with domain services as separate external processes.
 
 | Factor | Single Binary + External Services | Full Microservices |
-|--------|--------------------------------------|---------------------|
+| -------- | -------------------------------------- | --------------------- |
 | **Deployment** | CogWorks = one binary, domain services = separate binaries (one per domain) | Multiple artifacts with complex orchestration |
 | **Type safety** | Shared types within CogWorks; JSON Schema at Extension API boundary | Serialization at every boundary |
 | **Extensibility** | New domains added by implementing Extension API, no CogWorks changes | New services added but require orchestration changes |
@@ -66,7 +66,7 @@ This document records the significant design alternatives considered and the rat
 **Decision**: Topological dependency order with optional parallel fan-out for independent sub-work-items.
 
 | Factor | Sequential Only | Topological + Parallel Fan-Out |
-|--------|----------------|-------------------------------|
+| -------- | ---------------- | ------------------------------- |
 | **Context quality** | Each SWI has all prior outputs | Dependent SWIs get all dependency outputs; independent SWIs get own chain only |
 | **Complexity** | Simple loop | Dependency graph scheduling, shared cost budget, fan-in synchronisation |
 | **Cost** | Optimal per-SWI context | May generate slightly less optimal code for concurrent SWIs |
@@ -82,7 +82,7 @@ This document records the significant design alternatives considered and the rat
 **Decision**: GitHub labels as lightweight processing locks.
 
 | Factor | Labels | External (Redis, etcd) |
-|--------|--------|------------------------|
+| -------- | -------- | ------------------------ |
 | **Infrastructure** | None — uses existing GitHub | Additional service to deploy and maintain |
 | **Correctness** | Race condition window between check and set | Proper atomic compare-and-set |
 | **Observability** | Visible in GitHub UI | Separate monitoring |
@@ -99,7 +99,7 @@ This document records the significant design alternatives considered and the rat
 **Decision**: Domain services manage their own working copies. CogWorks provides shared libraries.
 
 | Factor | Domain Service-Owned | CogWorks-Owned | Hybrid (old) |
-|--------|---------------------|----------------|---------------|
+| -------- | --------------------- | ---------------- | --------------- |
 | **Toolchain support** | Full support (service controls its own FS) | Full, but CogWorks must know file paths | Full |
 | **Remote services** | Works (service clones remotely) | Broken (CogWorks clone is local only) | Local only |
 | **Isolation** | Each service has independent clone | Shared clone = potential conflicts | Shared clone |
@@ -117,7 +117,7 @@ This document records the significant design alternatives considered and the rat
 **Decision**: JSON Schema for validation, with typed parsing after validation.
 
 | Factor | JSON Schema | Direct Type Parsing (serde) |
-|--------|-------------|----------------------------|
+| -------- | ------------- | ---------------------------- |
 | **Declarative** | Schema files are human-readable and auditable | Validation embedded in code |
 | **Version control** | Schema changes are visible in diffs | Type changes require code review |
 | **LLM guidance** | Schemas can be included in prompts to guide output | Types are internal to CogWorks |
@@ -133,7 +133,7 @@ This document records the significant design alternatives considered and the rat
 **Decision**: Four review passes: one deterministic (cross-domain constraint validation) + three LLM passes (quality, architecture, security).
 
 | Factor | Four Passes (1 deterministic + 3 LLM) | One Combined Pass |
-|--------|--------------------------------------|------------------|
+| -------- | -------------------------------------- | ------------------ |
 | **Focus** | Each pass has a narrow focus → higher quality findings | Broad prompt → may miss depth |
 | **Cost** | 3x LLM calls per sub-work-item (1 deterministic pass is free) | 1x LLM call |
 | **Prompt size** | Smaller, focused prompts | Larger prompt with multiple concerns |
@@ -149,7 +149,7 @@ This document records the significant design alternatives considered and the rat
 **Decision**: Anthropic API initially, with a provider-agnostic trait for future expansion.
 
 | Factor | Anthropic Only | Multi-Provider |
-|--------|---------------|----------------|
+| -------- | --------------- | ---------------- |
 | **Simplicity** | One API to implement and test | Multiple APIs, response normalization |
 | **Cost optimization** | N/A | Route different nodes to cheapest provider |
 | **Resilience** | Single point of failure | Failover between providers |
@@ -164,7 +164,7 @@ This document records the significant design alternatives considered and the rat
 **Decision**: Domain services are external processes communicating via Extension API.
 
 | Factor | External Process | In-Process Trait |
-|--------|-----------------|-----------------|
+| -------- | ----------------- | ----------------- |
 | **Language freedom** | Domain services can be any language | Must be Rust (or use FFI) |
 | **Extensibility** | New domains without CogWorks changes | Requires CogWorks rebuild/release |
 | **Isolation** | Process-level isolation (no shared memory) | Shared address space |
@@ -184,7 +184,7 @@ This document records the significant design alternatives considered and the rat
 **Decision**: Unix domain socket as default, HTTP/gRPC as optional alternative.
 
 | Factor | Unix Socket | HTTP/gRPC |
-|--------|------------|-----------|
+| -------- | ------------ | ----------- |
 | **Latency** | ~0.1ms per message | ~1-5ms per message |
 | **Remote services** | Local only | Works across machines |
 | **Authentication** | File permissions | Need auth mechanism (tokens, mTLS) |
@@ -200,10 +200,10 @@ This document records the significant design alternatives considered and the rat
 
 ## 12. External Metrics Backend vs. Built-in Metrics Store
 
-**Decision**: CogWorks emits metric data points to an external metrics backend. No built-in metrics storage, aggregation, or dashboarding.
+**Decision**: CogWorks exports structured tracing through the configured OpenTelemetry path. External systems may derive metrics from exported fields; CogWorks has no built-in metrics storage, aggregation, or dashboarding.
 
 | Factor | External Metrics Backend | Built-in Metrics Store |
-|--------|------------------------|------------------------|
+| -------- | ------------------------ | ------------------------ |
 | **Focus** | CogWorks stays focused on automated engineering pipelines | CogWorks takes on metrics infrastructure responsibility |
 | **Aggregation** | Purpose-built tools (Prometheus, Mimir) handle time-series aggregation natively | Must implement aggregation logic across pipeline runs |
 | **Dashboarding** | Grafana or equivalent provides rich, configurable dashboards out of the box | Must build and maintain a custom dashboard |
@@ -213,20 +213,44 @@ This document records the significant design alternatives considered and the rat
 | **Operational maturity** | These tools have years of production hardening | Must build and harden a new metrics system |
 | **Deployment complexity** | Adds external dependency (metrics backend + dashboard) | No additional infrastructure (but more CogWorks code) |
 
-**Rationale**: CogWorks' core competency is automated engineering pipelines, not metrics infrastructure. Purpose-built tools (Prometheus/Mimir for storage, Grafana for dashboards, Alertmanager for alerts) are excellent at exactly this problem. CogWorks' responsibility ends at emitting well-structured, well-dimensioned metric data points through a pluggable Metric Sink abstraction. The Metric Sink follows the same pattern as the LLM Provider trait — a clean abstraction boundary with swappable infrastructure implementations.
+**Rationale**: CogWorks' core competency is automated engineering pipelines, not metrics infrastructure. Purpose-built tools (Prometheus/Mimir for storage, Grafana for dashboards, Alertmanager for alerts) are excellent at exactly this problem. CogWorks records structured tracing fields through the existing tracing and OpenTelemetry path; external systems own metric derivation, aggregation, storage, and dashboards. CogWorks does not define a separate metric-sink abstraction or promise measurements not represented by exported fields.
 
 This also clarifies the boundary of the "GitHub as sole durable state" principle: GitHub is the durable state for *pipeline execution* (work item state, audit trail, PR lifecycle). Performance metrics are *operational telemetry* — a different concern that belongs in a different system.
 
-**Risk**: Metric sink implementation must be non-blocking and failure-tolerant. A metrics backend outage must not block or slow pipeline execution. Metric emission failures are logged, not fatal.
+**Risk**: Exporter or collector unavailability must not block or fail pipeline execution. CogWorks relies on the configured tracing/export behavior and does not provide a separate metric fallback.
 
 ---
 
-## 13. Polling vs. Streaming for Long-Running Domain Service Operations
+## 13. Provider-Neutral Implementation Job Runtime
+
+**Decision**: The CogWorks orchestrator owns implementation-job lifecycle decisions and requests one ephemeral container per job through an infrastructure provider interface. The provider owns runtime-specific execution and cleanup operations. Retries within one active job reuse that job's container; a new or resumed job requests a new one.
+
+**Rationale**: Job isolation supports context reduction and keeps runtime choices (local Docker, Kubernetes, or a cloud provider) outside CogWorks business logic. Durable state remains in the work-item and repository systems, not in the container.
+
+**Risk**: A provider or orchestrator failure can interrupt persistence or cleanup. The orchestrator attempts durable persistence before cleanup, requests cleanup even if persistence fails, and resumes only from the last successfully persisted state.
+
+**ADR**: [ADR-0009: Provider-Neutral Implementation Job Runtime](../adr/ADR-0009-provider-neutral-implementation-job-runtime.md)
+
+---
+
+## 14. Attestation Provider vs. Inline Cryptography
+
+**Decision**: CogWorks verifies required upstream attestations and signs its own action attestations through an attestation-provider interface. The provider uses the Vault-backed credential boundary; private key material is not exposed to pipeline logic or the LLM.
+
+**Rationale**: This preserves a testable trust boundary without coupling business logic to a Vault protocol, signature format, or key lifecycle implementation. Signed comments are transported through the work-item interface, which does not interpret their cryptographic contents.
+
+**Risk**: The exact signed payload, trust policy, and attestation chain format must be defined by the concrete interface contract before implementation.
+
+**ADR**: [ADR-0010: Vault-Backed Credential and Attestation Providers](../adr/ADR-0010-vault-backed-credential-and-attestation-providers.md)
+
+---
+
+## 15. Polling vs. Streaming for Long-Running Domain Service Operations
 
 **Decision**: Polling initially, designed for future streaming.
 
 | Factor | Polling | Streaming |
-|--------|---------|-----------|
+| -------- | --------- | ----------- |
 | **Simplicity** | Simple request/response + poll endpoint | Bidirectional stream management |
 | **Progress visibility** | Periodic polling for updates | Real-time progress |
 | **Transport compatibility** | Works with any transport | Requires streaming-capable transport |
@@ -237,12 +261,12 @@ This also clarifies the boundary of the "GitHub as sole durable state" principle
 
 ---
 
-## 14. CogWorks-Mediated vs. Direct Cross-Domain Communication
+## 16. CogWorks-Mediated vs. Direct Cross-Domain Communication
 
 **Decision**: CogWorks mediates all cross-domain interactions. Domain services never communicate directly.
 
 | Factor | CogWorks-Mediated | Direct Domain-to-Domain |
-|--------|-------------------|------------------------|
+| -------- | ------------------- | ------------------------ |
 | **Coupling** | Domain services independent | Services must discover each other |
 | **Observability** | All interactions visible in CogWorks audit trail | Distributed tracing needed |
 | **Control** | CogWorks enforces ordering and validation | Services manage their own coordination |
@@ -253,12 +277,12 @@ This also clarifies the boundary of the "GitHub as sole durable state" principle
 
 ---
 
-## 15. Deterministic vs. LLM-Based Injection Detection
+## 17. Deterministic vs. LLM-Based Injection Detection
 
 **Decision**: Heuristic-only injection detection (LLM-based secondary pass deferred to future enhancement).
 
 | Factor | Heuristic / Regex | LLM-Based |
-|--------|------------------|-----------|
+| -------- | ------------------ | ----------- |
 | **Speed** | Fast (sub-millisecond) | Slow (LLM latency) |
 | **Determinism** | Deterministic — same input, same result | Non-deterministic |
 | **Coverage** | Limited to known patterns | Theoretically broader |
@@ -274,12 +298,12 @@ This also clarifies the boundary of the "GitHub as sole durable state" principle
 
 ---
 
-## 16. Context Pack Loading: Architecture Node vs. Every Node
+## 18. Context Pack Loading: Architecture Node vs. Every Node
 
 **Decision**: Context Packs are loaded once at the Architecture node and their content persists for the entire pipeline run.
 
 | Factor | Load Once at Architecture | Load at Every Node |
-|--------|--------------------------|---------------------|
+| -------- | -------------------------- | --------------------- |
 | **Consistency** | Same packs throughout run | Could vary per node |
 | **API calls** | One load per pipeline | Multiple loads |
 | **Content currency** | Based on original classification | Could reflect updates |
@@ -292,12 +316,12 @@ This also clarifies the boundary of the "GitHub as sole durable state" principle
 
 ---
 
-## 17. Constitutional Rules: System Prompt vs. Context Injection
+## 19. Constitutional Rules: System Prompt vs. Context Injection
 
 **Decision**: Constitutional rules are injected as a privileged system prompt component, not as a regular context item.
 
 | Factor | System Prompt | Context Item |
-|--------|---------------|--------------|
+| -------- | --------------- | -------------- |
 | **Override resistance** | Non-overridable by design (model API) | Can be buried by subsequent context |
 | **Position stability** | Always first, before any context | Depends on context assembly ordering |
 | **Context window cost** | Fixed overhead per call | Counted against context budget |
@@ -310,12 +334,12 @@ This also clarifies the boundary of the "GitHub as sole durable state" principle
 
 ---
 
-## 18. Fixed Linear Pipeline vs. Configurable Graph Pipeline
+## 20. Fixed Linear Pipeline vs. Configurable Graph Pipeline
 
 **Decision**: Configurable directed graph loaded from `.cogworks/pipeline.toml`, with a built-in default that preserves the original seven-node linear pipeline when no configuration file is present.
 
 | Factor | Fixed Linear Pipeline | Configurable Graph |
-|--------|----------------------|-------------------|
+| -------- | ---------------------- | ------------------- |
 | **Simplicity** | No configuration required | Requires TOML schema understanding |
 | **Flexibility** | One-size-fits-all | Per-repo customisation (skip, reorder, parallelise) |
 | **Onboarding** | Zero setup | Must learn config schema (but default works out of the box) |
@@ -328,12 +352,12 @@ This also clarifies the boundary of the "GitHub as sole durable state" principle
 
 ---
 
-## 19. Pipeline State Persistence: GitHub Issue Comments vs. Local File
+## 21. Pipeline State Persistence: GitHub Issue Comments vs. Local File
 
 **Decision**: Pipeline execution state is persisted as a structured JSON comment on the GitHub issue, not as a local file in the working directory.
 
 | Factor | GitHub Issue Comment | Local File |
-|--------|---------------------|------------|
+| -------- | --------------------- | ------------ |
 | **Durability** | Survives process crash and host loss | Lost if host dies |
 | **Visibility** | Readable by humans and other tools | Requires file system access |
 | **Recoverability** | Any host can resume from last comment | Requires same host or shared storage |
@@ -350,7 +374,7 @@ This also clarifies the boundary of the "GitHub as sole durable state" principle
 **Decision**: Generated adapters from API specifications are the default mechanism for integrating external services. MCP (Model Context Protocol) servers are retained only as a fallback for bidirectional/streaming protocols that static tool definitions cannot represent.
 
 | Factor | MCP Servers | Generated Adapters | In-Process (Direct API Client) |
-|--------|-------------|-------------------|-------------------------------|
+| -------- | ------------- | ------------------- | ------------------------------- |
 | **Operational overhead** | Separate process per integration; lifecycle management needed | No runtime process; tool definitions are configuration | No additional process; compiled into CogWorks |
 | **Scope enforcement** | Difficult — MCP server owns its execution; scope enforced by proxy | Native — generated tools participate in standard scope enforcement | Native — but requires CogWorks code changes per service |
 | **Audit trail** | Requires MCP-to-audit bridge | Standard tool invocation audit (same as built-in tools) | Standard (built into CogWorks) |

@@ -13,8 +13,8 @@
 //!    `ExtensionApiClient`, event source) and inject them into
 //!    [`nodes::PipelineExecutor`].
 //! 4. **Select trigger mode** — based on `CogWorksConfig.trigger_mode`:
-//!    - [`TriggerMode::SingleShot`] — synthesise one [`pipeline::GitHubEvent`]
-//!      from `--issue-url` and call `run_step` once (Phase 1 CLI).
+//!    - [`TriggerMode::SingleShot`] — parse the work item ID from
+//!      `--issue-url` and call `run_step` directly (Phase 1 CLI).
 //!    - [`TriggerMode::Webhook`] — construct a
 //!      [`listener::GitHubWebhookEventSource`] and loop on `next_event`.
 //!    - [`TriggerMode::Queue`] — construct a

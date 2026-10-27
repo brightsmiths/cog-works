@@ -8,9 +8,9 @@ Requirements are organized by functional area. Each requirement states what the 
 
 ## REQ-PIPE: Pipeline Execution
 
-### REQ-PIPE-001: Trigger on label
+### REQ-PIPE-001: Trigger on work-item readiness
 
-CogWorks MUST initiate the pipeline when the `cogworks:run` label is applied to a work item that has no current `cogworks:node:*` label.
+CogWorks MUST initiate the pipeline when its EventSource reports that a work item is ready for processing and the work item has no current active-node state. The readiness signal and its mapping from provider events or work-item state MUST be handled behind the GitHub/EventSource interface. The current event contract uses `LabelApplied`; an adapter may map configured label, project, webhook, or other readiness signals to that event. This specification does not select a particular mapping.
 
 ### REQ-PIPE-002: Node label tracking
 
@@ -32,6 +32,8 @@ CogWorks MUST post a structured status comment on the work item issue when enter
 
 CogWorks MUST respect node gate configuration (`auto-proceed` or `human-gated`). Safety-critical work items MUST override all code-producing node gates to `human-gated` regardless of repository configuration.
 
+These are CogWorks pipeline-advancement gates. External factory or GateKeeper approvals are not CogWorks gate mechanisms; their results are conveyed through the work-item interface and do not change the configured CogWorks gates.
+
 **Exception**: Constitutional rules loading (REQ-CONST-001) is unconditional and not subject to gate configuration. It runs on every pipeline invocation regardless of gate settings.
 
 ### REQ-PIPE-007: Processing lock
@@ -44,7 +46,7 @@ The orchestrator MUST prevent duplicate pipeline runs for the same work item. If
 
 ### REQ-PIPE-009: Pipeline resumption
 
-Re-triggering a failed pipeline MUST support resuming from the failed node (using the persisted pipeline state from REQ-EXEC-002) rather than restarting from the beginning. A full restart MUST be supported only on explicit request (`cogworks:restart` label or `/cogworks restart` comment).
+Re-triggering a failed pipeline MUST support resuming from the failed node (using the persisted pipeline state from REQ-EXEC-002) rather than restarting from the beginning. A full restart MUST be supported only on explicit request through the configured work-item interface. `cogworks:restart` and `/cogworks restart` are default adapter mappings, not fixed business-logic signals.
 
 ### REQ-PIPE-010: Configurable pipeline graph
 
@@ -54,9 +56,9 @@ The pipeline MUST support configurable directed graphs where nodes are processin
 
 Each work item classification MUST define an explicit shift work boundary — the pipeline node after which CogWorks proceeds non-interactively. Nodes before the boundary MAY require human approval (configurable). Nodes after the boundary run autonomously with gate enforcement as the quality control. The boundary MUST be visible in the GitHub issue (as a label or comment) so humans know when to engage and when to let the system run.
 
-### REQ-PIPE-012: Pipeline working directory
+### REQ-PIPE-012: Implementation job workspace
 
-Each pipeline run MUST have a dedicated working directory (git worktree) for intermediate artifacts. The working directory persists across nodes within a single pipeline run. Intermediate artifacts (specs, interface definitions, plans, generated code) are written to the working directory before being committed as PRs. The working directory is cleaned up on pipeline completion. The working directory state MUST be recoverable from GitHub artifacts (PRs, issue comments) in case of failure — the working directory is a performance optimisation, not a durability mechanism.
+For each implementation job, CogWorks MUST request one ephemeral container through an infrastructure provider interface. CogWorks' orchestrator owns the job lifecycle and MUST request cleanup on success, failure, or cancellation. The container runtime and provider (for example Docker, Kubernetes, or a cloud runtime) are infrastructure choices behind that interface. Durable pipeline state and deliverables MUST remain recoverable from the work-item system and repository; container-local state is an execution aid, not a durability mechanism.
 
 ---
 
@@ -118,9 +120,9 @@ Edges that create cycles MUST specify a maximum traversal count, which node outp
 
 ## REQ-EXEC: Pipeline Execution
 
-### REQ-EXEC-001: Working directory
+### REQ-EXEC-001: Ephemeral implementation workspace
 
-Each pipeline run MUST have a dedicated working directory — a git worktree checked out from the target repository at the relevant branch. The working directory persists across all nodes within a single pipeline run. Nodes read inputs from and write outputs to the working directory (for file artifacts) or to a structured state store (for metadata). The working directory is cleaned up when the pipeline run completes. On pipeline failure, the orchestrator MUST be able to reconstruct pipeline state from GitHub artifacts and resume from the failed node.
+Each implementation job MUST execute in one ephemeral container requested by CogWorks' orchestrator through an infrastructure provider interface. The orchestrator MUST arrange cleanup when the job succeeds, fails, or is cancelled. The provider supplies the runtime; CogWorks does not prescribe a specific container platform. Pipeline state MUST be reconstructable from durable work-item and repository records, so loss of the container MUST NOT require restarting the pipeline from scratch.
 
 ### REQ-EXEC-002: Pipeline state machine
 
@@ -132,11 +134,11 @@ Each node execution MUST follow this lifecycle: (1) precondition check — verif
 
 ### REQ-EXEC-004: Pipeline triggering
 
-The pipeline MUST be triggerable by: a GitHub Issue label (`cogworks:run`), a GitHub comment command (`/cogworks run`), or a manual CLI invocation (`cogworks run --issue <number>`). The orchestrator MUST prevent duplicate pipeline runs for the same work item.
+The pipeline MUST be triggerable through the EventSource abstraction, including manual CLI invocation. Provider-specific readiness events and their mapping to a work item MUST remain behind the GitHub/EventSource interface; this specification does not mandate a particular label, project status, or webhook payload. The orchestrator MUST prevent duplicate pipeline runs for the same work item.
 
 ### REQ-EXEC-005: Pipeline cancellation
 
-A running pipeline MUST be cancellable by removing the `cogworks:run` label, adding a `cogworks:cancel` label, or a comment command (`/cogworks cancel`). On cancellation: active node executions are terminated (in-progress LLM calls are allowed to complete), current state is written to GitHub, a summary comment is posted, and the working directory is cleaned up.
+A running pipeline MUST be cancellable through the EventSource/work-item interface. The provider-specific cancellation signal is not prescribed here. On cancellation: active node executions are terminated (in-progress LLM calls are allowed to complete), current state is persisted through the work-item interface, a summary is posted, and active implementation containers are cleaned up.
 
 ### REQ-EXEC-006: Parallel node execution
 
@@ -145,6 +147,14 @@ When the graph has multiple nodes whose inputs are all available simultaneously,
 ### REQ-EXEC-007: Sub-work-item execution within graph
 
 Sub-work-items produced by a planning node MUST be processed as a sub-graph within the pipeline. Each sub-work-item follows a code-generation → review → integration sequence (or a configured sub-graph). Sub-work-items MUST be processed in topological dependency order. Sub-work-items with no mutual dependency path MAY execute concurrently when the pipeline configuration allows parallel fan-out.
+
+### REQ-EXEC-008: Implementation job container lifecycle
+
+For each implementation job, the orchestrator MUST request exactly one ephemeral container through an infrastructure provider interface and MUST own its lifecycle, including cleanup after success, failure, or cancellation. Retry attempts within the same active implementation job use that job's container; a new or resumed implementation job requests a new container. The provider interface MUST isolate CogWorks' orchestration contract from the selected runtime or hosting provider. The requirements do not prescribe provider-specific APIs or container configuration.
+
+### REQ-EXEC-009: Persist before implementation container cleanup
+
+Before requesting cleanup of an implementation container on a terminal path, the orchestrator MUST attempt to persist the latest recoverable pipeline state and deliverables through the work-item and repository interfaces. If persistence fails, the orchestrator MUST still request container cleanup, record the persistence failure through available operational logging, and resume only from the last successfully persisted state. Container-local state MUST NOT be treated as durable recovery data.
 
 ---
 
@@ -260,7 +270,7 @@ Sub-work-items MUST be processed in topological dependency order. Each sub-work-
 
 ### REQ-CODE-002: Structured feedback loop
 
-CogWorks MUST feed structured domain service diagnostics (artifact, location, severity, message) back to the LLM on failure. Simulation failures that are not self-explanatory MUST be interpreted by an LLM before being included in retry context.
+CogWorks MUST feed structured diagnostics from the configured validation interface (artifact, location, severity, message) back to the LLM on failure. Validation may be domain-specific, but its integration MUST remain behind the domain-service interface. Failures that are not self-explanatory MUST be interpreted before being included in retry context.
 
 ### REQ-CODE-003: Retry budget
 
@@ -277,6 +287,10 @@ Context assembly MUST apply deterministic priority-based truncation when the ass
 ### REQ-CODE-006: Semantic stalling detection
 
 The retry logic MUST track diagnostic categories across consecutive retry attempts for each sub-work-item. If the same diagnostic category recurs for a configurable number of consecutive retries (default: 3), the system MUST escalate with a structured stalling report rather than consuming the remaining retry budget. The stalling report MUST include the recurring error category and a summary of all attempts. This is distinct from flaky test detection (EDGE-015), which covers identical code producing different results.
+
+### REQ-CODE-007: Test-first implementation loop
+
+For each implementation job, CogWorks MUST establish the job's tests or equivalent domain-specific acceptance checks from the approved work-item and specification inputs before implementation proceeds. The job then implements the requested change, runs the configured validation, and iterates on structured feedback within its retry and rework budgets. This contract applies to software and other engineering domains; the test and validation mechanisms are selected through the domain-service interface.
 
 ---
 
@@ -379,17 +393,17 @@ Every pipeline state transition (node entry, node completion, gate evaluation) M
 
 When a node fails, CogWorks MUST post a structured failure report as a GitHub issue comment and apply the `cogworks:node:failed` label.
 
-### REQ-AUDIT-004: Performance metric emission
+### REQ-AUDIT-004: Tracing observability fields
 
-At the completion of each pipeline run (and at each node boundary for in-progress monitoring), CogWorks MUST emit structured metric data points to a configurable external metric sink. Emitted data points MUST include: per-node wall-clock timings, retry counts with root cause categories (compilation error, test failure, review finding, constraint violation, alignment failure, timeout), rework counts with misalignment type distribution (missing, extra, modified, ambiguous, scope_exceeded), LLM token usage per node (including alignment check calls), domain service invocation timings per method, alignment scores per stage, satisfaction scores (per-scenario and overall), final disposition (merged, rejected, failed, abandoned), and total pipeline cost.
+CogWorks MUST record pipeline lifecycle, retry, rework, and cost fields through its structured tracing instrumentation. The CLI MUST route tracing output to structured console logging and MAY export spans through the configured OpenTelemetry exporter. This requirement does not mandate a custom metric-sink abstraction or guarantee derived metrics that are not represented by recorded tracing fields.
 
-### REQ-AUDIT-005: Metric data completeness
+### REQ-AUDIT-005: Tracing field completeness
 
-Each emitted metric data point MUST include sufficient dimensions to enable cross-pipeline aggregation by external tools: pipeline run ID, work item ID, work item classification, safety classification, repository identifier, node name, and timestamp. The dimensions MUST enable computation of all performance metrics defined in the operations specification (pipeline effectiveness, efficiency, quality, and learning metrics).
+Tracing fields MUST use stable names for the pipeline run identifier, node identifier, event kind, and any event-specific values defined by the observability interface. External systems MAY derive and aggregate metrics from available spans and events. CogWorks MUST NOT claim that dimensions or measurements absent from those records are emitted.
 
-### REQ-AUDIT-006: Metric sink abstraction
+### REQ-AUDIT-006: Tracing-based observability
 
-CogWorks MUST define a metric sink abstraction for emitting metric data points. The abstraction MUST support pluggable backends (e.g., Prometheus push gateway, OpenTelemetry collector, InfluxDB line protocol). CogWorks MUST NOT implement its own metrics storage, aggregation, or dashboarding — these are delegated to purpose-built external tools. The metric sink is optional — CogWorks MUST operate correctly when no metric sink is configured (metrics are included in structured log output but not pushed to an external system).
+CogWorks MUST use its existing tracing instrumentation and OpenTelemetry exporter path for external observability. Backend selection and aggregation are handled by the configured OpenTelemetry collector/exporter and external monitoring systems; CogWorks MUST NOT introduce a separate metric-sink interface or implement metrics storage, aggregation, or dashboarding.
 
 ---
 
@@ -401,11 +415,23 @@ CogWorks MUST NOT execute generated code or LLM output within its own process. C
 
 ### REQ-BOUND-002: No PR merging
 
-CogWorks MUST NOT merge, approve, close, or request changes on any Pull Request. PR lifecycle decisions belong to humans.
+CogWorks MUST NOT merge, approve, close, or request changes on any Pull Request. CogWorks does not own releases or artifact publication. PR lifecycle decisions and any external factory/GateKeeper approvals belong outside CogWorks and are passed through the work-item interface.
 
 ### REQ-BOUND-003: No metrics storage
 
-CogWorks MUST NOT implement its own metrics database, time-series store, or dashboarding. Metrics storage, aggregation, trend analysis, and dashboarding are delegated to external purpose-built tools. CogWorks' responsibility ends at emitting structured metric data points through the metric sink abstraction.
+CogWorks MUST NOT implement its own metrics database, time-series store, or dashboarding. Metrics storage, aggregation, trend analysis, and dashboarding are delegated to external purpose-built tools.
+
+### REQ-BOUND-004: External status and approval pass-through
+
+CogWorks MUST consume readiness, implementation-stage, and external approval status through the work-item interface. The mapping of provider-specific states (including a possible ready-for-implementation stage) MUST remain behind that interface and MUST NOT be fixed by this specification. CogWorks MUST report pipeline outcomes through the same interface without performing external approval, merge, release, or artifact-publication actions.
+
+### REQ-BOUND-005: Credential provider boundary
+
+Authentication and key lifecycle MUST be handled by the Vault library behind the credential-provider interface. CogWorks MUST rely on that provider to resolve credentials for infrastructure clients and MUST NOT prescribe Vault authentication or rotation details. Key material MUST NOT be included in LLM prompts or context, audit records, generated artifacts, or logs.
+
+### REQ-BOUND-006: Attestation verification and signing
+
+Before acting on a work item, CogWorks MUST verify any upstream attestation required by the configured trust policy through an attestation-provider interface. Missing, invalid, or content-mismatched required attestations MUST fail closed: CogWorks MUST NOT process the work item and MUST record a non-secret failure outcome. CogWorks MUST sign its own action attestations through the attestation-provider boundary and publish them as comments through the work-item interface. Cryptographic implementation and key access are delegated to the provider; the specific signature algorithm and provider protocol are not prescribed here. The attestation provider uses the Vault-backed credential boundary for signing operations.
 
 ---
 
@@ -433,11 +459,11 @@ The LLM Gateway MUST emit structured log entries when rate limiting is active, i
 
 ### REQ-LABEL-001: Configurable workflow labels
 
-Workflow-semantic labels (trigger, awaiting-review, safety-critical, hold, cancel, sub-work-item) MUST have configurable names via the `[labels]` section of `.cogworks/config.toml`. Each label MUST have a sensible default using the `cogworks:` prefix.
+Workflow-semantic labels and signals (readiness/trigger, awaiting-review, safety-critical, hold, cancel, sub-work-item) MUST have configurable mappings via the `[labels]` section of `.cogworks/config.toml` or the corresponding provider adapter. Default label mappings MAY use the `cogworks:` prefix; business logic MUST NOT depend on a particular provider label or project status.
 
 ### REQ-LABEL-002: Pipeline-internal labels are not configurable
 
-Pipeline-internal labels (`cogworks:processing`, `cogworks:node:<name>`, `cogworks:node:failed`, `cogworks:status:<status>`, `cogworks:restart`) MUST always use the `cogworks:` prefix and MUST NOT be configurable. These labels are machine state and are not intended for human consumption.
+Pipeline-internal labels (`cogworks:processing`, `cogworks:node:<name>`, `cogworks:node:failed`, `cogworks:status:<status>`) MUST always use the `cogworks:` prefix and MUST NOT be configurable. Restart signals are workflow-semantic adapter mappings, not pipeline-internal labels.
 
 ### REQ-LABEL-003: Label configuration validation
 

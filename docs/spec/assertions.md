@@ -6,9 +6,9 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 
 ## Pipeline State Machine
 
-### ASSERT-PSM-001: Fresh work item enters intake
+### ASSERT-PSM-001: Ready work item enters intake
 
-- **Given**: A work item with `cogworks:run` label and no `cogworks:node:*` label
+- **Given**: The EventSource reports a work item ready for processing, and the work item has no active-node state
 - **When**: The step function processes this work item
 - **Then**: The Task Classifier is invoked, and `cogworks:node:intake` label is applied
 - **Traces to**: REQ-PIPE-001, REQ-PIPE-002
@@ -65,15 +65,15 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 ### ASSERT-PSM-009: Pipeline resumes from failed node on re-trigger
 
 - **Given**: A pipeline run that failed at node N with pipeline state persisted to GitHub
-- **When**: The pipeline is re-triggered (label re-applied or CLI invocation)
+- **When**: The pipeline is re-triggered through the EventSource or manual CLI
 - **Then**: The pipeline reconstructs state from GitHub and resumes from node N without re-executing completed nodes
 - **Traces to**: REQ-PIPE-009, REQ-EXEC-002
 
 ### ASSERT-PSM-010: Pipeline cancellation terminates active nodes
 
 - **Given**: A pipeline running with node N active
-- **When**: The `cogworks:cancel` label is applied (or `/cogworks cancel` command issued)
-- **Then**: Active node execution is terminated, current state is written to GitHub, a summary comment is posted, and the working directory is cleaned up
+- **When**: The step function re-reads work-item state and the configured adapter mapping reports cancellation
+- **Then**: Active node execution is terminated, current state is persisted, a summary is posted, and active implementation containers are cleaned up
 - **Traces to**: REQ-EXEC-005
 
 ### ASSERT-PSM-011: Duplicate pipeline prevention
@@ -82,6 +82,27 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 - **When**: A new trigger event arrives for work item #42
 - **Then**: The new trigger is rejected with a comment explaining the conflict (or queued, per configuration)
 - **Traces to**: REQ-PIPE-008
+
+### ASSERT-JOB-001: Implementation job uses one ephemeral container and cleans it up
+
+- **Given**: An implementation job is requested and reaches success, failure, or cancellation
+- **When**: The Pipeline Executor coordinates the job through the runtime provider
+- **Then**: Exactly one ephemeral container is requested for the job, retry attempts within that active job reuse it, and cleanup is requested on every terminal path
+- **Traces to**: REQ-PIPE-012, REQ-EXEC-001, REQ-EXEC-008
+
+### ASSERT-JOB-003: Persistence is attempted before container cleanup
+
+- **Given**: An implementation job reaches success, failure, or cancellation and final state or deliverables are not yet known to be durable
+- **When**: The orchestrator terminates the job
+- **Then**: It attempts persistence before requesting cleanup; if persistence fails, cleanup is still requested and only the last successfully persisted state is used for recovery
+- **Traces to**: REQ-EXEC-008, REQ-EXEC-009
+
+### ASSERT-JOB-002: External approval does not replace a CogWorks node gate
+
+- **Given**: An external factory/GateKeeper approval or work-item readiness status is reported through the work-item interface
+- **When**: CogWorks evaluates its configured node gate
+- **Then**: CogWorks applies its own gate configuration and safety override independently; the provider-specific status mapping is not inferred by the gate logic
+- **Traces to**: REQ-PIPE-006, REQ-BOUND-004
 
 ---
 
@@ -242,6 +263,13 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 - **When**: Context is assembled for sub-work-item N
 - **Then**: The outputs (code) of sub-work-items A and B are included in the context package
 - **Traces to**: REQ-CODE-001
+
+### ASSERT-CODE-008: Test-first implementation uses domain-specific acceptance checks
+
+- **Given**: An implementation job for a software or other engineering work item
+- **When**: The job starts its implementation loop
+- **Then**: Tests or equivalent domain acceptance checks are established before implementation, followed by configured validation and iteration on structured feedback
+- **Traces to**: REQ-CODE-007
 
 ---
 
@@ -415,6 +443,13 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 - **When**: CogWorks processes the work item
 - **Then**: CogWorks does NOT merge the PR
 - **Traces to**: REQ-BOUND-002
+
+### ASSERT-INT-004: External approval and release actions remain outside CogWorks
+
+- **Given**: A work item reports external approval or a PR becomes eligible for merge
+- **When**: CogWorks records or reports the pipeline outcome
+- **Then**: CogWorks passes status through the work-item interface but does not approve, merge, release, or publish artifacts
+- **Traces to**: REQ-BOUND-002, REQ-BOUND-004
 
 ---
 
@@ -655,6 +690,20 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 - **And**: PR creation does not occur
 - **Traces to**: REQ-CONST-013
 
+### ASSERT-SEC-006: Credential material is isolated from model and audit content
+
+- **Given**: Infrastructure credentials are resolved by the Vault-backed credential provider
+- **When**: CogWorks assembles model prompts, context, audit records, logs, or generated artifacts
+- **Then**: Credential material is absent from all of those outputs and is used only by the infrastructure authentication path
+- **Traces to**: REQ-BOUND-005
+
+### ASSERT-SEC-007: Required attestations are verified and CogWorks actions are signed
+
+- **Given**: A work item has a required upstream attestation, or CogWorks is completing an action that requires its own attestation
+- **When**: The attestation provider verifies the upstream content or signs the CogWorks action
+- **Then**: Processing proceeds only after successful verification, and CogWorks publishes its own signed attestation through the work-item interface; missing, invalid, or mismatched required attestations prevent processing without exposing key material
+- **Traces to**: REQ-BOUND-006
+
 ---
 
 ## Graph Execution
@@ -793,47 +842,27 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 
 ---
 
-## Performance Metrics
+## Tracing-Based Observability
 
-### ASSERT-METRIC-001: Metric data points emitted on pipeline completion
+### ASSERT-OBS-001: Node lifecycle hooks record stable fields
 
-- **Given**: A pipeline run completes with any final disposition (merged, rejected, failed, abandoned)
-- **When**: The pipeline executor processes pipeline completion
-- **Then**: Metric data points are emitted to the configured metric sink
-- **And**: Data points include per-node timings, retry counts with root cause categories, token usage, domain service invocation timings, satisfaction scores, final disposition, and total cost
-- **Traces to**: REQ-AUDIT-004
+- **Given**: A tracing span declares the fields required by the observability hook
+- **When**: `record_node_start` and `record_node_complete` are invoked
+- **Then**: The span records `pipeline.run_id`, `pipeline.node_id`, and the corresponding `pipeline.event`; completion also records `pipeline.token_cost.total_usd`
+- **Traces to**: REQ-AUDIT-004, REQ-AUDIT-005
 
-### ASSERT-METRIC-002: All required dimensions present in emitted data points
+### ASSERT-OBS-002: Retry and rework categories are structured
 
-- **Given**: Metric data points are computed from a completed pipeline run
-- **When**: The Metric Emitter prepares data points for emission
-- **Then**: Each data point includes: pipeline run ID, work item ID, work item classification, safety classification, repository identifier, node name, and timestamp
-- **Traces to**: REQ-AUDIT-005
+- **Given**: A retry or rework occurs with a typed root cause or misalignment category
+- **When**: The corresponding tracing hook is invoked
+- **Then**: The span records the stable event kind and its structured category field
+- **Traces to**: REQ-AUDIT-004, REQ-AUDIT-005
 
-### ASSERT-METRIC-003: Metric sink failure is non-fatal
+### ASSERT-OBS-003: Export uses the configured tracing path
 
-- **Given**: A metric sink is configured but the external backend is unreachable
-- **When**: The Metric Emitter attempts to emit data points
-- **Then**: The emission failure is logged as a warning
-- **And**: The pipeline continues to completion (not blocked, not slowed)
-- **And**: Metric data points appear in structured log output regardless
-- **Traces to**: REQ-AUDIT-006
-
-### ASSERT-METRIC-004: Incremental data points emitted at node boundaries
-
-- **Given**: A pipeline with multiple nodes and a configured metric sink
-- **When**: Each node completes execution
-- **Then**: Incremental metric data points for that node are emitted to the sink
-- **And**: The pipeline does not wait for confirmation of successful emission before proceeding to the next node
-- **Traces to**: REQ-AUDIT-004
-
-### ASSERT-METRIC-005: Pipeline operates normally without metric sink
-
-- **Given**: No metric sink is configured in `.cogworks/config.toml`
-- **When**: A pipeline run completes
-- **Then**: Metric data points are computed and logged to structured log output
-- **And**: No external emission is attempted
-- **And**: The pipeline operates identically to when a sink is configured
+- **Given**: The CLI initializes observability
+- **When**: Pipeline spans and events are emitted
+- **Then**: They flow through structured console logging and the configured OpenTelemetry exporter without a separate metric-sink abstraction
 - **Traces to**: REQ-AUDIT-006
 
 ---
@@ -1237,7 +1266,6 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 - **Given**: An LLM API response triggers a rate limit state change (remaining count drops below 20% of window capacity)
 - **When**: The LLM Gateway updates its state
 - **Then**: A structured log entry is emitted at warning level containing: remaining count, reset time, throttle delay applied
-- **And**: The `cogworks_llm_rate_limit_remaining` metric is updated
 - **Traces to**: REQ-LLM-004
 
 ---
@@ -1246,7 +1274,7 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 
 ### ASSERT-LABEL-001: Pipeline-internal labels are always prefixed and not configurable
 
-- **Given**: A configuration file that attempts to override the name of `cogworks:run` or `cogworks:node:*` labels
+- **Given**: A configuration file that attempts to override a pipeline-internal `cogworks:node:*` label or maps a workflow signal such as readiness to the same value
 - **When**: The configuration is loaded
 - **Then**: The configuration is rejected with a clear error message and the pipeline halts
 - **And**: Pipeline-internal labels retain their `cogworks:` prefix

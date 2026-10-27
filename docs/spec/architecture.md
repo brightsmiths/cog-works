@@ -33,7 +33,9 @@ This document defines the clean architecture boundaries — what is business log
 │                                                                         │
 │  LLM Provider              │  Issue Tracker                             │
 │  Code Repository           │  Pull Request Manager                      │
-│  Domain Service Client     │  Template Engine                           │
+│  Domain Service Client     │  Attestation Provider                      │
+│  Template Engine           │  Implementation Job Runtime Provider       │
+│  Credential Provider       │                                            │
 │  Interface Registry Loader │  Audit Store                               │
 │  Scenario Executor         │  Twin Provisioner                          │
 │  Summary Cache             │  Pipeline Configuration Loader             │
@@ -47,6 +49,8 @@ This document defines the clean architecture boundaries — what is business log
 │  (Concrete adapters — the only code that touches external systems)      │
 │                                                                         │
 │  Anthropic Messages API    │  GitHub REST/GraphQL/Projects API          │
+│  Vault credential adapter  │  Attestation signer/verifier adapter      │
+│  Container runtime adapter │                                            │
 │  Extension API Client      │  Handlebars template engine                │
 │  (Unix socket / HTTP)      │  GitHub issue comments (audit)             │
 │  (Future: gRPC transport)  │  (Future: OpenAI, GitLab, etc.)            │
@@ -55,6 +59,8 @@ This document defines the clean architecture boundaries — what is business log
 ```
 
 Note: Domain services (Rust, KiCad, FreeCAD, etc.) are **external processes**, not part of CogWorks. They communicate through the Extension API and are not shown in the layered view above. CogWorks' Extension API Client is an infrastructure implementation that handles the transport layer.
+
+CogWorks remains domain-agnostic across software and other engineering work. The orchestrator owns implementation-job lifecycle decisions and requests one ephemeral container per implementation job through the runtime abstraction. Runtime creation and hosting are provider-specific infrastructure; domain-specific tests and validation remain behind the Domain Service Client.
 
 ---
 
@@ -93,6 +99,10 @@ Coordinates the execution of pipeline graph nodes, evaluates edge conditions, an
   - Respects maximum concurrent LLM calls limit (configurable, default: 3)
   - Handles partial failure: other nodes continue unless failed node is marked `abort_siblings_on_failure`
   - Writes pipeline state to GitHub at each node boundary (crash-recovery point)
+
+### Implementation Job Orchestration
+
+The orchestrator requests and tracks one ephemeral container for each implementation job. It owns the job lifecycle, including requesting cleanup after success, failure, or cancellation. The runtime provider creates and operates the container; business logic does not depend on Docker, Kubernetes, or a cloud runtime. Domain-specific tests and validation remain behind the Domain Service Client.
 
 ### Edge Condition Evaluation
 
@@ -166,7 +176,7 @@ Deterministic selection of context items when the full package exceeds the model
 
 Converts between structured pipeline state and GitHub label strings.
 
-- **Input/Output**: Bidirectional mapping between structured types (node, status) and label strings (`cogworks:node:architecture`, `cogworks:status:pending`, etc.)
+- **Input/Output**: Bidirectional mapping for CogWorks pipeline-state labels. Readiness signals and external status mappings are handled by the GitHub/EventSource adapter; no trigger label or project-status mapping is fixed by business logic.
 - **Note**: Dependency and ordering information is read from native GitHub typed issue links (`blocks` / `is blocked by`) and the sub-issue API, not from labels.
 
 ### Interface Registry Validation
@@ -320,18 +330,9 @@ Generates a compact tool index for nodes with many tools, and handles meta-tool 
   - Meta-tools (`tools.search`, `tools.schema`, `tools.call`) are always available when progressive discovery is active
   - The compact index replaces full schemas in the LLM tool list to reduce context token consumption
 
-### Metric Data Point Computation
+### Tracing-Based Observability
 
-Pure function that transforms raw audit trail data into structured metric data points for emission.
-
-- **Input**: Pipeline run audit data (node timings, retry counts with root causes, rework counts with misalignment types, token usage, domain service invocations, alignment scores, satisfaction scores, final disposition)
-- **Output**: Set of structured metric data points with dimensions (pipeline run ID, work item ID, classification, safety classification, repository identifier, node name, timestamp)
-- **Rules**:
-  - Computation is deterministic: same audit data always produces same metric data points
-  - Each node boundary produces incremental data points (not only pipeline completion)
-  - Root cause categories are structured enums, not free-form strings: compilation error, test failure, review finding, constraint violation, alignment failure, timeout
-  - Misalignment type distribution (missing, extra, modified, ambiguous, scope_exceeded) is tracked per stage
-  - All dimensions required for external aggregation are populated before emission
+Pipeline lifecycle instrumentation records structured fields on tracing spans. The CLI configures structured console output and the OpenTelemetry exporter. External systems may derive metrics from available span attributes; CogWorks defines no metric-sink trait or separate metric data-point computation abstraction. The instrumentation contract is limited to the stable fields declared by the observability interface.
 
 ### Alignment Verification
 
@@ -544,17 +545,17 @@ Synchronises work item status to an external project board for human oversight.
 - **Error cases**: Board unavailable (non-fatal — logged, pipeline continues), field not found (non-fatal — logged), authentication failure (non-fatal — logged)
 - **Constraint**: Project board operations are fire-and-forget. Failures MUST NOT block or slow pipeline execution. This abstraction is optional — if not configured, no calls are made.
 
-### Metric Sink
+### Implementation Job Runtime Provider
 
-Emits structured metric data points to an external metrics backend.
+Provides the infrastructure capability used by the orchestrator to request one ephemeral container per implementation job. The provider owns runtime-specific operations; the orchestrator remains responsible for deciding when a job starts and requesting cleanup on all terminal paths. This specification does not prescribe provider methods, request fields, or runtime-specific configuration.
 
-- **Operations**:
-  - `emit(data_points) → Result` — Emit a batch of metric data points to the configured backend
-  - `flush() → Result` — Flush any buffered data points (called at pipeline completion). `flush()` MUST be time-bounded: implementations apply a short, configurable timeout (default: 2 seconds). If the flush does not complete within the timeout, it is abandoned, the failure is logged, and control returns to the caller. `flush()` MUST NOT block pipeline shutdown indefinitely.
-- **Data flowing across boundary**:
-  - Outbound: structured metric data points with dimensions (pipeline run ID, work item ID, classification, safety classification, repository, node, timestamp) and measurements (timings, counts, costs, scores)
-- **Error cases**: Backend unavailable (non-fatal — logged, pipeline continues), authentication failure (non-fatal), serialization error (non-fatal), flush timeout exceeded (non-fatal — logged, pipeline shutdown continues)
-- **Constraint**: Metric emission failures MUST NOT block or slow pipeline execution. Emission is fire-and-forget with best-effort delivery. `flush()` is best-effort with a bounded timeout — a metrics backend outage at pipeline completion MUST NOT delay process exit.
+### Credential Provider
+
+Resolves credentials for infrastructure clients through the Vault library. Authentication and key lifecycle are provider concerns behind this interface. CogWorks does not define Vault APIs or lifecycle policy, and key material is not available to prompts, context, logs, audit records, or generated artifacts.
+
+### Attestation Provider
+
+Verifies required upstream attestations against the content and trust policy presented by the pipeline, and signs CogWorks action attestations. It uses the credential provider for signing capability; private key material is never returned to business logic or exposed to the LLM. Signature format and key lifecycle remain implementation concerns behind the provider interfaces.
 
 ### Tool Profile Store
 
@@ -631,27 +632,32 @@ Each abstraction has one or more concrete implementations. These are the only mo
 - Uses: GitHub Client (posts issue comments or creates artifacts)
 - Handles: Formatting audit events into readable Markdown, batching events into comments
 
-### Prometheus Metric Sink
+### Container Runtime Adapter
 
-- Implements: Metric Sink
-- Uses: Prometheus Push Gateway HTTP API
-- Handles: Metric data point serialization to Prometheus exposition format, push to configured gateway endpoint, label mapping from CogWorks dimensions to Prometheus labels
-- Non-blocking: Emission failures are logged, not fatal to the pipeline
+- Implements: Implementation Job Runtime Provider
+- Uses: A selected container runtime or hosting provider
+- Handles: Provider-specific container job requests and runtime operations
+- Lifecycle: The orchestrator requests cleanup after every implementation job; the adapter performs provider-specific cleanup
 
-### OpenTelemetry Metric Sink
+### Vault Credential Adapter
 
-- Implements: Metric Sink
-- Uses: OpenTelemetry Collector OTLP endpoint (HTTP or gRPC)
-- Handles: Metric data point serialization to OTLP format, export to configured collector
-- Non-blocking: Emission failures are logged, not fatal to the pipeline
+- Implements: Credential Provider
+- Uses: The Vault library
+- Handles: Credential resolution and authentication/key lifecycle according to the provider contract; concrete Vault calls and rotation policy are outside this specification
 
-### InfluxDB Metric Sink
+### Attestation Adapter
 
-- Implements: Metric Sink
-- Uses: InfluxDB line protocol (HTTP write API)
-- Handles: Metric data point serialization to InfluxDB line protocol format, HTTP write to configured InfluxDB endpoint, tag mapping from CogWorks dimensions to InfluxDB tags
-- Non-blocking: Emission failures are logged, not fatal to the pipeline
-- `flush()`: Issues a synchronous HTTP write bounded by the configurable flush timeout (default: 2 seconds); failure is logged and does not block pipeline shutdown
+- Implements: Attestation Provider
+- Uses: Credential Provider for signing capability
+- Handles: Verification of required upstream attestations and signing of CogWorks action attestations
+- Publishes: Signed attestation comments through the Issue Tracker abstraction
+- Security: Does not expose private key material to business logic, prompts, logs, or audit records
+
+### Tracing and OpenTelemetry Export
+
+- Implements: Structured observability through the existing `tracing` instrumentation
+- Uses: JSON console output and the CLI-configured OpenTelemetry OTLP exporter
+- Handles: Export of available tracing spans and events; backend aggregation and dashboards remain external
 
 ### TOML Profile Loader
 

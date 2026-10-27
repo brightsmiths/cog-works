@@ -23,6 +23,7 @@ These constraints MUST be enforced during implementation. They inform the interf
 - **Node implementations are orchestration, not business logic**: Node implementations coordinate calls between business logic, abstractions, and other components. They contain sequencing logic, not domain rules.
 - **Scenario holdout enforcement**: The Context Assembler MUST enforce that scenario specifications are never included in code generation context packages. This is a hard constraint, not advisory. The configuration must explicitly list scenario directories to exclude.
 - **Domain services are external processes**: CogWorks MUST NOT contain domain-specific code. All domain operations (validate, normalise, review_rules, simulate, validate_deps, extract_interfaces, dependency_graph) are delegated to external domain services via the Extension API.
+- **Engineering workflows are domain-neutral**: CogWorks MUST support software and other engineering work through generic test-first, implementation, and validation/iteration orchestration. Test formats, toolchains, and domain validation remain behind the domain-service interface.
 - **No built-in privileged path**: The Rust domain service MUST use the Extension API like any other domain service. If the API is insufficient for the Rust domain service, the API must be improved, not bypassed.
 - **Interface registry is human-authored**: CogWorks MUST NOT create or modify interface definitions autonomously. It MAY suggest additions as recommendations for human review.
 - **Domain services do not communicate directly**: CogWorks mediates all cross-domain interactions. Domain services do not invoke or depend on each other.
@@ -55,11 +56,11 @@ direction. See `docs/spec/interfaces/README.md` for the full dependency graph.
   crates and constructs concrete infrastructure instances. This is the only place
   where `GithubClient`, `AnthropicProvider`, `ExtensionApiClient`,
   `GitHubWebhookEventSource`, and `QueueEventSource` are instantiated.
-- **Trigger modes are infrastructure concerns**: The three trigger modes (single-shot
-  CLI, webhook, cloud queue) are all implemented in terms of the `pipeline::EventSource`
-  trait. The `listener` crate provides the webhook and queue implementations.
-  Phase 1 CLI single-shot mode synthesises a `GitHubEvent` directly in `cli`
-  without using `listener` at all.
+- **Readiness mapping is an infrastructure concern**: Trigger sources report
+  work-item readiness through the `pipeline::EventSource` abstraction. The
+  GitHub/event adapter owns mapping provider-specific labels, project states, or
+  webhook payloads; business logic MUST NOT require a particular external signal.
+  Manual CLI invocation remains a supported trigger mode.
 - **Workspace dependency versions are pinned centrally**: All external dependency
   versions are declared in the `[workspace.dependencies]` table in the root
   `Cargo.toml`. Individual crate `Cargo.toml` files use `{ workspace = true }`.
@@ -75,6 +76,7 @@ direction. See `docs/spec/interfaces/README.md` for the full dependency graph.
 - **Every cycle must have a termination condition**: The pipeline configuration validator must reject any graph containing a cycle without an explicit `max_traversals` on at least one edge in the cycle. There must be no path to infinite execution.
 - **Cost budget is shared across parallel nodes**: When nodes execute concurrently, budget acquisition must be atomic. Two nodes must not both be approved if their combined estimated cost exceeds the remaining budget.
 - **Pipeline state is recoverable from GitHub**: The pipeline working directory is a performance optimisation. All pipeline state must be reconstructable from GitHub artifacts (issue comments, labels, PRs). Loss of the working directory must not require restarting the pipeline from scratch.
+- **Implementation containers are not durable state**: Job-local files are transient. Durable pipeline state and deliverables must be persisted through the existing work-item and repository interfaces before container cleanup.
 - **Node inputs must be verified before execution**: The graph execution engine must verify that all declared inputs for a node are available before starting the node. Missing inputs must produce a clear error identifying the node and the missing input.
 - **Edge condition evaluation is audited**: Every edge condition evaluation (deterministic, LLM-evaluated, or composite) must be recorded in the audit trail with the condition definition, the evaluation input, and the result.
 - **Pipeline configuration is validated at load time**: The pipeline configuration must be fully validated when loaded (before any node executes). Invalid configurations must produce clear errors and prevent the pipeline from starting.
@@ -122,6 +124,7 @@ direction. See `docs/spec/interfaces/README.md` for the full dependency graph.
 
 ## Security
 
+- **Credential lifecycle is provider-owned**: The Vault library behind the credential-provider interface resolves credentials and implements their authentication/key lifecycle. CogWorks MUST NOT prescribe Vault mechanics or expose key material to LLM prompts/context, audit records, logs, or generated artifacts.
 - **Minimum-privilege GitHub token**: The token must have only the permissions needed: issues (read/write), pull requests (read/write), contents (read/write), labels (read/write). No admin access.
 - **No secrets in context packages**: LLM API keys, GitHub tokens, and any other credentials must never appear in context packages, audit trails, or generated code.
 - **No secrets in generated code**: Code generation must use placeholder values for secrets, with documentation on what needs to be configured.
@@ -146,7 +149,7 @@ direction. See `docs/spec/interfaces/README.md` for the full dependency graph.
 - **Sensible defaults**: Every configurable value must have a sensible default. A minimal configuration file should be sufficient to run the pipeline.
 - **Validation at load time**: Configuration must be fully validated when loaded. Invalid configuration produces a clear error message and halts the pipeline before any work begins.
 - **No environment-variable-driven behavior in business logic**: Environment variables are read in the infrastructure/configuration layer only. Business logic receives typed configuration values, never raw strings from the environment.
-- **Label configuration**: Workflow-semantic labels (trigger, awaiting-review, safety-critical, hold, cancel, sub-work-item) must be configurable via a `[labels]` section in `.cogworks/config.toml`. Pipeline-internal labels (`cogworks:processing`, `cogworks:node:<name>`, `cogworks:node:failed`, `cogworks:status:<status>`, `cogworks:restart`) are never configurable. Duplicate label name mappings must be rejected at load time. Any workflow label configured to the same string as a pipeline-internal label must also be rejected at load time with a clear error — the same GitHub label string carrying two distinct semantic meanings causes undefined pipeline behavior.
+- **Label configuration**: Workflow-semantic labels and signals (readiness/trigger, awaiting-review, safety-critical, hold, cancel, restart, sub-work-item) must be configurable through the `[labels]` section in `.cogworks/config.toml` or the corresponding provider adapter. Pipeline-internal labels (`cogworks:processing`, `cogworks:node:<name>`, `cogworks:node:failed`, `cogworks:status:<status>`) are never configurable. Duplicate mappings must be rejected at load time, including collisions with pipeline-internal labels. Business logic must not depend on a particular workflow label or project status.
 - **GitHub Project integration is optional and non-blocking**: When a `[github_project]` section is present, pipeline state is synced to a GitHub Projects V2 board at node boundaries. Project board update failures are logged as warnings and must never block, slow, or fail the pipeline. CogWorks must operate identically with or without project configuration.
 - **Native sub-issues for work item hierarchy**: Sub-work-items must be created as native GitHub sub-issues (using the sub-issue API), not as standalone issues linked only by labels. Dependencies between sub-work-items must use native GitHub typed issue links (`blocks` / `is blocked by`).
 - **Milestone inheritance**: Sub-work-items must inherit the parent work item's GitHub Milestone when one is set. CogWorks must not create, modify, or delete milestones.
@@ -160,7 +163,7 @@ direction. See `docs/spec/interfaces/README.md` for the full dependency graph.
 - **JSON Schema enforcement**: All Extension API messages must conform to published JSON Schemas in `schemas/extension-api/`. Schema changes follow semantic versioning (additive = minor, breaking = major).
 - **Transport flexibility**: Default transport is Unix domain sockets. HTTP/gRPC support is configurable per domain service. The protocol layer must be transport-agnostic so new transports can be added without changing business logic.
 - **Progress polling**: The v1 Extension API baseline is synchronous request-response with configurable timeouts. The protocol design must accommodate adding progress polling (via operation IDs) or streaming transport in a future API version without breaking existing domain services. Domain services are NOT required to implement progress polling in v1.
-- **Domain services own their lifecycle**: CogWorks does not start, stop, or manage domain service processes. Services are started independently (systemd, Docker, manually). CogWorks checks health before invocation.
+- **Domain services own their lifecycle**: CogWorks does not start, stop, or manage independently deployed domain service processes. Services are started independently; CogWorks checks health before invocation. This is separate from implementation-job containers, whose lifecycle is requested by CogWorks' orchestrator through the runtime-provider interface.
 - **Graceful degradation**: Primary domain service unavailable = halt. Secondary domain service unavailable = continue with warning. This distinction is based on whether the service covers the domain of the artifacts being generated.
 - **Standardised diagnostic categories**: Domain service diagnostics must use the standardised diagnostic category set (`syntax_error`, `type_error`, `constraint_violation`, `interface_mismatch`, `dependency_error`, `style_violation`, `safety_concern`, `performance_concern`, `test_failure`, `completeness`). Domain services may use additional domain-specific categories; consumers treat unknown categories as informational.
 - **Standardised error codes**: Service-level errors (cannot process request) must use the standardised error code set (`tool_not_found`, `tool_failed`, `invalid_request`, `unsupported_method`, `api_version_mismatch`, `timeout`, `artifact_not_found`, `internal_error`). Each code has a defined recoverability (retryable or non-retryable). Consumers use the `recoverable` field to decide retry strategy.
@@ -174,10 +177,9 @@ direction. See `docs/spec/interfaces/README.md` for the full dependency graph.
 - **Cost visibility**: Token usage and cost must be tracked per-call, per-node, and per-pipeline. The final cost report must be posted as a comment on the work item.
 - **Constitutional event visibility**: Every INJECTION_DETECTED, SCOPE_UNDERSPECIFIED, SCOPE_AMBIGUOUS, and PROTECTED_PATH_VIOLATION event must appear in the audit trail with full context (work item ID, source document, offending content or missing capability). These events are never silently suppressed.
 - **Context Pack audit**: The names, version (git ref), and trigger match reasons for all loaded Context Packs must be recorded in the audit trail and included in the PR description.
-- **Metric emission is non-blocking**: Metric data point emission to external sinks MUST be fire-and-forget. Emission failures MUST be logged as warnings but MUST NOT block, slow, or fail the pipeline. The pipeline's correctness and completion MUST NOT depend on metric emission success.
-- **Metric data points always logged**: Regardless of whether an external metric sink is configured, all computed metric data points MUST appear in the structured log output. This ensures metric data is always available for post-hoc analysis even when no external backend is configured.
-- **No metrics storage**: CogWorks MUST NOT implement its own metrics storage, aggregation, dashboarding, or alerting. These are delegated to external tools. CogWorks' sole responsibility is computing and emitting raw metric data points.
-- **Metric computation is deterministic**: The same pipeline audit data MUST always produce the same metric data points. Metric computation is a pure function.
+- **Tracing export is non-blocking**: External observability exporter availability MUST NOT block, slow, or fail pipeline execution. CogWorks records the tracing fields defined by the observability interface; it does not promise a separate metric data-point model or fallback emission.
+- **No metrics storage**: CogWorks MUST NOT implement its own metrics storage, aggregation, dashboarding, or alerting. These are delegated to external tools. External systems may derive measurements from tracing fields that are actually exported.
+- **Tracing fields are stable**: Stable tracing event kinds and typed retry/rework categories MUST be used for fields defined by the observability interface. CogWorks does not compute a separate metric model.
 - **Root cause categories are structured**: Retry and failure root cause categories MUST be structured enums (compilation error, test failure, review finding, constraint violation, timeout), not free-form strings. This enables reliable external aggregation.
 
 ---
@@ -225,6 +227,7 @@ direction. See `docs/spec/interfaces/README.md` for the full dependency graph.
 - **Tool profile is mandatory for LLM nodes**: Every pipeline node that invokes an LLM MUST have a resolved tool profile before execution. If no explicit profile is configured, the built-in default profile for the node type MUST be applied. A node MUST NOT execute with an undefined or empty tool profile.
 - **Defence in depth is mandatory**: Tool access control MUST be enforced at all three layers independently: (1) orchestrator-level tool filtering (unscoped tools never appear in LLM tool lists), (2) tool-level scope enforcement (each tool validates parameters against scope constraints before executing), (3) OS-level sandboxing for write-capable nodes. Failure at one layer MUST NOT compromise the others.
 - **Only Code Generation has core write access**: Among the 7 core pipeline nodes, only Code Generation has filesystem write and git commit tools in its default profile. All other core nodes are read-only by default. Pipeline configuration MAY grant write access to custom nodes, but this is an explicit opt-in recorded in the audit trail.
+- **LLM-requested validation and Git actions are deterministic tools**: LLMs may request validation or Git operations only through scoped, allowlisted tools with validated parameters. Arbitrary LLM-generated shell or Git commands MUST NOT be executed.
 - **Shell execution is restricted**: The `shell.run_restricted` tool executes infrastructure commands (build, test, lint) from an explicit allowlist — NOT arbitrary LLM-generated shell commands. The allowed command list is defined in the tool profile scope parameters, not by the LLM.
 - **Network access is opt-in**: The `net.fetch` tool is NOT enabled in any default profile. Enabling network access requires explicit configuration in the tool profile. Network-capable profiles MUST specify URL allowlists.
 - **Protected path enforcement at tool level**: Filesystem write tools (`fs.write`, `fs.create`, `fs.delete`) MUST refuse operations targeting protected paths (constitutional rules, prompt templates, scenario specs, Extension API schemas) regardless of the node's profile configuration. This is a hard constraint that cannot be overridden by profile configuration.
