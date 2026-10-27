@@ -229,6 +229,8 @@ This also clarifies the boundary of the "GitHub as sole durable state" principle
 
 **Risk**: A provider or orchestrator failure can interrupt persistence or cleanup. The orchestrator attempts durable persistence before cleanup, requests cleanup even if persistence fails, and resumes only from the last successfully persisted state.
 
+**ADR**: [ADR-0009: Provider-Neutral Implementation Job Runtime](../adr/ADR-0009-provider-neutral-implementation-job-runtime.md)
+
 ---
 
 ## 14. Attestation Provider vs. Inline Cryptography
@@ -238,6 +240,8 @@ This also clarifies the boundary of the "GitHub as sole durable state" principle
 **Rationale**: This preserves a testable trust boundary without coupling business logic to a Vault protocol, signature format, or key lifecycle implementation. Signed comments are transported through the work-item interface, which does not interpret their cryptographic contents.
 
 **Risk**: The exact signed payload, trust policy, and attestation chain format must be defined by the concrete interface contract before implementation.
+
+**ADR**: [ADR-0010: Vault-Backed Credential and Attestation Providers](../adr/ADR-0010-vault-backed-credential-and-attestation-providers.md)
 
 ---
 

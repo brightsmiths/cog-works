@@ -698,9 +698,7 @@ let registry_loader = Arc::new(TomlInterfaceRegistryLoader::new(registry_dir));
 - [ ] SDK gaps return `SdkCapabilityMissing`, not `todo!()`
 - [ ] HMAC validation documented as constant-time comparison
 - [ ] `QueueEventSource` documents session API usage
-- [ ] `AnthropicConfig.api_key` and `CogWorksConfig.github_private_key` redacted in `Debug` impls
-- [ ] `CogWorksConfig.anthropic_api_key` redacted in `Debug` impl
-- [ ] `WebhookConfig.secret` redacted in `Debug` impl
+- [ ] Credentials resolved through the credential provider and any transient credential wrapper is redacted in `Debug`; raw credentials are absent from configuration structs
 - [ ] Observability wiring produces a single composite subscriber
 - [ ] Composition root wiring order follows §cli above
 - [ ] `HandlebarsTemplateEngine` in `nodes`, not in a separate crate

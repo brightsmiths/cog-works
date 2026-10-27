@@ -7,7 +7,7 @@ This folder contains the living architecture specification for CogWorks — a de
 Start with **overview.md** for the big picture, then **vocabulary.md** to understand the domain language. From there, the documents can be read in any order depending on what you need.
 
 | Document | Purpose |
-| ---------- | --------- |
+|----------|---------|
 | [overview.md](overview.md) | System context, scope, design philosophy, high-level data flow |
 | [vocabulary.md](vocabulary.md) | Domain concepts with precise definitions and constraints |
 | [requirements.md](requirements.md) | Functional requirements (REQ-* IDs) — what the system must do |
