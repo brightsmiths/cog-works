@@ -61,7 +61,7 @@ globset = { version = "0.4" }
 proptest = { version = "1" }
 
 # HTTP client (used by llm and extension-api over HTTP transport)
-reqwest = { version = "0.12", features = [
+reqwest = { version = "0.13", features = [
     "json",
     "rustls-tls",
 ], default-features = false }
