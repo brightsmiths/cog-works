@@ -72,7 +72,7 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 ### ASSERT-PSM-010: Pipeline cancellation terminates active nodes
 
 - **Given**: A pipeline running with node N active
-- **When**: The EventSource/work-item interface reports cancellation
+- **When**: The step function re-reads work-item state and the configured adapter mapping reports cancellation
 - **Then**: Active node execution is terminated, current state is persisted, a summary is posted, and active implementation containers are cleaned up
 - **Traces to**: REQ-EXEC-005
 
@@ -87,8 +87,15 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 
 - **Given**: An implementation job is requested and reaches success, failure, or cancellation
 - **When**: The Pipeline Executor coordinates the job through the runtime provider
-- **Then**: Exactly one ephemeral container is requested for the job and cleanup is requested on every terminal path
+- **Then**: Exactly one ephemeral container is requested for the job, retry attempts within that active job reuse it, and cleanup is requested on every terminal path
 - **Traces to**: REQ-PIPE-012, REQ-EXEC-001, REQ-EXEC-008
+
+### ASSERT-JOB-003: Persistence is attempted before container cleanup
+
+- **Given**: An implementation job reaches success, failure, or cancellation and final state or deliverables are not yet known to be durable
+- **When**: The orchestrator terminates the job
+- **Then**: It attempts persistence before requesting cleanup; if persistence fails, cleanup is still requested and only the last successfully persisted state is used for recovery
+- **Traces to**: REQ-EXEC-008, REQ-EXEC-009
 
 ### ASSERT-JOB-002: External approval does not replace a CogWorks node gate
 
@@ -1259,7 +1266,6 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 - **Given**: An LLM API response triggers a rate limit state change (remaining count drops below 20% of window capacity)
 - **When**: The LLM Gateway updates its state
 - **Then**: A structured log entry is emitted at warning level containing: remaining count, reset time, throttle delay applied
-- **And**: The `cogworks_llm_rate_limit_remaining` metric is updated
 - **Traces to**: REQ-LLM-004
 
 ---
@@ -1268,7 +1274,7 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 
 ### ASSERT-LABEL-001: Pipeline-internal labels are always prefixed and not configurable
 
-- **Given**: A configuration file that attempts to override the name of `cogworks:run` or `cogworks:node:*` labels
+- **Given**: A configuration file that attempts to override a pipeline-internal `cogworks:node:*` label or maps a workflow signal such as readiness to the same value
 - **When**: The configuration is loaded
 - **Then**: The configuration is rejected with a clear error message and the pipeline halts
 - **And**: Pipeline-internal labels retain their `cogworks:` prefix

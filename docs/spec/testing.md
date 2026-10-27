@@ -140,15 +140,13 @@ Business logic is pure — no I/O, no mocks needed. Test with direct input/outpu
 - Multiple packs, all requirements met → no findings
 - Multiple packs, one requirement missing → one blocking finding
 
-### Metric Data Point Computation
+### Tracing-Based Observability
 
-- Pipeline audit data with all fields present → correct metric data points with all dimensions populated
-- Pipeline audit data with missing optional fields → data points computed with available data, warning logged for missing fields
-- Multiple retry cycles with different root causes → root cause structured enum correctly assigned per retry
-- Zero-retry pipeline → metric data points show zero retry count, no retry root cause
-- Safety-classified vs non-safety-classified work item → safety classification dimension correctly populated
-- Same audit data input produces identical data points on repeated computation (determinism)
-- Each node boundary in audit data produces corresponding incremental data point
+- Node lifecycle hooks record run ID, node ID, and event kind when declared on the span
+- Node completion records total USD cost when declared on the span
+- Retry and rework hooks record stable event kinds and typed categories
+- CLI subscriber routes available spans/events to structured console output and configured OTLP exporter
+- Missing span fields are not synthesized into a separate metric data-point model
 
 ---
 
@@ -526,7 +524,7 @@ For integration tests that do not need to exercise skill logic:
 ## Coverage Requirements
 
 | Layer | Coverage Target | Measured By |
-|-------|----------------|-------------|
+| ------- | ---------------- | ------------- |
 | Business logic | 100% line coverage | `cargo tarpaulin` or `grcov` |
 | Node implementations | 90% line coverage | `cargo tarpaulin` or `grcov` |
 | Infrastructure | 80% line coverage | `cargo tarpaulin` or `grcov` |

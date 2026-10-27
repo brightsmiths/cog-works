@@ -30,10 +30,10 @@ This document catalogs non-standard flows and failure scenarios that the system 
 **Expected behavior**: GitHub API calls fail. The system logs the error, posts a failure report (if the issue is still accessible), and exits with a non-zero exit code.
 **Key requirement**: Infrastructure errors (GitHub API failures) are mapped to domain errors and handled gracefully.
 
-### EDGE-005: Multiple `cogworks:run` Labels Applied
+### EDGE-005: Duplicate Readiness Signal
 
-**Scenario**: A human applies the `cogworks:run` label to an issue that already has it, or applies it while the pipeline is already running.
-**Expected behavior**: If the pipeline is already running (`cogworks:processing` label present), back off. If the pipeline is complete (`cogworks:node:complete`), do nothing (or warn). Re-triggering a failed pipeline resumes from the failed node using the persisted pipeline state (REQ-PIPE-009). A full restart requires an explicit `cogworks:restart` label or `/cogworks restart` comment.
+**Scenario**: The EventSource reports readiness for a work item more than once, including while its pipeline is already running.
+**Expected behavior**: If the pipeline is already running, the orchestrator backs off or queues the duplicate according to configuration. If it is complete, it takes no action unless an explicit restart is requested through the configured work-item interface. Re-triggering a failed pipeline resumes from the failed node using persisted state (REQ-PIPE-009). Provider-specific labels, project statuses, and webhook mappings are selected by the adapter.
 **Key requirement**: Idempotent trigger handling.
 
 ### EDGE-006: Configuration File Missing or Invalid
@@ -447,17 +447,17 @@ This document catalogs non-standard flows and failure scenarios that the system 
 **Expected behavior**: The deterministic fallback specified on the edge is applied (either edge taken or not taken). The fallback application is recorded in the audit trail. The pipeline continues.
 **Key requirement**: LLM edge condition failures are not pipeline-fatal. Fallback behavior must be declared in configuration.
 
-### EDGE-061: Pipeline Working Directory Lost
+### EDGE-061: Implementation Container Lost
 
-**Scenario**: The pipeline working directory (git worktree) is deleted or corrupted mid-pipeline (e.g., disk failure, manual cleanup).
-**Expected behavior**: On next invocation, the system detects the missing/corrupted working directory. It reconstructs pipeline state from GitHub artifacts (PRs, issue comments, pipeline state JSON). A new working directory is created and populated from GitHub. The pipeline resumes from the failed node.
-**Key requirement**: Pipeline working directory is a performance optimisation. Its loss must be recoverable from GitHub state.
+**Scenario**: The ephemeral container for an implementation job is lost or corrupted during execution.
+**Expected behavior**: The orchestrator records the failure and reconstructs durable pipeline state from the work-item and repository interfaces. A resumed implementation job requests a new ephemeral container; it does not depend on container-local state.
+**Key requirement**: Container-local state is not durable; a new implementation job gets a new container.
 
-### EDGE-062: Pipeline Cancellation During Parallel Execution
+### EDGE-062: Cancellation During Parallel Execution or Persistence
 
-**Scenario**: Nodes B and C are executing in parallel. A `cogworks:cancel` label is applied.
-**Expected behavior**: Both B and C receive cancellation signals. In-progress LLM calls are allowed to complete (to avoid wasting partial token costs). Current pipeline state is written to GitHub. A summary comment is posted noting the cancellation. Working directory is cleaned up.
-**Key requirement**: Cancellation is graceful. In-progress LLM calls complete. State is persisted.
+**Scenario**: Nodes B and C are executing in parallel when the work-item interface reports cancellation; persistence of the final state may also fail.
+**Expected behavior**: Both nodes receive cancellation signals. In-progress LLM calls are allowed to complete. The orchestrator attempts to persist current state before requesting container cleanup. If persistence fails, it records the failure through available operational logging and still requests cleanup; the next invocation reconstructs from the last durable state and must not assume unpersisted container data exists. A summary is posted when the work-item interface is available.
+**Key requirement**: Cancellation is graceful, cleanup is requested on every terminal path, and persistence failure does not turn an ephemeral container into a durable state store.
 
 ### EDGE-063: Spawning Node Creates Issue But GitHub API Fails
 
@@ -473,11 +473,11 @@ This document catalogs non-standard flows and failure scenarios that the system 
 
 ---
 
-### EDGE-065: Metric Sink Unavailable During Pipeline Run
+### EDGE-065: OpenTelemetry Exporter Unavailable During Pipeline Run
 
-**Scenario**: A pipeline run completes, the Metric Emitter computes data points, but the configured metric sink endpoint (Prometheus push gateway, OpenTelemetry collector) is unreachable.
-**Expected behavior**: Emission failure is logged as a structured warning. Metric data points appear in the structured log output. The pipeline's final disposition and exit code are unaffected.
-**Key requirement**: Metric emission failures must never block or degrade pipeline execution.
+**Scenario**: The configured OpenTelemetry exporter or collector is unavailable during a pipeline run.
+**Expected behavior**: Export failure is handled by the tracing/export configuration and does not change pipeline correctness or disposition. CogWorks does not compute or promise a separate set of metric data points as a fallback.
+**Key requirement**: External observability availability must not block or fail pipeline execution.
 
 ### EDGE-066: Incomplete Metrics from Pipeline Crash
 

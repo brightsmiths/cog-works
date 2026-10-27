@@ -21,7 +21,7 @@ This document specifies two closely related subsystems:
    - Pyramid summary selection (coarsest level that fits at each priority tier)
    - Scenario holdout enforcement (prevents leakage into code generation context)
 
-2. **Pipeline Label Parsing** — mapping GitHub label strings (e.g. `"cogworks:run"`)
+2. **Pipeline Label Parsing** — mapping configured GitHub label strings (for example, the default `"cogworks:run"` readiness mapping)
    to typed `PipelineLabel` values and back. Labels drive the pipeline state machine.
 
 The context assembly functions are the primary bridge between classification results,
@@ -32,7 +32,7 @@ knowledge summaries (via `SummaryCache`), and the LLM input for each node.
 ## Dependencies
 
 | This module uses | From |
-|-----------------|------|
+| ----------------- | ------ |
 | `ArtifactPath`, `ContextPackId` | `crates/pipeline/src/identifiers.rs` |
 | `SatisfactionScore`, `TokenCount` | `crates/pipeline/src/types.rs` |
 | `SummaryCache` (trait), `SummaryLevel`, `PyramidSummary` | `crates/pipeline/src/knowledge.rs` |
@@ -453,37 +453,37 @@ uses them to signal state, lock concurrent runs, and receive human decisions.
 ```rust
 pub enum PipelineLabel {
     // ── Trigger labels ──────────────────────────────────────────
-    /// "cogworks:run" — starts the pipeline for the labelled issue.
+    /// Default adapter mapping "cogworks:run" — starts the pipeline for a ready work item.
     Run,
-    /// "cogworks:restart" — restarts the pipeline from the last checkpoint.
+    /// Default adapter mapping "cogworks:restart" — restarts the pipeline from the last checkpoint.
     Restart,
 
     // ── Status labels ────────────────────────────────────────────
-    /// "cogworks:status:running" — pipeline is currently executing.
+    /// Default adapter mapping "cogworks:status:running" — pipeline is currently executing.
     Running,
-    /// "cogworks:status:done" — pipeline completed successfully.
+    /// Default adapter mapping "cogworks:status:done" — pipeline completed successfully.
     Done,
-    /// "cogworks:status:failed" — pipeline failed and requires attention.
+    /// Default adapter mapping "cogworks:status:failed" — pipeline failed and requires attention.
     Failed,
-    /// "cogworks:status:escalated" — pipeline escalated to a human.
+    /// Default adapter mapping "cogworks:status:escalated" — pipeline escalated to a human.
     Escalated,
 
     // ── Gate labels ──────────────────────────────────────────────
-    /// "cogworks:gate:pending" — a human-gated node is awaiting approval.
+    /// Default adapter mapping "cogworks:gate:pending" — a human-gated node is awaiting approval.
     HumanGatePending,
-    /// "cogworks:gate:approved" — human reviewer approved a gated node.
+    /// Default adapter mapping "cogworks:gate:approved" — human reviewer approved a gated node.
     HumanGateApproved,
-    /// "cogworks:gate:rejected" — human reviewer rejected a gated node.
+    /// Default adapter mapping "cogworks:gate:rejected" — human reviewer rejected a gated node.
     HumanGateRejected,
 
     // ── Processing lock ──────────────────────────────────────────
-    /// "cogworks:lock" — mutual-exclusion lock; prevents concurrent pipeline runs.
+    /// Default adapter mapping "cogworks:lock" — mutual-exclusion lock; prevents concurrent pipeline runs.
     Lock,
 
     // ── Security and safety ──────────────────────────────────────
-    /// "cogworks:security-hold" — injection or scope violation detected; halt.
+    /// Default adapter mapping "cogworks:security-hold" — injection or scope violation detected; halt.
     SecurityHold,
-    /// "cogworks:safety-critical" — issue touches safety-critical modules.
+    /// Default adapter mapping "cogworks:safety-critical" — issue touches safety-critical modules.
     SafetyCritical,
 }
 ```
@@ -518,7 +518,7 @@ Returns the canonical GitHub label string for a pipeline label as a `&'static st
 ## Error Handling
 
 | Function | Error / fallibility |
-|----------|-------------------|
+| ---------- | ------------------- |
 | `select_context_packs` | Infallible |
 | `merge_pack_guidance` | Infallible |
 | `assemble_context` | Async; `SummaryCache` errors cause affected artifacts to be skipped, not propagated |

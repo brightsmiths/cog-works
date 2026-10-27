@@ -72,7 +72,7 @@ remain outside this interface contract.
 ### Trait → SDK Call Mapping
 
 | Trait method | SDK API call | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `IssueTracker::get_issue` | `sdk.issues().get(owner, repo, number)` | |
 | `IssueTracker::list_sub_issues` | *(SDK gap — see below)* | Returns `SdkCapabilityMissing` |
 | `IssueTracker::create_sub_issue` | *(SDK gap)* | Returns `SdkCapabilityMissing` |
@@ -111,7 +111,7 @@ Formal SDK addition requests must be filed against
 `https://github.com/pvandervelde/github-bot-sdk`:
 
 | Capability | PR description |
-|---|---|
+| --- | --- |
 | Sub-issues REST endpoint | Support `POST /repos/{owner}/{repo}/issues/{number}/sub_issues` |
 | GraphQL `issueLink` mutation | Expose typed issue link create/delete/query |
 | GitHub Contents API (read_file, list_directory, file_exists) | `GET /repos/{owner}/{repo}/contents/{path}` |
@@ -307,7 +307,7 @@ attempts. `TransportError::ResponseParseError` is not retried.
 ### DomainServiceClient → Operation Mapping
 
 | Trait method | `operation` field | `payload` contents |
-|---|---|---|
+| --- | --- | --- |
 | `handshake` | `"handshake"` | `{}` |
 | `validate` | `"validate"` | `{ "artifact_paths": [...] }` |
 | `normalise` | `"normalise"` | `{ "artifact_paths": [...] }` |
@@ -393,12 +393,11 @@ body)` using a **constant-time comparison** (`subtle::ConstantTimeEq` or
 equivalent). Requests that fail verification return `EventSourceError::AuthError`
 and are **never** parsed. The raw body is discarded.
 
-**Security**: `WebhookConfig::secret` is excluded from the `Debug` impl (prints
-`"[REDACTED]"`). It is never written to tracing events or log lines.
-
-The webhook credential is resolved through the credential-provider interface;
-the Vault library owns its authentication and key lifecycle. The listener uses
-the resolved value only for request authentication.
+**Security**: The webhook credential is resolved through the credential-provider
+interface; it is not a field in `WebhookConfig`. The Vault library owns its
+authentication and key lifecycle. The listener receives the credential only
+for request authentication and MUST NOT log or expose it. Any transient
+credential wrapper MUST redact its `Debug` representation.
 
 **Event normalization**: After authentication, the adapter parses provider
 events and maps configured work-item readiness into the normalized pipeline
@@ -427,7 +426,7 @@ Implements `EventSource` using `queue-runtime`'s `QueueClient`.
 **Provider support**:
 
 | Provider | Status |
-|---|---|
+| --- | --- |
 | Azure Service Bus | Available in `queue-runtime` |
 | AWS SQS | Planned in `queue-runtime`; not yet available |
 
@@ -537,8 +536,8 @@ fn run_service(executor, config, event_source) -> !  // loops forever
 
 `run_single_shot`:
 
-1. Synthesise `GitHubEvent::WorkItemReady { work_item_id }` from `issue_url`.
-2. Call `run_step(&executor, work_item_id, &cli_config).await`.
+1. Parse the work item ID from `issue_url`.
+2. Invoke `run_step(&executor, work_item_id, &cli_config).await` directly; no synthetic `GitHubEvent` variant is required.
 3. Match on `StepResult`:
    - `Completed` → loop: call `run_step` again until state machine reaches end.
    - `Gated` → print gate message and exit 0.
@@ -720,3 +719,12 @@ Infrastructure clients obtain credentials through an interface backed by the
 Vault library. The Vault library owns authentication and key lifecycle; the
 CogWorks contract assumes the provider resolves credentials as required. This
 document does not define Vault APIs, authentication flows, or rotation policy.
+
+### Attestation Provider
+
+The attestation provider verifies required upstream attestations against the
+content and trust policy supplied by the pipeline, and signs CogWorks action
+attestations. Signing capability is resolved through the credential provider.
+It returns verification outcomes or signed attestation content, never private
+key material. Signed content is published through `IssueTracker::post_comment`;
+the provider protocol and signature format are implementation choices.

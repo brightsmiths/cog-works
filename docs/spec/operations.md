@@ -8,7 +8,7 @@ This document covers deployment, monitoring, cost management, and operational ru
 
 ### CogWorks Binary, Job Runtime, and Domain Services
 
-CogWorks ships as a Rust binary. For each implementation job, its orchestrator requests one ephemeral container through the configured infrastructure runtime provider and requests cleanup when the job terminates. The provider may use Docker, Kubernetes, or a cloud runtime; CogWorks does not bind the contract to a specific provider. Domain-specific validation remains delegated to separately managed domain services through the Extension API.
+CogWorks ships as a Rust binary. For each implementation job, its orchestrator requests one ephemeral container through the configured infrastructure runtime provider and requests cleanup when the job terminates. The provider may use Docker, Kubernetes, or a cloud runtime; CogWorks does not bind the contract to a specific provider. Domain-specific validation remains delegated to separately managed domain services through the Extension API. CLI-first operation describes how CogWorks is invoked; it does not remove the implementation-job container boundary.
 
 **Required runtime dependencies:**
 
@@ -118,42 +118,11 @@ All log output is structured JSON. Every log entry includes:
 }
 ```
 
-### Key Metrics (for future service mode)
+### Illustrative External Analysis Views
 
 The following are possible external analysis views, not named metrics that CogWorks promises to expose. CogWorks records stable pipeline fields through `tracing`: run ID, node ID, event kind (start, completion, retry, or rework), total USD cost at node completion, retry root cause, and rework misalignment type. External systems may derive only measurements supported by the data actually exported.
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `cogworks_pipelines_active` | Gauge | Number of pipelines currently in progress |
-| `cogworks_pipelines_completed_total` | Counter | Pipelines completed (by status: success/failed/escalated) |
-| `cogworks_node_duration_seconds` | Histogram | Time spent in each node |
-| `cogworks_llm_calls_total` | Counter | LLM API calls (by node, model, result) |
-| `cogworks_llm_tokens_total` | Counter | Tokens consumed (by node, model, direction) |
-| `cogworks_llm_cost_dollars` | Counter | Accumulated LLM cost |
-| `cogworks_github_api_calls_total` | Counter | GitHub API calls (by endpoint, status) |
-| `cogworks_github_rate_limit_remaining` | Gauge | Remaining GitHub API budget |
-| `cogworks_retries_total` | Counter | Retry attempts (by node, reason) |
-| `cogworks_escalations_total` | Counter | Escalations (by reason) |
-| `cogworks_domain_service_calls_total` | Counter | Domain service calls (by service, method, result) |
-| `cogworks_domain_service_latency_seconds` | Histogram | Domain service call latency (by service, method) |
-| `cogworks_domain_service_health` | Gauge | Domain service health status (by service: 1=healthy, 0=unhealthy) |
-| `cogworks_constraint_validation_total` | Counter | Constraint validation runs (by result: pass, warning, block) |
-| `cogworks_injection_detected_total` | Counter | INJECTION_DETECTED events (should be zero in normal operation; alert if non-zero) |
-| `cogworks_scope_violations_total` | Counter | Scope violation events (by type: underspecified, ambiguous, protected_path) |
-| `cogworks_context_packs_loaded` | Gauge | Number of Context Packs loaded per pipeline run (by pipeline) |
-| `cogworks_required_artefact_failures_total` | Counter | Required artefact blocking findings at Review node (by pack name) |
-| `cogworks_hold_state_total` | Counter | Work items entering hold state (injection detection events) |
-| `cogworks_constitutional_load_failures_total` | Counter | Constitutional rules load failures (should be zero; alert if non-zero) |
-| `cogworks_parallel_nodes_active` | Gauge | Number of nodes currently executing in parallel within a pipeline |
-| `cogworks_edge_evaluations_total` | Counter | Edge condition evaluations (by type: deterministic, llm, composite; by result: taken, not_taken) |
-| `cogworks_rework_traversals_total` | Counter | Rework edge traversals (by cycle identifier) |
-| `cogworks_pipeline_state_writes_total` | Counter | Pipeline state writes to GitHub (node boundary persistence events) |
-| `cogworks_llm_rate_limit_remaining` | Gauge | Remaining LLM API request budget (by provider) |
-| `cogworks_llm_rate_limit_throttle_seconds` | Histogram | Time spent waiting due to LLM API rate limit throttling |
-| `cogworks_semantic_stalling_total` | Counter | Semantic stalling escalations (same error category across consecutive retries, by node) |
-| `cogworks_project_sync_failures_total` | Counter | GitHub Project board update failures (should not affect pipeline; alert if high) |
-
-The CLI sends structured tracing output to JSON console logging and configures the OpenTelemetry OTLP exporter. Metric series, dashboards, aggregation, and alerting are responsibilities of external observability systems.
+These are possible questions external operators may investigate, not a CogWorks metric schema or contract. CogWorks records run ID, node ID, event kind, total USD cost at node completion, retry root cause, and rework misalignment type through tracing. External systems may derive only measurements supported by fields actually exported; no named metric series, type, or availability is guaranteed by CogWorks.
 
 ### Audit Trail on GitHub
 
@@ -194,11 +163,11 @@ protected_paths_extra = []  # Additional patterns beyond the built-in defaults
 [labels]
 # Configurable workflow label names (defaults shown)
 # Pipeline-internal labels (cogworks:processing, cogworks:node:*, etc.) are NOT configurable
-# trigger = "cogworks:run"
+# trigger = "cogworks:run" # default adapter mapping; readiness signal is provider-configurable
 # awaiting_review = "cogworks:awaiting-review"
 # safety_critical = "cogworks:safety-critical"
 # hold = "cogworks:hold"
-# cancel = "cogworks:cancel"
+# cancel = "cogworks:cancel" # default adapter mapping; cancellation signal is provider-configurable
 # sub_work_item = "cogworks:sub-work-item"
 
 [llm_rate_limit]
@@ -328,11 +297,11 @@ When metrics indicate degradation in pipeline performance, the following diagnos
 Measure → Detect → Diagnose → Improve → Verify
 ```
 
-1. **Measure**: CogWorks emits structured metric data points continuously.
+1. **Measure**: CogWorks exports the tracing fields defined by its observability interface; external systems derive supported measurements.
 2. **Detect**: External monitoring detects threshold crossings or trend changes (configured in Grafana alerts, Prometheus alertmanager, etc.).
 3. **Diagnose**: Use the diagnostic tables below to trace symptom → likely cause → improvement action.
 4. **Improve**: Implement the improvement (Context Pack update, scenario addition, pipeline configuration change, domain service fix).
-5. **Verify**: Monitor the metric data points for the next N pipeline runs to confirm improvement.
+5. **Verify**: Monitor the externally derived measurements supported by exported fields for the next N pipeline runs to confirm improvement.
 
 #### Common Diagnostic Patterns
 
@@ -613,10 +582,10 @@ The CLI configures the OpenTelemetry OTLP exporter endpoint. The collector and d
 
 **Resolution**:
 
-- **If genuine injection attempt**: Mark the work item as contaminated. Remove the `cogworks:run` label and add a comment documenting the contamination. Do not remove the `cogworks:hold` label. Notify the team about the injection attempt origin.
+- **If genuine injection attempt**: Mark the work item as contaminated. Remove the configured readiness signal (default label mapping: `cogworks:run`) and add a comment documenting the contamination. Do not remove the `cogworks:hold` label. Notify the team about the injection attempt origin.
 - **If false positive**: Remove the `cogworks:hold` label with a comment documenting why the flagged content is legitimate (e.g., "False positive — security test pseudocode, not an injection attempt"). Include the reviewer's name. Re-invoke: `cogworks run --issue <number>`.
 
-**Alert recommendation**: Integrate `cogworks_injection_detected_total` metric with an alert. Any non-zero value warrants immediate review.
+**Alert recommendation**: External monitoring may alert on an exported `INJECTION_DETECTED` event if the configured tracing pipeline retains and exposes that event. CogWorks does not guarantee a dedicated metric series for it.
 
 ---
 

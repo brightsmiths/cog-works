@@ -33,7 +33,9 @@ This document defines the clean architecture boundaries — what is business log
 │                                                                         │
 │  LLM Provider              │  Issue Tracker                             │
 │  Code Repository           │  Pull Request Manager                      │
-│  Domain Service Client     │  Template Engine                           │
+│  Domain Service Client     │  Attestation Provider                      │
+│  Template Engine           │  Implementation Job Runtime Provider       │
+│  Credential Provider       │                                            │
 │  Interface Registry Loader │  Audit Store                               │
 │  Scenario Executor         │  Twin Provisioner                          │
 │  Summary Cache             │  Pipeline Configuration Loader             │
@@ -47,6 +49,8 @@ This document defines the clean architecture boundaries — what is business log
 │  (Concrete adapters — the only code that touches external systems)      │
 │                                                                         │
 │  Anthropic Messages API    │  GitHub REST/GraphQL/Projects API          │
+│  Vault credential adapter  │  Attestation signer/verifier adapter      │
+│  Container runtime adapter │                                            │
 │  Extension API Client      │  Handlebars template engine                │
 │  (Unix socket / HTTP)      │  GitHub issue comments (audit)             │
 │  (Future: gRPC transport)  │  (Future: OpenAI, GitLab, etc.)            │
@@ -549,6 +553,10 @@ Provides the infrastructure capability used by the orchestrator to request one e
 
 Resolves credentials for infrastructure clients through the Vault library. Authentication and key lifecycle are provider concerns behind this interface. CogWorks does not define Vault APIs or lifecycle policy, and key material is not available to prompts, context, logs, audit records, or generated artifacts.
 
+### Attestation Provider
+
+Verifies required upstream attestations against the content and trust policy presented by the pipeline, and signs CogWorks action attestations. It uses the credential provider for signing capability; private key material is never returned to business logic or exposed to the LLM. Signature format and key lifecycle remain implementation concerns behind the provider interfaces.
+
 ### Tool Profile Store
 
 Loads tool profile definitions and per-node tool overrides from the pipeline configuration file.
@@ -636,6 +644,14 @@ Each abstraction has one or more concrete implementations. These are the only mo
 - Implements: Credential Provider
 - Uses: The Vault library
 - Handles: Credential resolution and authentication/key lifecycle according to the provider contract; concrete Vault calls and rotation policy are outside this specification
+
+### Attestation Adapter
+
+- Implements: Attestation Provider
+- Uses: Credential Provider for signing capability
+- Handles: Verification of required upstream attestations and signing of CogWorks action attestations
+- Publishes: Signed attestation comments through the Issue Tracker abstraction
+- Security: Does not expose private key material to business logic, prompts, logs, or audit records
 
 ### Tracing and OpenTelemetry Export
 

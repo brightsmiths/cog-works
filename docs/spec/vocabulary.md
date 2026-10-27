@@ -783,7 +783,6 @@ Labels that represent CogWorks-internal machine state. These are managed exclusi
 - `cogworks:node:<name>` — Tracks the currently active pipeline node(s)
 - `cogworks:node:failed` — Indicates a node has failed
 - `cogworks:status:<status>` — Tracks sub-work-item processing status
-- `cogworks:restart` — Signals that the pipeline should restart from the beginning
 
 These labels always use the `cogworks:` prefix and are not configurable.
 
@@ -791,14 +790,15 @@ These labels always use the `cogworks:` prefix and are not configurable.
 
 Labels that represent workflow state meaningful to both human and AI developers. These use configurable names so teams can reuse their existing label conventions.
 
-- Trigger label (default: `cogworks:run`) — Initiates the pipeline
+- Readiness signal (default label mapping: `cogworks:run`) — Initiates the pipeline through the configured EventSource/work-item adapter
+- Restart signal (default label mapping: `cogworks:restart`) — Requests a full pipeline restart through the configured adapter
 - Awaiting review label (default: `cogworks:awaiting-review`) — A gate is waiting for human approval
 - Safety-critical label (default: `cogworks:safety-critical`) — Work item touches safety-critical code
 - Hold label (default: `cogworks:hold`) — Work item suspended pending human review (injection detection)
-- Cancel label (default: `cogworks:cancel`) — Signals pipeline cancellation
+- Cancellation signal (default label mapping: `cogworks:cancel`) — Signals pipeline cancellation through the configured EventSource/work-item adapter
 - Sub-work-item label (default: `cogworks:sub-work-item`) — Identifies sub-work-item issues
 
-Label names are configurable via `[labels]` section in `.cogworks/config.toml`. This allows teams that use CogWorks alongside human developers to map CogWorks' workflow labels to their existing label taxonomy (e.g., `awaiting-review` instead of `cogworks:awaiting-review`).
+Label mappings are configurable via the `[labels]` section in `.cogworks/config.toml` or the corresponding provider adapter. These values are defaults, not fixed business-logic signals; teams may map readiness and cancellation to their own work-item conventions.
 
 ---
 

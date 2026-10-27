@@ -41,7 +41,7 @@ pipeline (trait definitions)
 ## Dependencies
 
 | This module uses | From spec |
-|-----------------|-----------|
+| ----------------- | ----------- |
 | `WorkItemId`, `SubWorkItemId`, `PullRequestId`, `MilestoneId` | `shared-types.md` |
 | `RepositoryId`, `BranchName`, `CommitSha` | `shared-types.md` |
 | `NodeId`, `PipelineRunId` | `shared-types.md` |
@@ -59,7 +59,6 @@ calls `EventSource::next_event` and dispatches each variant.
 
 ```rust
 pub enum GitHubEvent {
-    WorkItemReady { work_item_id: WorkItemId },
     LabelApplied { work_item_id: WorkItemId, label: String },
     CommentPosted { work_item_id: WorkItemId, author: String, body: String },
     SubIssueStateChanged { sub_work_item_id: SubWorkItemId, new_state: IssueState },
@@ -70,19 +69,32 @@ pub enum GitHubEvent {
 #### Variant Contracts
 
 | Variant | When delivered | Pipeline action |
-|---------|----------------|-----------------|
-| `WorkItemReady` | EventSource determines that the work item meets the configured readiness condition | Intake node start |
-| `LabelApplied` | EventSource reports a label change | Update provider-specific work-item state; a particular label is not defined as the trigger |
+| --------- | ---------------- | ----------------- |
+| `LabelApplied` | EventSource reports a label change | Adapter applies configured readiness/restart mapping; a matching readiness signal starts Intake |
 | `CommentPosted` | EventSource reports a comment | Process a supported work-item command or approval indication |
 | `SubIssueStateChanged` | EventSource reports a sub-work-item state change | Fan-in readiness evaluation |
 | `PullRequestReviewed` | EventSource reports a PR review update | Evaluate the relevant CogWorks node gate |
 
-**Readiness mapping**: `WorkItemReady` is the normalized event presented to the
-pipeline. The EventSource/GitHub adapter determines readiness from its provider
-configuration and current work-item state. This interface does not prescribe a
-label, project status, webhook event/action mapping, or GateKeeper/factory
-approval encoding. Such external approvals are distinct from CogWorks node
-gates and are passed through the work-item interface.
+**Readiness mapping**: The current normalized event type is `LabelApplied`.
+The EventSource/GitHub adapter determines whether a provider event or work-item
+state represents readiness, then presents the corresponding event to the
+pipeline. The pipeline reads current issue state before acting. This interface
+does not prescribe a label, project status, webhook event/action mapping, or
+GateKeeper/factory approval encoding. Such external approvals are distinct from
+CogWorks node gates and are passed through the work-item interface.
+
+**Work-item stage mapping**: GitHub's open/closed issue state is not sufficient
+to represent factory workflow stages such as ready-for-implementation. The
+Issue Tracker/EventSource boundary MUST expose relevant provider work-item
+stage and external approval status in a provider-neutral form. Mapping from
+GitHub labels, project fields, or other issue metadata is an adapter concern;
+the pipeline does not require one specific representation.
+
+**Cancellation mapping**: There is no dedicated cancellation event variant.
+The EventSource/work-item adapter exposes cancellation through the configured
+work-item state or label mapping; the step function re-reads that state before
+continuing or cleaning up an implementation job. The exact provider signal is
+not prescribed here.
 
 ---
 
@@ -101,7 +113,7 @@ pub enum EventSourceError {
 **Retry semantics**:
 
 | Variant | Retryable? | Notes |
-|---------|-----------|-------|
+| --------- | ----------- | ------- |
 | `Timeout` | Yes (loop again) | Not an error; callers treat `Ok(None)` and `Timeout` identically |
 | `ConnectionLost` | Yes (after back-off) | Implementation should reconnect internally first |
 | `ParseError` | No (drop event) | Log raw payload to audit; dead-letter message |
@@ -118,7 +130,9 @@ Configuration for `GitHubWebhookEventSource`.
 |-------|------|-------------|
 | `bind_address` | `std::net::SocketAddr` | Local address to bind the HTTP server |
 | `path_prefix` | `String` | URL path prefix (e.g. `"/hooks"`) |
-| `secret` | `String` | HMAC-SHA256 secret matching GitHub webhook settings. Excluded from `Debug` (prints `"[REDACTED]"`). **Never logged.** |
+
+The webhook secret is resolved separately through the Credential Provider at
+listener construction and is not stored in `WebhookConfig`.
 
 ---
 
@@ -127,7 +141,7 @@ Configuration for `GitHubWebhookEventSource`.
 Configuration for `QueueEventSource`.
 
 | Field | Type | Description |
-|-------|------|-------------|
+| ------- | ------ | ------------- |
 | `provider_config` | `serde_json::Value` | Serialised `queue_runtime::ProviderConfig`; deserialized by `listener` |
 | `queue_name` | `String` | Queue or topic subscription name |
 | `use_session_ordering` | `bool` | When `true`, use `WorkItemId` as session key |
@@ -157,7 +171,7 @@ pub trait EventSource: Send {
 **Implementations**:
 
 | Struct | Crate | Mode |
-|--------|-------|------|
+| -------- | ------- | ------ |
 | `GitHubWebhookEventSource` | `listener` | Webhook (direct or smee.io) |
 | `QueueEventSource` | `listener` | Azure Service Bus / AWS SQS |
 | synthesised one-shot event | `cli` | Manual CLI invocation |
@@ -263,6 +277,7 @@ pub struct IssueComment {
 ```
 
 Used for:
+
 - **Pipeline state reconstruction on resume**: `run_step` step 3 calls
   `list_comments` and scans for a comment whose body parses as a valid
   `PipelineStateComment` JSON object. The latest such comment wins.
@@ -293,6 +308,11 @@ pub trait IssueTracker: Send + Sync {
 }
 ```
 
+Signed action attestations are published as hidden HTML comments through
+`IssueTracker::post_comment`. The attestation provider owns payload signing and
+verification; the Issue Tracker transports the resulting comment without
+interpreting its cryptographic contents.
+
 **Idempotency**: `add_label` and `remove_label` are idempotent (no-op if already in target state).
 
 `list_comments` returns comments in ascending `created_at` order (oldest first). The
@@ -310,7 +330,7 @@ issue, use `get_issue(id).milestone` instead.
 #### SDK Gap Table
 
 | Method | Required SDK capability |
-|--------|------------------------|
+| -------- | ------------------------ |
 | `list_sub_issues` | Sub-issues REST endpoint |
 | `create_sub_issue` | Sub-issues REST endpoint |
 | `add_typed_link` | GraphQL `issueLink` mutation |
@@ -495,7 +515,7 @@ deserialization from the persisted JSON.
 #### Variant Payloads
 
 | Variant | Key fields |
-|---------|-----------|
+| --------- | ----------- |
 | `LlmCall` | `node_id`, `model_id`, `prompt_tokens`, `completion_tokens`, `cost`, `latency`, `schema_validated` |
 | `Validation` | `node_id`, `validation_kind`, `passed`, `diagnostics: Vec<String>` |
 | `StateTransition` | `node_id`, `from_status`, `to_status`, `reason` |
@@ -592,7 +612,7 @@ be implemented in PR 10. Until those additions land, the `github` crate returns
 `Err(GitHubOperationError::SdkCapabilityMissing { capability: "..." })`.
 
 | Method | SDK addition | GitHub API |
-|--------|-------------|------------|
+| -------- | ------------- | ------------ |
 | `IssueTracker::list_sub_issues` | Sub-issues REST endpoint | `GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues` |
 | `IssueTracker::create_sub_issue` | Sub-issues REST endpoint | `POST /repos/{owner}/{repo}/issues/{issue_number}/sub_issues` |
 | `IssueTracker::add_typed_link` | GraphQL `issueLink` mutation | `mutation { createIssueLink(...) }` |
