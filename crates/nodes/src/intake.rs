@@ -54,3 +54,7 @@ impl IntakeNode {
         todo!("See docs/spec/interfaces/nodes.md §IntakeNode")
     }
 }
+
+#[cfg(test)]
+#[path = "intake_tests.rs"]
+mod tests;
