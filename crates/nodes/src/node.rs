@@ -31,9 +31,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use pipeline::{
-    BranchName, BudgetAcquisition, CodeRepository, CostBudget, InterfaceRegistryLoader,
-    LoadedContextPacks, NodeOutput, PipelineError, PipelineGraph, PipelineName, PipelineRunId,
-    PipelineState, RepositoryId, RetryPolicy, SummaryCache, TokenCost,
+    BranchName, BudgetAcquisition, CodeRepository, ConstitutionalRules, CostBudget,
+    InterfaceRegistryLoader, LoadedContextPacks, NodeOutput, PipelineError, PipelineGraph,
+    PipelineName, PipelineRunId, PipelineState, RepositoryId, RetryPolicy, SafetyCriticalRegistry,
+    SummaryCache, TokenCost,
 };
 
 // ─── Node I/O types ───────────────────────────────────────────────────────────
@@ -95,8 +96,10 @@ pub enum NodeExecutionResult {
 /// Resolved per-run pipeline configuration.
 ///
 /// Obtained from [`pipeline::PipelineConfigurationLoader`] at the start of
-/// `run_step`. Passed to nodes that need to know the graph structure or the
-/// current run identifier.
+/// `run_step`. Passed to nodes that need to know the graph structure, the
+/// current run identifier, the safety-critical module registry, the
+/// single-work-item scope threshold, or the constitutional rules to wrap
+/// every LLM call with.
 ///
 /// See `docs/spec/interfaces/nodes.md` §PipelineConfig.
 #[derive(Debug, Clone)]
@@ -105,6 +108,16 @@ pub struct PipelineConfig {
     pub graph: PipelineGraph,
     /// The run identifier for the current step.
     pub run_id: PipelineRunId,
+    /// Registry of glob patterns identifying safety-critical modules, used by
+    /// [`pipeline::apply_safety_override`] in the Intake node's classification
+    /// step.
+    pub safety_registry: SafetyCriticalRegistry,
+    /// Maximum `estimated_scope` magnitude (1-10) a single work item may have
+    /// before [`pipeline::check_scope_threshold`] escalates it for splitting.
+    pub scope_threshold: u32,
+    /// Constitutional rules loaded from the approved branch, wrapped around
+    /// every LLM call via [`crate::gateway::assemble_constitutional_prompt`].
+    pub constitutional_rules: ConstitutionalRules,
 }
 
 // ---------------------------------------------------------------------------

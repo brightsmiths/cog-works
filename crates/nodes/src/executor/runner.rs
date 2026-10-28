@@ -8,9 +8,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use pipeline::{
-    AuditStore, CodeRepository, CostBudget, DomainServiceClient, InterfaceRegistryLoader,
-    IssueTracker, NodeId, PipelineError, PipelineGraph, PipelineRunId, PipelineSettings,
-    PipelineToolProfileConfig, ProfileName, PullRequestManager, RetryPolicy, SummaryCache,
+    AuditStore, BranchName, CodeRepository, ConstitutionalRules, CostBudget, DomainServiceClient,
+    InterfaceRegistryLoader, IssueTracker, NodeId, PipelineError, PipelineGraph, PipelineRunId,
+    PipelineSettings, PipelineToolProfileConfig, ProfileName, PullRequestManager, RetryPolicy,
+    SafetyCriticalRegistry, SummaryCache,
 };
 
 use crate::gateway::LlmGateway;
@@ -19,7 +20,7 @@ use crate::node::{
     NodeExecutionResult, NodeFailure, NodeInput, PipelineConfig, WorkingCopyManager,
 };
 
-use super::PipelineExecutor;
+use super::{PipelineExecutor, sha256_hex};
 
 // ─── NodeRunner seam ──────────────────────────────────────────────────────────
 
@@ -41,6 +42,47 @@ pub(crate) trait NodeRunner: Send + Sync {
 }
 
 // ─── DefaultNodeRunner ────────────────────────────────────────────────────────
+
+/// Conservative default for [`PipelineConfig::scope_threshold`].
+///
+/// `ClassificationResult::estimated_scope` ranges 1 (trivial) to 10 (very
+/// large) — see `docs/spec/interfaces/context.md` §`ClassificationResult`.
+/// `docs/spec/constraints.md` states `CogWorks` is designed for "focused,
+/// well-scoped work items" but does not pin a numeric default. `5` (the
+/// midpoint of the scale) is chosen deliberately: it accepts small-to-medium
+/// changes without human intervention while escalating anything the LLM
+/// classifier judges as large-or-bigger for a human to split first. Revisit
+/// once real-world scope estimates are available to calibrate against.
+const DEFAULT_SCOPE_THRESHOLD: u32 = 5;
+
+/// Builds a placeholder, deliberately-empty [`ConstitutionalRules`] for
+/// [`DefaultNodeRunner`]'s `PipelineConfig`.
+///
+/// **Known limitation (tracked follow-up).** `run_step` (see
+/// `executor/mod.rs`) constructs `DefaultNodeRunner` via
+/// [`DefaultNodeRunner::new`] *before* `run_step_with_runner` calls
+/// `steps::load_constitutional_rules` to obtain the real, validated
+/// [`ConstitutionalRules`] for this run. `DefaultNodeRunner::new` is
+/// synchronous and has no access to that value, so it cannot be threaded
+/// through without restructuring `run_step` to load rules first and pass them
+/// into the runner constructor — out of scope for this task.
+///
+/// Rather than fabricate rules text that might accidentally satisfy
+/// [`pipeline::validate_constitutional_prompt`], this placeholder is
+/// deliberately empty. Any LLM-calling node that reads
+/// `PipelineConfig::constitutional_rules` (currently `IntakeNode::execute`)
+/// will therefore deterministically halt with `ConstitutionalError::MissingRules`
+/// — a safe, fail-closed default — rather than silently bypassing the
+/// constitutional check with a dummy "valid" value. `source_hash` is computed
+/// over the empty content so the failure surfaces as `MissingRules` (the real
+/// problem) rather than a confusing `HashMismatch`.
+fn placeholder_constitutional_rules(approved_branch: BranchName) -> ConstitutionalRules {
+    ConstitutionalRules {
+        content: String::new(),
+        source_hash: sha256_hex(b""),
+        source_branch: approved_branch,
+    }
+}
 
 /// Builds a placeholder [`PipelineGraph`] for [`DefaultNodeRunner`]'s
 /// `PipelineConfig`.
@@ -102,6 +144,11 @@ impl DefaultNodeRunner {
             pipeline_config: PipelineConfig {
                 graph: placeholder_graph(),
                 run_id: PipelineRunId::new_random(),
+                safety_registry: SafetyCriticalRegistry::default(),
+                scope_threshold: DEFAULT_SCOPE_THRESHOLD,
+                constitutional_rules: placeholder_constitutional_rules(
+                    config.approved_branch.clone(),
+                ),
             },
             working_branch: config.approved_branch.clone(),
         }
