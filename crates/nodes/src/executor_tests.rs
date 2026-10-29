@@ -133,23 +133,9 @@ use pipeline::{DependencyGraph, DependencyResult};
 
 use crate::node::{CliConfig, NodeExecutionResult, NodeFailure, NodeInput};
 
-use super::{NodeRunner, PipelineExecutor, StepResult, run_step, run_step_with_runner};
-
-// ─── Small local helpers ───────────────────────────────────────────────────────
-
-/// Computes a SHA-256 hex digest, mirroring `pipeline::security`'s private
-/// helper (not exported) and the convention already used in
-/// `gateway_tests.rs`.
-fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    use std::fmt::Write as _;
-    Sha256::digest(data)
-        .iter()
-        .fold(String::with_capacity(64), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
-}
+use super::{
+    NodeRunner, PipelineExecutor, StepResult, run_step, run_step_with_runner, sha256_hex,
+};
 
 /// Computes the `graph_hash` this test file expects `run_step_with_runner` to
 /// derive from `graph`. See spec-gap note #1 at the top of this file: every

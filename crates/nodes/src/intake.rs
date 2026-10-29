@@ -22,10 +22,10 @@ use std::collections::HashMap;
 
 use pipeline::{
     ClassificationResult, ContextItem, ContextPackage, ContextPriority, EscalationResult,
-    GitHubOperationError, InjectionDetectionResult, Issue, IssueTracker, Label, ModelConfig,
-    NodeId, NodeOutput, OutputSchema, PipelineError, PipelineRunId, RequirementRow, RetryPolicy,
-    SummaryLevel, TokenCost, TokenCount, TraceabilityMatrix, TraceabilityStatus, WorkItemId,
-    apply_safety_override, check_scope_threshold, detect_injection, extract_requirements,
+    InjectionDetectionResult, Issue, IssueTracker, Label, ModelConfig, NodeId, NodeOutput,
+    OutputSchema, PipelineError, PipelineRunId, RequirementRow, RetryPolicy, SummaryLevel,
+    TokenCost, TraceabilityMatrix, TraceabilityStatus, WorkItemId, apply_safety_override,
+    check_scope_threshold, detect_injection, estimate_token_count, extract_requirements,
 };
 use tracing::warn;
 
@@ -130,31 +130,19 @@ fn parse_work_item_id(input: &NodeInput) -> Result<WorkItemId, NodeExecutionResu
 }
 
 /// Fetches the full issue for `work_item_id`, mapping any
-/// [`GitHubOperationError`] to a `Failure` with an appropriate retry policy.
+/// [`pipeline::GitHubOperationError`] to a `Failure` with an appropriate
+/// retry policy via [`pipeline::GitHubOperationError::retry_policy`].
 async fn fetch_issue(
     issues: &dyn IssueTracker,
     work_item_id: WorkItemId,
 ) -> Result<Issue, NodeExecutionResult> {
     issues.get_issue(work_item_id).await.map_err(|err| {
-        let retry_policy = github_error_retry_policy(&err);
+        let retry_policy = err.retry_policy();
         node_failed(
             format!("failed to fetch issue #{}: {err}", work_item_id.as_u64()),
             retry_policy,
         )
     })
-}
-
-/// Maps a [`GitHubOperationError`] to a [`RetryPolicy`].
-///
-/// Transient failures (rate limiting, network blips) are retryable; anything
-/// else (not found, permission denied, parse failure, missing SDK capability)
-/// requires human intervention.
-fn github_error_retry_policy(err: &GitHubOperationError) -> RetryPolicy {
-    match err {
-        GitHubOperationError::Transient { .. }
-        | GitHubOperationError::RateLimitExhausted { .. } => RetryPolicy::Retryable { after: None },
-        _ => RetryPolicy::NonRetryable,
-    }
 }
 
 // ─── Step 2: injection detection ──────────────────────────────────────────────
@@ -271,9 +259,7 @@ fn build_context_package(issue: &Issue) -> ContextPackage {
         "Issue title: {}\n\nIssue body:\n{}",
         issue.title, issue.body
     );
-    // Rough token estimate (~4 characters per token); exact counts are not
-    // required for budget enforcement on this best-effort pre-call estimate.
-    let token_count = TokenCount::new((content.chars().count() as u64).div_ceil(4));
+    let token_count = estimate_token_count(&content);
     let item = ContextItem {
         content,
         summary_level: SummaryLevel::Source,

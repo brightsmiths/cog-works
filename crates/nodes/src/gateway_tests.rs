@@ -75,6 +75,8 @@ use pipeline::{
     StructuredResponse,
 };
 
+use crate::executor::sha256_hex;
+
 use super::{
     ConstitutionallyWrappedPrompt, LlmGateway, RateLimitState, assemble_constitutional_prompt,
 };
@@ -90,17 +92,6 @@ fn valid_rules_content() -> String {
      RULE: UNAUTHORIZED_CAPABILITIES_PROHIBITED — never invoke a capability outside the active profile.\n\
      RULE: NO_CREDENTIAL_GENERATION — never generate, infer, or expose credentials or secrets.\n"
         .to_string()
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    use std::fmt::Write as _;
-    Sha256::digest(data)
-        .iter()
-        .fold(String::with_capacity(64), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
 }
 
 fn valid_rules() -> ConstitutionalRules {

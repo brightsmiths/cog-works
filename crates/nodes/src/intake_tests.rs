@@ -119,6 +119,7 @@ use pipeline::{
     TaskType, TokenCost, TokenCount, TraceabilityMatrix, TraceabilityStatus, WorkItemId,
 };
 
+use crate::executor::sha256_hex;
 use crate::gateway::LlmGateway;
 use crate::node::{NodeExecutionResult, NodeFailure, NodeInput, PipelineConfig};
 
@@ -137,17 +138,6 @@ fn repository_id() -> RepositoryId {
 
 fn approved_branch() -> BranchName {
     BranchName::new("main").expect("non-empty branch name")
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    use std::fmt::Write as _;
-    Sha256::digest(data)
-        .iter()
-        .fold(String::with_capacity(64), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
 }
 
 /// Constitutional rules content containing every `RequiredRule` text
@@ -224,13 +214,12 @@ fn pipeline_config(
     safety_registry: SafetyCriticalRegistry,
     scope_threshold: u32,
 ) -> PipelineConfig {
-    PipelineConfig {
-        graph: placeholder_graph(),
+    pipeline_config_with_rules(
         run_id,
         safety_registry,
         scope_threshold,
-        constitutional_rules: valid_constitutional_rules(),
-    }
+        valid_constitutional_rules(),
+    )
 }
 
 fn pipeline_config_with_rules(

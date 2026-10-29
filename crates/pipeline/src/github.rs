@@ -446,6 +446,28 @@ pub enum GitHubOperationError {
     },
 }
 
+impl GitHubOperationError {
+    /// Whether this error is likely transient and safe to retry.
+    ///
+    /// Mirrors the `retry_policy` convention used by [`crate::LlmError`] and
+    /// [`crate::DomainServiceError`]: transient failures (rate limiting,
+    /// network blips) are retryable; anything else (not found, permission
+    /// denied, parse failure, missing SDK capability) requires human
+    /// intervention.
+    pub fn retry_policy(&self) -> crate::errors::RetryPolicy {
+        use crate::errors::RetryPolicy;
+        match self {
+            Self::Transient { .. } | Self::RateLimitExhausted { .. } => {
+                RetryPolicy::Retryable { after: None }
+            }
+            Self::NotFound { .. }
+            | Self::PermissionDenied { .. }
+            | Self::ParseFailure { .. }
+            | Self::SdkCapabilityMissing { .. } => RetryPolicy::NonRetryable,
+        }
+    }
+}
+
 /// A single comment on a GitHub Issue.
 ///
 /// Returned by [`IssueTracker::list_comments`]. Used for pipeline state
