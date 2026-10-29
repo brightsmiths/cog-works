@@ -771,6 +771,7 @@ fn interface_to_context_item(iface: &InterfaceDefinition) -> ContextItem {
 /// [`ContextItem`] from raw text without an exact tokenizer count — e.g.
 /// node `execute` functions that assemble an ad hoc [`ContextPackage`]
 /// outside [`crate::assemble_context`] (see `nodes::intake::build_context_package`).
+#[must_use]
 pub fn estimate_token_count(content: &str) -> TokenCount {
     let len = u64::try_from(content.len()).unwrap_or(u64::MAX);
     TokenCount::new(len / 4 + 1)

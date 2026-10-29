@@ -454,6 +454,7 @@ impl GitHubOperationError {
     /// network blips) are retryable; anything else (not found, permission
     /// denied, parse failure, missing SDK capability) requires human
     /// intervention.
+    #[must_use]
     pub fn retry_policy(&self) -> crate::errors::RetryPolicy {
         use crate::errors::RetryPolicy;
         match self {
