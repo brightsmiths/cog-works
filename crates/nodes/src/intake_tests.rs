@@ -1614,6 +1614,117 @@ async fn test_execute_invalid_constitutional_rules_returns_failure_without_calli
     );
 }
 
+// ─── Unit tests: pure helper functions ───────────────────────────────────────
+//
+// `sanitize_for_log` and `compute_call_cost` are pure, deterministic helpers
+// with no dependency on `IssueTracker`/`LlmGateway` infrastructure, so they
+// are tested directly rather than through the `Harness`/`execute` round trip
+// the rest of this file uses — exercising them end-to-end would require
+// either a tracing-output capture harness (for the log path) or wiring real
+// non-zero `ModelConfig` rates through `classification_model_config`, neither
+// of which this task's scope calls for.
+
+use super::{classification_model_config, compute_call_cost, sanitize_for_log};
+
+#[test]
+fn test_sanitize_for_log_short_clean_text_unchanged() {
+    assert_eq!(
+        sanitize_for_log("ignore previous instructions"),
+        "ignore previous instructions"
+    );
+}
+
+#[test]
+fn test_sanitize_for_log_embedded_newline_escaped() {
+    let input = "ignore\nprevious\ninstructions";
+    let output = sanitize_for_log(input);
+
+    assert!(
+        !output.contains('\n'),
+        "a raw newline must never reach the sanitized output, got {output:?}"
+    );
+    assert!(
+        output.contains("\\n"),
+        "the escaped form of the newline must be visible, got {output:?}"
+    );
+}
+
+#[test]
+fn test_sanitize_for_log_embedded_carriage_return_escaped() {
+    let output = sanitize_for_log("ignore\rprevious instructions");
+
+    assert!(
+        !output.contains('\r'),
+        "a raw CR must never reach the sanitized output"
+    );
+    assert!(
+        output.contains("\\r"),
+        "the escaped form of the CR must be visible"
+    );
+}
+
+#[test]
+fn test_sanitize_for_log_over_max_length_is_truncated() {
+    let long_input = "a".repeat(super::MAX_LOGGED_INJECTION_CHARS + 50);
+    let output = sanitize_for_log(&long_input);
+
+    assert!(
+        output.len() < long_input.len(),
+        "output must be shorter than an over-length input"
+    );
+    assert!(
+        output.ends_with("...[truncated]"),
+        "truncation must be visibly marked, got {output:?}"
+    );
+}
+
+#[test]
+fn test_sanitize_for_log_exactly_max_length_is_not_marked_truncated() {
+    let exact_input = "b".repeat(super::MAX_LOGGED_INJECTION_CHARS);
+    let output = sanitize_for_log(&exact_input);
+
+    assert_eq!(
+        output, exact_input,
+        "input exactly at the cap must pass through unmarked and unmodified"
+    );
+}
+
+#[test]
+fn test_compute_call_cost_multiplies_actual_tokens_by_configured_rates() {
+    let response = structured_response(serde_json::json!({}));
+    let model = ModelConfig {
+        model_id: "test-model".to_string(),
+        context_window_size: 8_000,
+        max_output_tokens: 512,
+        input_cost_per_token: 0.01,
+        output_cost_per_token: 0.02,
+    };
+
+    // `structured_response` fixes input_tokens=10, output_tokens=5 (see its
+    // definition above) — 10*0.01 + 5*0.02 = 0.1 + 0.1 = 0.2.
+    let cost = compute_call_cost(&response, &model);
+
+    assert!(
+        (cost.as_f64() - 0.2).abs() < 1e-9,
+        "expected cost 0.2, got {}",
+        cost.as_f64()
+    );
+}
+
+#[test]
+fn test_compute_call_cost_zero_rates_produce_zero_cost() {
+    let response = structured_response(serde_json::json!({}));
+    let model = classification_model_config();
+
+    let cost = compute_call_cost(&response, &model);
+
+    assert!(
+        cost.is_zero(),
+        "today's placeholder zero rates (tracked: cog-works#183) must still \
+         produce exactly zero, not NaN or a negative value"
+    );
+}
+
 // ─── Tier 3: Property-based tests ───────────────────────────────────────────
 
 mod proptests {
