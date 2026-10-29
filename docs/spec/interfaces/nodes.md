@@ -251,6 +251,9 @@ before any node executes.
 |-------|------|-------------|
 | `graph` | `PipelineGraph` | The pipeline graph for this run |
 | `run_id` | `PipelineRunId` | The run identifier for the current step |
+| `safety_registry` | `SafetyCriticalRegistry` | Glob patterns identifying safety-critical modules, consumed by `apply_safety_override` in the Intake node's classification step |
+| `scope_threshold` | `u32` | Maximum `estimated_scope` (1-10) a single work item may have before `check_scope_threshold` rejects it for splitting |
+| `constitutional_rules` | `ConstitutionalRules` | Constitutional rules wrapped around every LLM call via `assemble_constitutional_prompt`; the only source of `ConstitutionalRules` reachable from a node's `execute` function today |
 
 ### CliConfig
 
@@ -391,13 +394,32 @@ pub async fn execute(
 
 **Responsibilities**:
 
-1. Fetch issue details via `issues.get_issue(work_item_id)`.
-2. Detect injection in the issue body via `detect_injection`.
+1. Fetch issue details via `issues.get_issue(work_item_id)`. `work_item_id` is
+   read from `input.artifacts["work_item_id"]` (a JSON integer); missing or
+   malformed values fail the node rather than defaulting silently.
+2. Detect injection in **both the issue title and the issue body** via
+   `detect_injection`, unconditionally and before any LLM call. Checking only
+   the body and skipping the title is a named security defect this node must
+   avoid. On detection: log a structured warning (with the matched span
+   truncated and control-character-escaped before it reaches the log line),
+   best-effort apply the `cogworks:security-hold` label via `issues.add_label`
+   (a label-write failure never undoes the halt), and fail the node.
 3. Classify the work item via `LlmGateway::call` to produce `ClassificationResult`.
 4. Apply safety override via `apply_safety_override`.
 5. Check scope threshold via `check_scope_threshold`.
 6. Extract requirements via `extract_requirements` and initialise `TraceabilityMatrix`.
-7. Write `ClassificationResult` and empty `TraceabilityMatrix` to output artifacts.
+7. Write `ClassificationResult` and `TraceabilityMatrix` (one row per
+   extracted requirement, each `TraceabilityStatus::Missing`) to output
+   artifacts.
+
+**Current limitation**: steps 2 and 5 both fail the node via
+`NodeExecutionResult::Failure { retry_policy: NonRetryable }` rather than a
+true executor-level escalation — `PipelineExecutor`'s dispatch currently maps
+every node `Failure` directly to `StepResult::Halted` regardless of
+`retry_policy`, and does not yet persist terminal state for it the way
+`HaltWithError`/`Escalate` do. Tracked as a pipeline-executor gap (not
+specific to this node) at
+<https://github.com/brightsmiths/cog-works/issues/181>.
 
 ### ArchitectureNode (`architecture.rs`)
 

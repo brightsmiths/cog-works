@@ -528,6 +528,8 @@ Spec: `docs/spec/interfaces/pipeline-execution.md`.
 
 | Type | Purpose |
 |------|---------|
+| `PipelineConfig` | Resolved per-run config passed to node `execute` functions: `graph`, `run_id`, `safety_registry: SafetyCriticalRegistry`, `scope_threshold: u32`, `constitutional_rules: ConstitutionalRules` |
+| `IntakeNode` | First pipeline node: fetch issue → injection scan (title + body) → LLM classify → safety override → scope check → extract requirements → initial `TraceabilityMatrix` |
 | *(to be added)* | `NodeInput`, `NodeOutput`, `LlmGateway`, `PipelineExecutor`, `StepResult`, etc. |
 
 ---

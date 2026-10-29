@@ -178,7 +178,11 @@ impl PipelineExecutor {
 /// `pipeline::security`'s own helper is not exported. This duplication is
 /// tracked as a deferred cross-crate finding — see
 /// `.llm/findings/pipeline-executor-57.md`.
-fn sha256_hex(data: &[u8]) -> String {
+///
+/// `pub(crate)` (rather than module-private) so test fixtures elsewhere in
+/// this crate (`gateway_tests.rs`, `intake_tests.rs`) can share this single
+/// implementation instead of each defining their own copy.
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     use std::fmt::Write as _;
     Sha256::digest(data)
