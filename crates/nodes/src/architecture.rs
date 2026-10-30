@@ -62,3 +62,7 @@ impl ArchitectureNode {
         todo!("See docs/spec/interfaces/nodes.md §ArchitectureNode")
     }
 }
+
+#[cfg(test)]
+#[path = "architecture_tests.rs"]
+mod tests;
