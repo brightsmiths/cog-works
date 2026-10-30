@@ -132,8 +132,11 @@ use pipeline::{
 use pipeline::{DependencyGraph, DependencyResult};
 
 use crate::node::{CliConfig, NodeExecutionResult, NodeFailure, NodeInput};
+use crate::sha256_hex;
 
-use super::{NodeRunner, PipelineExecutor, StepResult, run_step, run_step_with_runner, sha256_hex};
+use super::{NodeRunner, PipelineExecutor, StepResult, run_step, run_step_with_runner};
+
+// ─── Small local helpers ───────────────────────────────────────────────────────
 
 /// Computes the `graph_hash` this test file expects `run_step_with_runner` to
 /// derive from `graph`. See spec-gap note #1 at the top of this file: every

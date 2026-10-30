@@ -75,11 +75,10 @@ use pipeline::{
     StructuredResponse,
 };
 
-use crate::executor::sha256_hex;
-
 use super::{
     ConstitutionallyWrappedPrompt, LlmGateway, RateLimitState, assemble_constitutional_prompt,
 };
+use crate::sha256_hex;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 

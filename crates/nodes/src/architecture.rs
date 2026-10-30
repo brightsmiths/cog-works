@@ -43,8 +43,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use sha2::{Digest, Sha256};
-
 use pipeline::{
     AlignmentFinding, ApprovedScope, BranchName, ClassificationResult, CodeRepository,
     ConstitutionalError, ConstitutionalRules, ConstraintFinding, ContextAssemblyRequest,
@@ -114,63 +112,23 @@ impl ArchitectureNode {
         _pack_loader: &ContextPackLoader,
         _github: &dyn CodeRepository,
     ) -> NodeExecutionResult {
-        let classification = match extract_classification(&input) {
-            Ok(c) => c,
-            Err(failure) => return NodeExecutionResult::Failure(failure),
-        };
-        let matrix = match extract_traceability_matrix(&input) {
-            Ok(m) => m,
-            Err(failure) => return NodeExecutionResult::Failure(failure),
-        };
+        let generated =
+            match generate_architecture_document(&input, gateway, context, constraint_validator)
+                .await
+            {
+                Ok(g) => g,
+                Err(failure) => return NodeExecutionResult::Failure(failure),
+            };
 
-        let contracts = match load_registry_contracts(constraint_validator).await {
-            Ok(defs) => defs,
-            Err(failure) => return NodeExecutionResult::Failure(failure),
-        };
-
-        let blocking_constraints = cross_domain_blocking_findings(&contracts);
-        if !blocking_constraints.is_empty() {
-            return NodeExecutionResult::Failure(cross_domain_failure(&blocking_constraints));
-        }
-
-        let context_package =
-            assemble_node_context(context, &input, &classification, &contracts).await;
-
-        let rules = node_constitutional_rules();
-        let model = node_model_config();
-        let generation_schema = architecture_output_schema();
-
-        let response = match call_architecture_llm(
-            gateway,
-            &rules,
-            ARCHITECTURE_GENERATION_SYSTEM_PROMPT,
-            &context_package,
-            &generation_schema,
-            &model,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(failure) => return NodeExecutionResult::Failure(failure),
-        };
-
-        let mut cost_delta = response_cost(&response, &model);
-        let architecture_doc = extract_architecture_document(&response);
-
-        let candidate_output = build_output(&architecture_doc, &matrix, cost_delta);
-        let det_findings = run_deterministic_alignment(&declared_node_inputs(), &candidate_output);
-        if det_findings.iter().any(|f| f.blocking) {
-            return NodeExecutionResult::Failure(alignment_failure(&det_findings));
-        }
-
-        let mut final_matrix = matrix;
-        if classification.safety_affecting {
+        let mut final_matrix = generated.matrix;
+        let mut cost_delta = generated.cost_delta;
+        if generated.classification.safety_affecting {
             let (updated_matrix, semantic_cost) = match maybe_run_semantic_alignment(
                 gateway,
-                &rules,
-                &model,
-                &context_package,
-                &architecture_doc,
+                &generated.rules,
+                &generated.model,
+                &generated.context_package,
+                &generated.architecture_doc,
                 final_matrix,
             )
             .await
@@ -182,8 +140,82 @@ impl ArchitectureNode {
             cost_delta += semantic_cost;
         }
 
-        NodeExecutionResult::Success(build_output(&architecture_doc, &final_matrix, cost_delta))
+        NodeExecutionResult::Success(build_output(
+            &generated.architecture_doc,
+            &final_matrix,
+            cost_delta,
+        ))
     }
+}
+
+// ─── Steps 1-5: generate the architecture document ───────────────────────────
+
+/// Intermediate state produced by steps 1-5 (input extraction through
+/// deterministic alignment), carried forward into the conditional step 6
+/// (LLM-semantic alignment) and the final output assembly.
+struct GeneratedArchitecture {
+    classification: ClassificationResult,
+    matrix: TraceabilityMatrix,
+    context_package: ContextPackage,
+    rules: ConstitutionalRules,
+    model: ModelConfig,
+    architecture_doc: String,
+    cost_delta: TokenCost,
+}
+
+/// Runs steps 1-5 of the node spec: input extraction, cross-domain
+/// constraint validation, context assembly, architecture generation, and
+/// deterministic alignment. Returns `Err` on the first failure, matching
+/// `execute`'s early-return-on-failure contract.
+async fn generate_architecture_document(
+    input: &NodeInput,
+    gateway: &LlmGateway,
+    context: &ContextAssembler,
+    constraint_validator: &ConstraintValidator,
+) -> Result<GeneratedArchitecture, NodeFailure> {
+    let classification = extract_classification(input)?;
+    let matrix = extract_traceability_matrix(input)?;
+
+    let contracts = load_registry_contracts(constraint_validator).await?;
+    let blocking_constraints = cross_domain_blocking_findings(&contracts);
+    if !blocking_constraints.is_empty() {
+        return Err(cross_domain_failure(&blocking_constraints));
+    }
+
+    let context_package = assemble_node_context(context, input, &classification, &contracts).await;
+
+    let rules = node_constitutional_rules();
+    let model = node_model_config();
+    let generation_schema = architecture_output_schema();
+
+    let response = call_architecture_llm(
+        gateway,
+        &rules,
+        ARCHITECTURE_GENERATION_SYSTEM_PROMPT,
+        &context_package,
+        &generation_schema,
+        &model,
+    )
+    .await?;
+
+    let cost_delta = response_cost(&response, &model);
+    let architecture_doc = extract_architecture_document(&response);
+
+    let candidate_output = build_output(&architecture_doc, &matrix, cost_delta);
+    let det_findings = run_deterministic_alignment(&declared_node_inputs(), &candidate_output);
+    if det_findings.iter().any(|f| f.blocking) {
+        return Err(alignment_failure(&det_findings));
+    }
+
+    Ok(GeneratedArchitecture {
+        classification,
+        matrix,
+        context_package,
+        rules,
+        model,
+        architecture_doc,
+        cost_delta,
+    })
 }
 
 // ─── Step 1/2: input extraction and cross-domain constraint validation ──────
@@ -267,16 +299,15 @@ async fn assemble_node_context(
 // ─── Step 4: LLM calls ────────────────────────────────────────────────────────
 
 fn architecture_output_schema() -> OutputSchema {
-    OutputSchema::new(serde_json::json!({
+    crate::literal_output_schema(serde_json::json!({
         "type": "object",
         "properties": { "architecture_document": { "type": "string" } },
         "required": ["architecture_document"]
     }))
-    .unwrap_or_else(|| unreachable!("literal schema is always a valid JSON object"))
 }
 
 fn semantic_alignment_output_schema() -> OutputSchema {
-    OutputSchema::new(serde_json::json!({
+    crate::literal_output_schema(serde_json::json!({
         "type": "object",
         "properties": {
             "aligned": { "type": "boolean" },
@@ -286,7 +317,6 @@ fn semantic_alignment_output_schema() -> OutputSchema {
         },
         "required": ["aligned"]
     }))
-    .unwrap_or_else(|| unreachable!("literal schema is always a valid JSON object"))
 }
 
 /// Placeholder model configuration for both LLM calls made by this node.
@@ -528,24 +558,9 @@ const CONSTITUTIONAL_RULES_CONTENT: &str = "RULE: EXTERNAL_CONTENT_AS_DATA\n\
 fn node_constitutional_rules() -> ConstitutionalRules {
     ConstitutionalRules {
         content: CONSTITUTIONAL_RULES_CONTENT.to_string(),
-        source_hash: sha256_hex(CONSTITUTIONAL_RULES_CONTENT.as_bytes()),
+        source_hash: crate::sha256_hex(CONSTITUTIONAL_RULES_CONTENT.as_bytes()),
         source_branch: BranchName::new("main").unwrap_or_else(|| unreachable!("non-empty literal")),
     }
-}
-
-/// Computes the SHA-256 digest of `data` as a 64-character lowercase hex
-/// string. Duplicated from `executor/mod.rs`'s private helper of the same
-/// name (which is itself a deliberate duplicate of `pipeline::security`'s
-/// private hasher — see that module's comment) because neither is exported
-/// for reuse; see `.llm/findings/architecture-node-sha256-duplication.md`.
-fn sha256_hex(data: &[u8]) -> String {
-    use std::fmt::Write as _;
-    Sha256::digest(data)
-        .iter()
-        .fold(String::with_capacity(64), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
 }
 
 // ─── Failure constructors ────────────────────────────────────────────────────

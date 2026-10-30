@@ -16,7 +16,8 @@ use pipeline::{
 
 use crate::node::CliConfig;
 
-use super::{PipelineExecutor, StepContext, StepResult, infra_halt, sentinel_node_id, sha256_hex};
+use super::{PipelineExecutor, StepContext, StepResult, infra_halt, sentinel_node_id};
+use crate::sha256_hex;
 
 /// Path (relative to the repository root) from which constitutional rules are
 /// loaded at the start of every pipeline step.
