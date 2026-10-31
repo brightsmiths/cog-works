@@ -896,6 +896,13 @@ struct MockNodeRunner {
     calls: Mutex<Vec<NodeId>>,
     delay: Duration,
     intervals: Mutex<Vec<(Instant, Instant)>>,
+    /// Records the `content` of the `ConstitutionalRules` value each
+    /// `run_node` call actually received (Fix H1, task #59 follow-up:
+    /// `run_node` gained a `rules: &ConstitutionalRules` parameter that
+    /// `dispatch_action`/`execute_single`/`execute_parallel`/
+    /// `run_batch_concurrently` must thread through as `&ctx.rules` — the
+    /// genuinely loaded rules, not some placeholder).
+    rules_seen: Mutex<Vec<String>>,
 }
 
 impl MockNodeRunner {
@@ -905,6 +912,7 @@ impl MockNodeRunner {
             calls: Mutex::new(vec![]),
             delay: Duration::ZERO,
             intervals: Mutex::new(vec![]),
+            rules_seen: Mutex::new(vec![]),
         }
     }
 
@@ -920,12 +928,24 @@ impl MockNodeRunner {
     fn intervals(&self) -> Vec<(Instant, Instant)> {
         self.intervals.lock().unwrap().clone()
     }
+
+    /// Every `ConstitutionalRules::content` value `run_node` was called with,
+    /// in call order. See the `rules_seen` field doc.
+    fn rules_seen(&self) -> Vec<String> {
+        self.rules_seen.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
 impl NodeRunner for MockNodeRunner {
-    async fn run_node(&self, id: &NodeId, _input: NodeInput) -> NodeExecutionResult {
+    async fn run_node(
+        &self,
+        id: &NodeId,
+        _input: NodeInput,
+        rules: &ConstitutionalRules,
+    ) -> NodeExecutionResult {
         self.calls.lock().unwrap().push(id.clone());
+        self.rules_seen.lock().unwrap().push(rules.content.clone());
 
         let start = Instant::now();
         if !self.delay.is_zero() {
@@ -1292,6 +1312,120 @@ async fn test_run_step_with_runner_fresh_run_dispatches_first_node_via_runner() 
         intake_state.status,
         NodeStatus::Completed,
         "the dispatched node must be marked Completed after a successful run"
+    );
+}
+
+// ─── Fix H1 — real ConstitutionalRules threaded through NodeRunner::run_node ──
+//
+// Security Reviewer finding H1 (task #59 follow-up): `NodeRunner::run_node`
+// gained a `rules: &ConstitutionalRules` parameter, and `dispatch_action`'s
+// `execute_single`/`execute_parallel`/`run_batch_concurrently` helpers must
+// pass `&ctx.rules` — the rules genuinely loaded by
+// `steps::load_constitutional_rules` at the top of `run_step_with_runner` —
+// through to every `run_node` call, not some default-constructed
+// placeholder.
+
+/// `run_node` must receive the exact `ConstitutionalRules` content that was
+/// loaded for this step (via the mock `CodeRepository`'s configured file
+/// content), proving the dispatch path forwards the real, once-per-step
+/// loaded rules rather than a placeholder or empty value.
+#[tokio::test]
+async fn test_run_step_with_runner_execute_single_passes_loaded_rules_to_run_node() {
+    let graph = linear_graph(&["solo"]);
+    let issues = Arc::new(MockIssueTracker::empty());
+    let code_repository = Arc::new(MockCodeRepository::with_content(
+        &valid_constitutional_rules_content(),
+    ));
+    let config_loader = Arc::new(single_graph_loader(graph));
+    let llm_provider = Arc::new(MockLlmProvider::new());
+    let executor = build_executor(issues, code_repository, config_loader, llm_provider);
+
+    let mut responses = HashMap::new();
+    responses.insert(node_id("solo"), node_output("solo-output"));
+    let runner = MockNodeRunner::new(responses);
+
+    let config = cli_config(None);
+    let result = run_step_with_runner(&executor, work_item(), &config, &runner).await;
+
+    assert!(
+        matches!(result, StepResult::Completed { .. }),
+        "expected StepResult::Completed, got {result:?}"
+    );
+    let rules_seen = runner.rules_seen();
+    assert_eq!(
+        rules_seen.len(),
+        1,
+        "run_node must have been called exactly once with a rules argument"
+    );
+    assert_eq!(
+        rules_seen[0],
+        valid_constitutional_rules_content(),
+        "run_node must receive the genuinely loaded ConstitutionalRules content, \
+         not a default-constructed or empty placeholder"
+    );
+}
+
+/// `ExecuteParallel` dispatch (`execute_parallel`/`run_batch_concurrently`)
+/// must also forward the loaded rules to every node in the batch — not only
+/// the single-node (`execute_single`) path. Resumes from a prior state in
+/// which `root` is already `Completed`, so that `branch-b` and `branch-c`
+/// (the two fan-out successors) become eligible together and are dispatched
+/// via `ExecuteParallel`, matching the setup used by
+/// `test_run_step_with_runner_parallel_branch_executes_concurrently_and_preserves_input_order`.
+#[tokio::test]
+async fn test_run_step_with_runner_execute_parallel_passes_loaded_rules_to_every_batch_node() {
+    let graph = fan_out_graph();
+    let hash = graph_hash(&graph);
+    let run_id = PipelineRunId::new_random();
+    let wi = work_item();
+
+    let mut node_states = HashMap::new();
+    node_states.insert(node_id("root"), completed_node_state(1, 0));
+    let prior_comment = issue_comment(
+        1,
+        serde_json::to_string(&state_comment(
+            run_id,
+            wi,
+            node_states,
+            vec![],
+            TokenCost::zero(),
+            hash,
+        ))
+        .expect("state comment serialises"),
+    );
+
+    let issues = Arc::new(MockIssueTracker::new(vec![prior_comment]));
+    let code_repository = Arc::new(MockCodeRepository::with_content(
+        &valid_constitutional_rules_content(),
+    ));
+    let config_loader = Arc::new(single_graph_loader(graph));
+    let llm_provider = Arc::new(MockLlmProvider::new());
+    let executor = build_executor(issues, code_repository, config_loader, llm_provider);
+
+    let mut responses = HashMap::new();
+    responses.insert(node_id("branch-b"), node_output("B"));
+    responses.insert(node_id("branch-c"), node_output("C"));
+    let runner = MockNodeRunner::new(responses);
+
+    let config = cli_config(None);
+    let result = run_step_with_runner(&executor, wi, &config, &runner).await;
+
+    assert!(
+        matches!(result, StepResult::CompletedParallel { .. }),
+        "expected StepResult::CompletedParallel, got {result:?}"
+    );
+    let rules_seen = runner.rules_seen();
+    assert_eq!(
+        rules_seen.len(),
+        2,
+        "both batch nodes must have been dispatched via run_node"
+    );
+    assert!(
+        rules_seen
+            .iter()
+            .all(|content| content == &valid_constitutional_rules_content()),
+        "every node dispatched in this step, including under ExecuteParallel, must \
+         receive the same genuinely loaded ConstitutionalRules content; got {rules_seen:?}"
     );
 }
 
@@ -2647,7 +2781,11 @@ async fn test_default_node_runner_run_node_unrecognised_node_id_returns_failure_
     };
 
     let result = runner
-        .run_node(&node_id("totally-unrecognised-node"), input)
+        .run_node(
+            &node_id("totally-unrecognised-node"),
+            input,
+            &valid_constitutional_rules(),
+        )
         .await;
 
     match result {
