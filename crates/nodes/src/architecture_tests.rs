@@ -1143,6 +1143,66 @@ fn test_mock_registry_loader_validate_schema_reports_passed() {
     assert!(result.valid());
 }
 
+// ─── Mutation-audit kill tests: private pure-function helpers ──────────────
+//
+// `response_cost` and `estimate_token_len` are internal pure functions whose
+// outputs are not independently observable through `execute()`'s public
+// surface at the precision needed to distinguish an arithmetic-operator
+// mutation (e.g. `*` -> `/`, `+` -> `*`) from the correct formula — the
+// `execute()`-level test above only asserts `cost_delta > 0.0`, which is
+// satisfied by every arithmetic-operator mutant tried by `cargo-mutants`
+// (surviving as MISSED). These two tests exercise the helpers directly via
+// `super::` (this module is a child of `architecture.rs`, so it can see
+// private items) with exact expected values chosen to disagree with every
+// single-operator/constant mutation of the real formula.
+
+/// Mutation-audit kill test: `response_cost` must compute the exact weighted
+/// sum `input_tokens * input_cost_per_token + output_tokens *
+/// output_cost_per_token` — not merely "some positive number". The chosen
+/// token counts (120, 340) and rates (0.000_003, 0.000_015) make the correct
+/// result (0.005_46) numerically distinct from every single-operator mutant
+/// of the formula (`*`->`+`, `*`->`/` in either term, `+`->`*` in the final
+/// sum), so an exact-match assertion kills all of them.
+#[test]
+fn test_response_cost_weighted_sum_of_token_counts_matches_model_rates() {
+    let response = architecture_response("# Architecture");
+    let model = ModelConfig {
+        model_id: "test-model".to_string(),
+        context_window_size: 200_000,
+        max_output_tokens: 8_192,
+        input_cost_per_token: 0.000_003,
+        output_cost_per_token: 0.000_015,
+    };
+
+    let cost = super::response_cost(&response, &model);
+
+    let expected = 120.0_f64 * 0.000_003 + 340.0_f64 * 0.000_015;
+    assert!(
+        (cost.as_f64() - expected).abs() < 1e-12,
+        "expected cost_delta {expected}, got {}",
+        cost.as_f64()
+    );
+}
+
+/// Mutation-audit kill test: `estimate_token_len` must compute exactly
+/// `content.len() / 4 + 1`. A 9-byte input gives the correct result `3`,
+/// which is numerically distinct from every single-operator/constant mutant
+/// tried by `cargo-mutants` for this function: the hardcoded-`1` and
+/// hardcoded-`0` stubs (1, 0), `/`->`*` (36+1=37), `/`->`%` (9%4+1=2), and
+/// `+`->`*` (2*1=2) / `+`->`-` (2-1=1) on the final step all disagree with 3.
+#[test]
+fn test_estimate_token_len_matches_length_div_four_plus_one_formula() {
+    let content = "123456789"; // 9 bytes
+    assert_eq!(content.len(), 9);
+
+    let tokens = super::estimate_token_len(content);
+
+    assert_eq!(
+        tokens, 3,
+        "expected floor(9/4) + 1 = 3 tokens, got {tokens}"
+    );
+}
+
 // ─── Tier 3: Property-based tests ───────────────────────────────────────────
 
 fn block_on<F: std::future::Future>(fut: F) -> F::Output {
