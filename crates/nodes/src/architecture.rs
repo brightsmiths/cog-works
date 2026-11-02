@@ -549,9 +549,20 @@ fn parse_semantic_response(response: &StructuredResponse) -> SemanticOutcome {
     }
 }
 
+/// Reads a string-valued field from a JSON object, returning `None` if the
+/// field is absent or not a string.
+///
+/// Shared by every `parse_*` helper below that extracts a required string
+/// field from an LLM response's parsed JSON value — the fail-skip style
+/// (`None` propagates via `?` to skip the malformed entry, never panics or
+/// fabricates a value) is otherwise repeated verbatim at each call site.
+fn get_str_field<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    value.get(field)?.as_str()
+}
+
 fn parse_traceability_entry(value: &serde_json::Value) -> Option<TraceabilityEntry> {
-    let requirement_ref = value.get("requirement_ref")?.as_str()?.to_string();
-    let output_ref = value.get("output_ref")?.as_str()?.to_string();
+    let requirement_ref = get_str_field(value, "requirement_ref")?.to_string();
+    let output_ref = get_str_field(value, "output_ref")?.to_string();
     Some(TraceabilityEntry {
         requirement_ref,
         output_ref,
@@ -564,9 +575,9 @@ fn parse_traceability_entry(value: &serde_json::Value) -> Option<TraceabilityEnt
 /// panic or fabricate) on any missing or unrecognised field — mirrors
 /// [`parse_traceability_entry`]'s fail-skip style.
 fn parse_alignment_finding(value: &serde_json::Value) -> Option<AlignmentFinding> {
-    let check_type = parse_alignment_check_type(value.get("check_type")?.as_str()?)?;
-    let misalignment = parse_misalignment_type(value.get("misalignment")?.as_str()?)?;
-    let description = value.get("description")?.as_str()?.to_string();
+    let check_type = parse_alignment_check_type(get_str_field(value, "check_type")?)?;
+    let misalignment = parse_misalignment_type(get_str_field(value, "misalignment")?)?;
+    let description = get_str_field(value, "description")?.to_string();
     let blocking = value.get("blocking")?.as_bool()?;
     Some(AlignmentFinding {
         check_type,

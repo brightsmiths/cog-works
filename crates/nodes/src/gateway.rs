@@ -281,25 +281,7 @@ impl LlmGateway {
         // before any of it is assembled into a prompt or sent to the
         // provider (Security Reviewer finding H2, task #59 follow-up).
         // Fails closed on the first match — the provider is never called.
-        for item in &context.items {
-            let source_label = item
-                .source_path
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| "context item".to_string());
-            if let InjectionDetectionResult::InjectionDetected {
-                source,
-                offending_text,
-                pattern,
-            } = detect_injection(&item.content, &source_label)
-            {
-                return Err(LlmError::InjectionDetected {
-                    source,
-                    offending_text,
-                    pattern,
-                });
-            }
-        }
+        scan_for_prompt_injection(context)?;
 
         // Step 4: assemble the system message (constitutional content leading).
         let system = format!(
@@ -339,6 +321,36 @@ impl LlmGateway {
             Err(other) => Err(other),
         }
     }
+}
+
+/// Scans every item in `context` for prompt-injection patterns, failing
+/// closed with [`LlmError::InjectionDetected`] on the first match.
+///
+/// Extracted from [`LlmGateway::call`]'s step 3 (Security Reviewer finding
+/// H2, task #59 follow-up) to keep `call` within the project's function-
+/// length standard; this is a single-call-site helper, not a reusable
+/// abstraction shared across modules.
+fn scan_for_prompt_injection(context: &ContextPackage) -> Result<(), LlmError> {
+    for item in &context.items {
+        let source_label = item
+            .source_path
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "context item".to_string());
+        if let InjectionDetectionResult::InjectionDetected {
+            source,
+            offending_text,
+            pattern,
+        } = detect_injection(&item.content, &source_label)
+        {
+            return Err(LlmError::InjectionDetected {
+                source,
+                offending_text,
+                pattern,
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
