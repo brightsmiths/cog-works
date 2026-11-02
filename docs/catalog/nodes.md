@@ -7,7 +7,7 @@ Pipeline node implementations and LLM gateway — Intake through Integration nod
 
 | Name | Kind | Location | Description | Tags |
 |------|------|----------|-------------|------|
-| `ArchitectureNode` | struct | `crates/nodes/src/architecture.rs:34` | struct in crates/nodes/src/architecture.rs | nodes, pipeline |
+| `ArchitectureNode` | struct | `crates/nodes/src/architecture.rs:87` | struct in crates/nodes/src/architecture.rs; `execute` gained a trailing `rules: &ConstitutionalRules` parameter (task #59 security follow-up H1) | nodes, pipeline |
 | `BudgetTracker` | struct | `crates/nodes/src/node.rs:226` | struct in crates/nodes/src/node.rs | nodes, pipeline |
 | `CliConfig` | struct | `crates/nodes/src/node.rs:119` | struct in crates/nodes/src/node.rs | nodes, pipeline |
 | `CodeGenerationNode` | struct | `crates/nodes/src/code_generation.rs:29` | struct in crates/nodes/src/code_generation.rs | nodes, pipeline |
@@ -15,7 +15,7 @@ Pipeline node implementations and LLM gateway — Intake through Integration nod
 | `ConstraintValidator` | struct | `crates/nodes/src/node.rs:170` | struct in crates/nodes/src/node.rs | nodes, pipeline |
 | `ContextAssembler` | struct | `crates/nodes/src/node.rs:146` | struct in crates/nodes/src/node.rs | nodes, pipeline |
 | `ContextPackLoader` | struct | `crates/nodes/src/node.rs:193` | struct in crates/nodes/src/node.rs | nodes, pipeline |
-| `DefaultNodeRunner` | struct | `crates/nodes/src/executor/runner.rs:78` | Production `NodeRunner` impl dispatching to each node module's `execute` fn by `NodeId`; built once per `run_step` call | nodes, pipeline, executor |
+| `DefaultNodeRunner` | struct | `crates/nodes/src/executor/runner.rs:89` | Production `NodeRunner` impl dispatching to each node module's `execute` fn by `NodeId`; built once per `run_step` call | nodes, pipeline, executor |
 | `HandlebarsTemplateEngine` | struct | `crates/nodes/src/templates.rs:77` | struct in crates/nodes/src/templates.rs | nodes, pipeline |
 | `IntakeNode` | struct | `crates/nodes/src/intake.rs:29` | struct in crates/nodes/src/intake.rs | nodes, pipeline |
 | `IntegrationNode` | struct | `crates/nodes/src/integration.rs:27` | struct in crates/nodes/src/integration.rs | nodes, pipeline |
@@ -24,7 +24,7 @@ Pipeline node implementations and LLM gateway — Intake through Integration nod
 | `NodeExecutionResult` | enum | `crates/nodes/src/node.rs:86` | enum in crates/nodes/src/node.rs | nodes, pipeline |
 | `NodeFailure` | struct | `crates/nodes/src/node.rs:69` | struct in crates/nodes/src/node.rs | nodes, pipeline |
 | `NodeInput` | struct | `crates/nodes/src/node.rs:49` | struct in crates/nodes/src/node.rs | nodes, pipeline |
-| `NodeRunner` | trait | `crates/nodes/src/executor/runner.rs:38` | `pub(crate)` test seam: dispatches one node's `execute` fn by `NodeId`/`NodeInput`, letting `run_step_with_runner`'s orchestration be tested against a mock without touching real (still-`todo!()`) node bodies | nodes, pipeline, trait, executor |
+| `NodeRunner` | trait | `crates/nodes/src/executor/runner.rs:39` | `pub(crate)` test seam: dispatches one node's `execute` fn by `NodeId`/`NodeInput`/`&ConstitutionalRules`, letting `run_step_with_runner`'s orchestration be tested against a mock without touching real (still-`todo!()`) node bodies; `rules` param added task #59 security follow-up H1 | nodes, pipeline, trait, executor |
 | `PipelineConfig` | struct | `crates/nodes/src/node.rs:103` | struct in crates/nodes/src/node.rs | nodes, pipeline |
 | `PipelineExecutor` | struct | `crates/nodes/src/executor/mod.rs:113` | Holds every infrastructure `Arc<dyn Trait>` dependency for one pipeline service instance; constructed once at startup and shared across all `run_step` calls | nodes, pipeline, executor |
 | `PlanningNode` | struct | `crates/nodes/src/planning.rs:28` | struct in crates/nodes/src/planning.rs | nodes, pipeline |

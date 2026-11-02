@@ -541,11 +541,24 @@ pub enum LlmError {
     SchemaValidationFailed { content: serde_json::Value, violations: Vec<String> },
     NetworkError { message: String },
     ContextWindowExceeded { requested: TokenCount, limit: TokenCount },
+    InjectionDetected { source: String, offending_text: String, pattern: InjectionPattern },
 }
 ```
 
 **Retry policy**: `RateLimited` and `NetworkError` and `ApiError(5xx)` are
-`Retryable`; all others are `NonRetryable`.
+`Retryable`; all others — including `InjectionDetected` — are `NonRetryable`
+(retrying would just re-submit the same malicious content and re-trigger the
+same detection).
+
+**`InjectionDetected`** (Security Reviewer finding H2, task #59 follow-up):
+raised by `nodes::LlmGateway::call` when `pipeline::detect_injection` matches
+a pattern in a `ContextPackage` item's content, before the provider is ever
+called. Its `Display` impl deliberately omits `offending_text` so the error
+message itself does not re-amplify the injected text. Because of this field
+layout (a field literally named `source` that is a plain label, not a nested
+error), `LlmError` implements `Display`/`std::error::Error` by hand rather
+than via `#[derive(thiserror::Error)]` — see the doc comment on the type in
+`crates/pipeline/src/tools.rs` for why.
 
 ### LlmProvider Trait
 

@@ -188,14 +188,20 @@ LLM provider and returns a validated structured completion.
 1. Acquires the rate-limit lock. If `backoff_active` and now < `window_reset`,
    returns `Err(LlmError::RateLimited { retry_after })`.
 2. Releases the lock.
-3. Decomposes `prompt` into a system message (constitutional content +
+3. Scans every `ContextPackage::items[i].content` via `pipeline::detect_injection`
+   (label: the item's `source_path` if present, else `"context item"`). On the
+   first `InjectionDetectionResult::InjectionDetected`, returns
+   `Err(LlmError::InjectionDetected { source, offending_text, pattern })`
+   immediately — the provider is never called (Security Reviewer finding H2,
+   task #59 follow-up).
+4. Decomposes `prompt` into a system message (constitutional content +
    node system prompt).
-4. Converts `ContextPackage::items` into a user-role message sequence.
-5. Delegates to `self.provider.complete(system, messages, schema, model)`.
-6. On success: acquires the lock again; updates `remaining_requests` and
+5. Converts `ContextPackage::items` into a user-role message sequence.
+6. Delegates to `self.provider.complete(system, messages, schema, model)`.
+7. On success: acquires the lock again; updates `remaining_requests` and
    `window_reset` from response metadata in `StructuredResponse`; releases.
-7. On 429: acquires lock; sets `backoff_active = true`; updates `window_reset`.
-8. Returns the result.
+8. On 429: acquires lock; sets `backoff_active = true`; updates `window_reset`.
+9. Returns the result.
 
 **Thread safety**: The rate-limit lock is held only during the check and
 update phases, never during the HTTP call itself.
@@ -431,8 +437,16 @@ pub async fn execute(
     constraint_validator: &ConstraintValidator,
     pack_loader: &ContextPackLoader,
     github: &dyn CodeRepository,
+    rules: &ConstitutionalRules,
 ) -> NodeExecutionResult
 ```
+
+`rules` is the real, operator-reviewed constitutional rules loaded once per
+pipeline step (`executor/steps.rs::load_constitutional_rules`) and forwarded
+through `NodeRunner::run_node` (Security Reviewer finding H1, task #59
+follow-up — see `docs/adr/ADR-0009-thread-constitutional-rules-into-node-execute.md`).
+Every `assemble_constitutional_prompt` call this node makes uses this
+caller-supplied value, not a node-internal constant.
 
 **Responsibilities**:
 
@@ -440,10 +454,13 @@ pub async fn execute(
 2. Validate cross-domain constraints via `constraint_validator`.
 3. Assemble context via `context`.
 4. Call LLM to produce the architecture document.
-5. Run deterministic alignment (`run_deterministic_alignment`).
+5. Run deterministic alignment (`run_deterministic_alignment`). A blocking
+   finding fails with the full finding detail (not just a count) embedded
+   in the `NodeFailed.error` message.
 6. If `LlmSemantic` checks are enabled: run LLM semantic alignment;
    update traceability matrix via `update_traceability_matrix` with
-   `AlignmentResult::traceability_entries`.
+   `AlignmentResult::traceability_entries`. A non-aligned result fails with
+   the critic's `findings` embedded in the `NodeFailed.error` message.
 7. Write architecture document to output artifacts.
 
 ### InterfaceDesignNode (`interface_design.rs`)

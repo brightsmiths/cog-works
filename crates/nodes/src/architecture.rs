@@ -31,10 +31,12 @@
 //! - A blocking finding from either alignment check maps to `NodeExecutionResult::Failure`.
 //! - `update_traceability_matrix` is only called with the `LlmSemantic` result's
 //!   `traceability_entries` — never with the deterministic result's (always-empty) entries.
-//! - There is no `ConstitutionalRules` parameter on `execute` (a cross-cutting
-//!   gap affecting every `*Node::execute`, see `executor/steps.rs`'s
-//!   `load_constitutional_rules`), so this node builds its own self-contained,
-//!   always-valid [`pipeline::ConstitutionalRules`] value for each LLM call.
+//! - `execute` takes the real, operator-reviewed `rules: &pipeline::ConstitutionalRules`
+//!   value loaded once per pipeline step by `executor/steps.rs::load_constitutional_rules`
+//!   and forwarded via `NodeRunner::run_node` (Fix H1, task #59 security follow-up — see
+//!   `docs/adr/ADR-0009-thread-constitutional-rules-into-node-execute.md`). This node
+//!   previously built its own self-consistent, always-valid `ConstitutionalRules` value
+//!   internally, which defeated the tamper-detection purpose of the constitutional layer.
 //!
 //! ## Specification
 //!
@@ -44,13 +46,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use pipeline::{
-    AlignmentFinding, ApprovedScope, BranchName, ClassificationResult, CodeRepository,
+    AlignmentCheckType, AlignmentFinding, ApprovedScope, ClassificationResult, CodeRepository,
     ConstitutionalError, ConstitutionalRules, ConstraintFinding, ContextAssemblyRequest,
     ContextItem, ContextPackage, ContextPriority, DeclaredNodeInputs, DiagnosticSeverity,
-    InterfaceDefinition, InterfaceMap, LlmError, ModelConfig, NodeId, NodeOutput, NodeType,
-    OutputSchema, PipelineError, RegistryError, RetryPolicy, ScopeParameters, StructuredResponse,
-    SummaryLevel, TokenCost, TokenCount, TraceabilityEntry, TraceabilityMatrix, TraceabilityStage,
-    run_deterministic_alignment, update_traceability_matrix, validate_cross_domain_constraints,
+    InterfaceDefinition, InterfaceMap, LlmError, MisalignmentType, ModelConfig, NodeId, NodeOutput,
+    NodeType, OutputSchema, PipelineError, RegistryError, RetryPolicy, ScopeParameters,
+    StructuredResponse, SummaryLevel, TokenCost, TokenCount, TraceabilityEntry, TraceabilityMatrix,
+    TraceabilityStage, run_deterministic_alignment, update_traceability_matrix,
+    validate_cross_domain_constraints,
 };
 
 use crate::gateway::{LlmGateway, assemble_constitutional_prompt};
@@ -97,6 +100,11 @@ impl ArchitectureNode {
     /// * `_github` — Unused by this node: the interface registry definitions
     ///   loaded via `constraint_validator` double as the `interface_entries`
     ///   context input, so no direct repository read is needed.
+    /// * `rules` — The real, operator-reviewed constitutional rules loaded
+    ///   once per pipeline step (Fix H1, task #59 security follow-up: this
+    ///   node previously built its own self-consistent, always-valid
+    ///   `ConstitutionalRules` value internally, defeating the tamper-
+    ///   detection purpose of the constitutional layer). See ADR-0009.
     ///
     /// # Returns
     ///
@@ -111,21 +119,27 @@ impl ArchitectureNode {
         constraint_validator: &ConstraintValidator,
         _pack_loader: &ContextPackLoader,
         _github: &dyn CodeRepository,
+        rules: &ConstitutionalRules,
     ) -> NodeExecutionResult {
-        let generated =
-            match generate_architecture_document(&input, gateway, context, constraint_validator)
-                .await
-            {
-                Ok(g) => g,
-                Err(failure) => return NodeExecutionResult::Failure(failure),
-            };
+        let generated = match generate_architecture_document(
+            &input,
+            gateway,
+            context,
+            constraint_validator,
+            rules,
+        )
+        .await
+        {
+            Ok(g) => g,
+            Err(failure) => return NodeExecutionResult::Failure(failure),
+        };
 
         let mut final_matrix = generated.matrix;
         let mut cost_delta = generated.cost_delta;
         if generated.classification.safety_affecting {
             let (updated_matrix, semantic_cost) = match maybe_run_semantic_alignment(
                 gateway,
-                &generated.rules,
+                rules,
                 &generated.model,
                 &generated.context_package,
                 &generated.architecture_doc,
@@ -157,7 +171,6 @@ struct GeneratedArchitecture {
     classification: ClassificationResult,
     matrix: TraceabilityMatrix,
     context_package: ContextPackage,
-    rules: ConstitutionalRules,
     model: ModelConfig,
     architecture_doc: String,
     cost_delta: TokenCost,
@@ -172,6 +185,7 @@ async fn generate_architecture_document(
     gateway: &LlmGateway,
     context: &ContextAssembler,
     constraint_validator: &ConstraintValidator,
+    rules: &ConstitutionalRules,
 ) -> Result<GeneratedArchitecture, NodeFailure> {
     let classification = extract_classification(input)?;
     let matrix = extract_traceability_matrix(input)?;
@@ -184,13 +198,12 @@ async fn generate_architecture_document(
 
     let context_package = assemble_node_context(context, input, &classification, &contracts).await;
 
-    let rules = node_constitutional_rules();
     let model = node_model_config();
     let generation_schema = architecture_output_schema();
 
     let response = call_architecture_llm(
         gateway,
-        &rules,
+        rules,
         ARCHITECTURE_GENERATION_SYSTEM_PROMPT,
         &context_package,
         &generation_schema,
@@ -211,7 +224,6 @@ async fn generate_architecture_document(
         classification,
         matrix,
         context_package,
-        rules,
         model,
         architecture_doc,
         cost_delta,
@@ -457,7 +469,7 @@ async fn maybe_run_semantic_alignment(
     let cost = response_cost(&response, model);
     let outcome = parse_semantic_response(&response);
     if !outcome.aligned {
-        return Err(semantic_alignment_failure());
+        return Err(semantic_alignment_failure(&outcome.findings));
     }
 
     let updated = update_traceability_matrix(
@@ -503,11 +515,12 @@ fn estimate_token_len(content: &str) -> u64 {
 struct SemanticOutcome {
     aligned: bool,
     traceability_entries: Vec<TraceabilityEntry>,
+    findings: Vec<AlignmentFinding>,
 }
 
 /// Parses the semantic-alignment response, failing closed (`aligned = false`,
-/// empty entries) on any malformed or missing field rather than panicking or
-/// fabricating a pass.
+/// empty entries/findings) on any malformed or missing field rather than
+/// panicking or fabricating a pass.
 fn parse_semantic_response(response: &StructuredResponse) -> SemanticOutcome {
     let content = response.content();
     let aligned = content
@@ -524,9 +537,15 @@ fn parse_semantic_response(response: &StructuredResponse) -> SemanticOutcome {
                 .collect()
         })
         .unwrap_or_default();
+    let findings = content
+        .get("findings")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| entries.iter().filter_map(parse_alignment_finding).collect())
+        .unwrap_or_default();
     SemanticOutcome {
         aligned,
         traceability_entries,
+        findings,
     }
 }
 
@@ -539,27 +558,40 @@ fn parse_traceability_entry(value: &serde_json::Value) -> Option<TraceabilityEnt
     })
 }
 
-// ─── Constitutional rules (node-internal, see module-level spec-gap notes) ──
+/// Parses a single `findings` array entry from the semantic-alignment critic
+/// response into an [`AlignmentFinding`] (Fix H3: embed full finding detail,
+/// not just a count, in failure messages). Returns `None` (skip, don't
+/// panic or fabricate) on any missing or unrecognised field — mirrors
+/// [`parse_traceability_entry`]'s fail-skip style.
+fn parse_alignment_finding(value: &serde_json::Value) -> Option<AlignmentFinding> {
+    let check_type = parse_alignment_check_type(value.get("check_type")?.as_str()?)?;
+    let misalignment = parse_misalignment_type(value.get("misalignment")?.as_str()?)?;
+    let description = value.get("description")?.as_str()?.to_string();
+    let blocking = value.get("blocking")?.as_bool()?;
+    Some(AlignmentFinding {
+        check_type,
+        misalignment,
+        description,
+        blocking,
+    })
+}
 
-const CONSTITUTIONAL_RULES_CONTENT: &str = "RULE: EXTERNAL_CONTENT_AS_DATA\n\
-     RULE: INJECTION_DETECTION\n\
-     RULE: SCOPE_BINDING\n\
-     RULE: UNAUTHORIZED_CAPABILITIES_PROHIBITED\n\
-     RULE: NO_CREDENTIAL_GENERATION\n";
+fn parse_alignment_check_type(value: &str) -> Option<AlignmentCheckType> {
+    match value {
+        "deterministic" => Some(AlignmentCheckType::Deterministic),
+        "llm_semantic" => Some(AlignmentCheckType::LlmSemantic),
+        _ => None,
+    }
+}
 
-/// Builds a self-contained, always-valid [`ConstitutionalRules`] value.
-///
-/// `execute` has no `ConstitutionalRules` parameter (see module-level
-/// spec-gap notes), so this node cannot receive the rules loaded once per
-/// step by `executor/steps.rs::load_constitutional_rules`. The returned value
-/// always satisfies `validate_constitutional_prompt`: `source_hash` is
-/// computed from `CONSTITUTIONAL_RULES_CONTENT` with the same algorithm, and
-/// `source_branch` is one of `ApprovedBranches::default()`'s approved names.
-fn node_constitutional_rules() -> ConstitutionalRules {
-    ConstitutionalRules {
-        content: CONSTITUTIONAL_RULES_CONTENT.to_string(),
-        source_hash: crate::sha256_hex(CONSTITUTIONAL_RULES_CONTENT.as_bytes()),
-        source_branch: BranchName::new("main").unwrap_or_else(|| unreachable!("non-empty literal")),
+fn parse_misalignment_type(value: &str) -> Option<MisalignmentType> {
+    match value {
+        "missing" => Some(MisalignmentType::Missing),
+        "extra" => Some(MisalignmentType::Extra),
+        "modified" => Some(MisalignmentType::Modified),
+        "ambiguous" => Some(MisalignmentType::Ambiguous),
+        "scope_exceeded" => Some(MisalignmentType::ScopeExceeded),
+        _ => None,
     }
 }
 
@@ -597,8 +629,9 @@ fn registry_failure(err: &RegistryError) -> NodeFailure {
 fn cross_domain_failure(findings: &[ConstraintFinding]) -> NodeFailure {
     node_failed(
         format!(
-            "cross-domain constraint validation found {} blocking violation(s)",
-            findings.len()
+            "cross-domain constraint validation found {} blocking violation(s): {}",
+            findings.len(),
+            findings_detail(findings)
         ),
         RetryPolicy::NonRetryable,
     )
@@ -607,19 +640,34 @@ fn cross_domain_failure(findings: &[ConstraintFinding]) -> NodeFailure {
 fn alignment_failure(findings: &[AlignmentFinding]) -> NodeFailure {
     node_failed(
         format!(
-            "deterministic alignment check found {} blocking finding(s)",
-            findings.len()
+            "deterministic alignment check found {} blocking finding(s): {}",
+            findings.len(),
+            findings_detail(findings)
         ),
         RetryPolicy::NonRetryable,
     )
 }
 
-fn semantic_alignment_failure() -> NodeFailure {
+fn semantic_alignment_failure(findings: &[AlignmentFinding]) -> NodeFailure {
     node_failed(
-        "LLM-semantic alignment check reported the architecture document as not aligned"
-            .to_string(),
+        format!(
+            "LLM-semantic alignment check reported the architecture document as not aligned: {}",
+            findings_detail(findings)
+        ),
         RetryPolicy::NonRetryable,
     )
+}
+
+/// Serialises `findings` in full for inclusion in a `NodeFailed.error`
+/// message (Fix H3, task #59 security follow-up): a human or automated
+/// retry/rework loop reading the error text needs the actual finding
+/// detail, not merely a count. Falls back to a human-readable placeholder
+/// (never panics) if serialisation itself fails.
+fn findings_detail<T: serde::Serialize>(findings: &[T]) -> String {
+    serde_json::to_string(findings).unwrap_or_else(|err| {
+        tracing::error!(error = %err, "failed to serialise findings for error message");
+        format!("{} finding(s) (serialisation failed)", findings.len())
+    })
 }
 
 fn llm_failure(err: &LlmError) -> NodeFailure {
