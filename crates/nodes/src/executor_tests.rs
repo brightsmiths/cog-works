@@ -2906,12 +2906,7 @@ async fn test_default_node_runner_run_architecture_forwards_caller_supplied_rule
     ));
     let config_loader = Arc::new(single_graph_loader(linear_graph(&["architecture"])));
     let llm_provider = Arc::new(RulesCapturingLlmProvider::new());
-    let executor = build_executor(
-        issues,
-        code_repository,
-        config_loader,
-        llm_provider.clone(),
-    );
+    let executor = build_executor(issues, code_repository, config_loader, llm_provider.clone());
     let config = cli_config(None);
     let runner = super::runner::DefaultNodeRunner::new(&executor, &config);
 

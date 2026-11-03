@@ -1929,7 +1929,10 @@ fn test_llm_error_injection_detected_display_omits_offending_text_second_distinc
 
     let message = err.to_string();
     assert!(!message.contains(MARKER), "got: {message}");
-    assert!(message.contains("domain service response"), "got: {message}");
+    assert!(
+        message.contains("domain service response"),
+        "got: {message}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2019,7 +2022,12 @@ fn test_structured_response_latency_ms_returns_configured_value_not_hardcoded() 
 /// coincidentally matching one of the mutant's hardcoded literals (`0`/`1`).
 #[test]
 fn test_structured_response_latency_ms_returns_configured_value_second_distinct_input() {
-    let response = StructuredResponse::new(serde_json::json!({}), TokenCount::new(1), TokenCount::new(1), 7);
+    let response = StructuredResponse::new(
+        serde_json::json!({}),
+        TokenCount::new(1),
+        TokenCount::new(1),
+        7,
+    );
 
     assert_eq!(response.latency_ms(), 7);
 }

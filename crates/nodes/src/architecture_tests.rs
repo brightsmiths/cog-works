@@ -99,14 +99,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 use pipeline::{
     AlignmentCheckType, AlignmentFinding, ApiVersion, ArtifactPath, BranchName, CacheError,
-    ChatMessage, ClassificationResult, CodeRepository, CommitSha, ConstitutionalRules, ContextPack,
-    ContextPackId, ContextPackTrigger, ConstraintFinding, DiagnosticSeverity, DirectoryEntry,
-    DomainServiceName, FileContent, GitHubOperationError, InterfaceDefinition, InterfaceId,
-    InterfaceRegistryLoader, LlmError, LlmProvider, LoadedContextPacks, MergedGuidance,
-    MisalignmentType, ModelConfig, NodeOutput, OutputSchema, PipelineRunId, PipelineState,
-    PyramidSummary, RepositoryId, Requirement, RequirementRow, RetryPolicy, SatisfactionScore,
-    StructuredResponse, SummaryCache, SummaryLevel, TaskType, TokenCount, TraceabilityMatrix,
-    TraceabilityStatus, ValidationResult, WorkItemId, merge_pack_guidance,
+    ChatMessage, ClassificationResult, CodeRepository, CommitSha, ConstitutionalRules,
+    ConstraintFinding, ContextPack, ContextPackId, ContextPackTrigger, DiagnosticSeverity,
+    DirectoryEntry, DomainServiceName, FileContent, GitHubOperationError, InterfaceDefinition,
+    InterfaceId, InterfaceRegistryLoader, LlmError, LlmProvider, LoadedContextPacks,
+    MergedGuidance, MisalignmentType, ModelConfig, NodeOutput, OutputSchema, PipelineRunId,
+    PipelineState, PyramidSummary, RepositoryId, Requirement, RequirementRow, RetryPolicy,
+    SatisfactionScore, StructuredResponse, SummaryCache, SummaryLevel, TaskType, TokenCount,
+    TraceabilityMatrix, TraceabilityStatus, ValidationResult, WorkItemId, merge_pack_guidance,
 };
 
 use crate::gateway::LlmGateway;
@@ -1094,7 +1094,10 @@ async fn test_execute_uses_caller_supplied_constitutional_rules_not_a_node_inter
 
     as_success(&outcome.result);
     let captured = outcome.llm.captured();
-    assert!(!captured.is_empty(), "the LLM provider must have been called");
+    assert!(
+        !captured.is_empty(),
+        "the LLM provider must have been called"
+    );
     let (system_prompt, _messages, _model_id) = &captured[0];
     assert!(
         system_prompt.contains("RULE_FIXTURE_MARKER_0xFEEDFACE_CALLER_SUPPLIED"),
@@ -1213,7 +1216,10 @@ fn test_cross_domain_failure_embeds_full_finding_details_second_distinct_input()
     let message = failure.error.to_string();
 
     assert!(message.contains("iface-second-marker-99"), "got: {message}");
-    assert!(message.contains("second_distinctive_field"), "got: {message}");
+    assert!(
+        message.contains("second_distinctive_field"),
+        "got: {message}"
+    );
 }
 
 /// `alignment_failure` must embed the finding's `description`, not just the
@@ -1320,9 +1326,19 @@ fn test_parse_semantic_response_parses_findings_array_into_alignment_findings() 
 
     let outcome = super::parse_semantic_response(&response);
 
-    assert_eq!(outcome.findings.len(), 1, "exactly one finding must be parsed");
-    assert_eq!(outcome.findings[0].check_type, AlignmentCheckType::LlmSemantic);
-    assert_eq!(outcome.findings[0].misalignment, MisalignmentType::ScopeExceeded);
+    assert_eq!(
+        outcome.findings.len(),
+        1,
+        "exactly one finding must be parsed"
+    );
+    assert_eq!(
+        outcome.findings[0].check_type,
+        AlignmentCheckType::LlmSemantic
+    );
+    assert_eq!(
+        outcome.findings[0].misalignment,
+        MisalignmentType::ScopeExceeded
+    );
     assert_eq!(
         outcome.findings[0].description,
         "DISTINCTIVE_PARSE_MARKER_0xABCDEF"
@@ -1413,7 +1429,7 @@ async fn test_execute_semantic_alignment_failure_message_includes_critics_findin
 /// surface in the resulting failure message.
 #[tokio::test]
 async fn test_execute_semantic_alignment_malformed_finding_object_does_not_panic_well_formed_survives()
-{
+ {
     const MARKER: &str = "WELL_FORMED_SURVIVES_END_TO_END_MARKER_0x11223344";
     let well_formed = semantic_finding_json(MARKER, true);
     let malformed = serde_json::json!({ "check_type": "llm_semantic", "misalignment": "missing" });
