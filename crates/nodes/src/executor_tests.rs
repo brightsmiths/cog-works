@@ -2817,6 +2817,169 @@ async fn test_default_node_runner_run_node_unrecognised_node_id_returns_failure_
     }
 }
 
+// ── Fix H1 end-to-end: DefaultNodeRunner::run_architecture forwards the ────────
+// ── caller-supplied rules all the way to ArchitectureNode::execute ─────────────
+//
+// `architecture_tests.rs` already proves `ArchitectureNode::execute` itself
+// uses its `rules` parameter rather than a node-internal constant. What that
+// suite cannot prove is that the *production* dispatch path — the real
+// `DefaultNodeRunner::run_node` implementation, not the `MockNodeRunner` test
+// seam used throughout the rest of this file — actually forwards the
+// `rules: &ConstitutionalRules` it receives into `run_architecture` and from
+// there into `ArchitectureNode::execute`, unmodified. `cargo mutants` cannot
+// surface a regression here either: every mutant generated against
+// `runner.rs` replaces a whole function body with `Default::default()`, which
+// fails to compile for every return type in this file (`NodeExecutionResult`,
+// `ContextAssembler`, `ConstraintValidator` have no `Default` impl) — found
+// during the #59 cycle-2 mutation audit (`cargo mutants --file
+// crates/nodes/src/executor/runner.rs` reports 12/12 mutants Unviable, 0
+// caught, 0 missed: no mutation coverage signal is possible for this file at
+// all with the default mutation genres).
+
+struct RulesCapturingLlmProvider {
+    captured_system_prompts: Mutex<Vec<String>>,
+}
+
+impl RulesCapturingLlmProvider {
+    fn new() -> Self {
+        Self {
+            captured_system_prompts: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn captured(&self) -> Vec<String> {
+        self.captured_system_prompts
+            .lock()
+            .expect("captured mutex poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl LlmProvider for RulesCapturingLlmProvider {
+    async fn complete(
+        &self,
+        system_prompt: &str,
+        _messages: &[ChatMessage],
+        _schema: &OutputSchema,
+        _model: &ModelConfig,
+    ) -> Result<StructuredResponse, LlmError> {
+        self.captured_system_prompts
+            .lock()
+            .expect("captured mutex poisoned")
+            .push(system_prompt.to_string());
+        Ok(StructuredResponse::new(
+            serde_json::json!({ "architecture_document": "# doc" }),
+            TokenCount::new(4),
+            TokenCount::new(2),
+            5,
+        ))
+    }
+}
+
+/// A valid `ConstitutionalRules` value with a distinctive content marker not
+/// present in [`valid_constitutional_rules`] — proves the production
+/// `DefaultNodeRunner::run_node("architecture", ...)` path forwards the exact
+/// `rules` value it was given, rather than some other value, all the way to
+/// the LLM provider's system prompt.
+fn distinctive_constitutional_rules() -> ConstitutionalRules {
+    let content = format!(
+        "{}RULE_FIXTURE_MARKER_0xDEADC0DE_DEFAULT_NODE_RUNNER\n",
+        valid_constitutional_rules_content()
+    );
+    ConstitutionalRules {
+        source_hash: sha256_hex(content.as_bytes()),
+        content,
+        source_branch: approved_branch(),
+    }
+}
+
+/// `DefaultNodeRunner::run_node` for the `"architecture"` node id must
+/// forward its `rules` parameter, unmodified, through `run_architecture` into
+/// `ArchitectureNode::execute` — proven by observing the distinctive rules
+/// marker in the system prompt the LLM provider actually receives.
+#[tokio::test]
+async fn test_default_node_runner_run_architecture_forwards_caller_supplied_rules_to_execute() {
+    let issues = Arc::new(MockIssueTracker::empty());
+    let code_repository = Arc::new(MockCodeRepository::with_content(
+        &valid_constitutional_rules_content(),
+    ));
+    let config_loader = Arc::new(single_graph_loader(linear_graph(&["architecture"])));
+    let llm_provider = Arc::new(RulesCapturingLlmProvider::new());
+    let executor = build_executor(
+        issues,
+        code_repository,
+        config_loader,
+        llm_provider.clone(),
+    );
+    let config = cli_config(None);
+    let runner = super::runner::DefaultNodeRunner::new(&executor, &config);
+
+    let mut artifacts = HashMap::new();
+    artifacts.insert(
+        "classification".to_string(),
+        serde_json::json!({
+            "task_type": "Feature",
+            "safety_affecting": false,
+            "estimated_scope": 1,
+            "affected_modules": [],
+        }),
+    );
+    artifacts.insert(
+        "traceability_matrix".to_string(),
+        serde_json::json!({
+            "rows": [],
+            "pipeline_run_id": PipelineRunId::new_random(),
+            "work_item_id": work_item(),
+            "complete": false,
+        }),
+    );
+
+    let input = NodeInput {
+        artifacts,
+        pipeline_state: PipelineState {
+            run_id: PipelineRunId::new_random(),
+            node_states: HashMap::new(),
+            active_parallel_branches: vec![],
+            cost_accumulator: TokenCost::zero(),
+        },
+        loaded_context_packs: LoadedContextPacks {
+            matched_packs: vec![],
+            merged_guidance: MergedGuidance::default(),
+            strictest_threshold: SatisfactionScore::new(0.0)
+                .expect("0.0 is always a valid SatisfactionScore"),
+        },
+    };
+
+    let result = runner
+        .run_node(
+            &node_id("architecture"),
+            input,
+            &distinctive_constitutional_rules(),
+        )
+        .await;
+
+    match &result {
+        NodeExecutionResult::Success(_) => {}
+        other => panic!("expected NodeExecutionResult::Success, got {other:?}"),
+    }
+
+    let captured = llm_provider.captured();
+    assert_eq!(
+        captured.len(),
+        1,
+        "the generation LLM call must have been made exactly once"
+    );
+    assert!(
+        captured[0].contains("RULE_FIXTURE_MARKER_0xDEADC0DE_DEFAULT_NODE_RUNNER"),
+        "the system prompt sent to the LLM provider via the real \
+         DefaultNodeRunner::run_node -> run_architecture -> \
+         ArchitectureNode::execute dispatch path must contain the \
+         caller-supplied rules' distinctive content verbatim; got: {:?}",
+        captured[0]
+    );
+}
+
 // ── Finding #3 (step-2 node-name allowlist): deliberately NOT implemented ──────
 //
 // The runner.rs:238 review comment's "ideally validate node names in step 2"

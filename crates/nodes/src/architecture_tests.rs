@@ -1104,6 +1104,56 @@ async fn test_execute_uses_caller_supplied_constitutional_rules_not_a_node_inter
     );
 }
 
+/// Same proof as
+/// [`test_execute_uses_caller_supplied_constitutional_rules_not_a_node_internal_constant`],
+/// but for the *second* `call_architecture_llm` call site —
+/// `maybe_run_semantic_alignment`'s LLM-semantic alignment call, only reached
+/// when `ClassificationResult::safety_affecting` is `true`. The other test
+/// only exercises the generation call site (`classification(false)`); without
+/// this test, a regression that re-passes `valid_constitutional_rules()` (or
+/// any other value distinct from the caller-supplied `rules` parameter) into
+/// the semantic-alignment call specifically would pass every other H1 test in
+/// this suite undetected — mutation testing cannot catch this either, since
+/// cargo-mutants has no "swap the argument identifier" mutation genre for a
+/// call site that already type-checks with either value.
+#[tokio::test]
+async fn test_execute_semantic_alignment_call_site_uses_caller_supplied_constitutional_rules() {
+    let outcome = run_with_rules(
+        classification(true),
+        initial_matrix(&["REQ-001"]),
+        empty_packs(),
+        RegistryBehavior::Success(vec![]),
+        vec![
+            Ok(architecture_response("# Architecture")),
+            Ok(semantic_response(
+                true,
+                0.97,
+                &[("REQ-001", "architecture.md#req-001")],
+            )),
+        ],
+        distinctive_constitutional_rules(),
+    )
+    .await;
+
+    as_success(&outcome.result);
+    let captured = outcome.llm.captured();
+    assert_eq!(
+        captured.len(),
+        2,
+        "a safety-affecting work item must make both the generation and \
+         semantic-alignment LLM calls"
+    );
+    let (semantic_system_prompt, _messages, _model_id) = &captured[1];
+    assert!(
+        semantic_system_prompt.contains("RULE_FIXTURE_MARKER_0xFEEDFACE_CALLER_SUPPLIED"),
+        "the system prompt sent to the LLM provider for the semantic-alignment \
+         call must also contain the caller-supplied rules' distinctive content \
+         verbatim — proving `maybe_run_semantic_alignment` forwards the same \
+         `rules` parameter `execute` received, rather than some other value; \
+         got: {semantic_system_prompt:?}"
+    );
+}
+
 // ─── Tier 2: Fix H3 — structured findings embedded in failure messages ─────
 //
 // Security Reviewer finding H3 (task #59 follow-up): `cross_domain_failure`,

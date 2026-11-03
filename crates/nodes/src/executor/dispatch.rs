@@ -333,3 +333,7 @@ async fn join_all_local<'a, T>(
     }
     .await
 }
+
+#[cfg(test)]
+#[path = "dispatch_tests.rs"]
+mod tests;
