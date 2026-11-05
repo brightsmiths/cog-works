@@ -330,6 +330,15 @@ impl LlmGateway {
 /// H2, task #59 follow-up) to keep `call` within the project's function-
 /// length standard; this is a single-call-site helper, not a reusable
 /// abstraction shared across modules.
+///
+/// Scope is deliberately limited to `context.items` — the untrusted-content
+/// channel (issue bodies, context packs, domain-service output). The system
+/// message (`call`'s step 4: constitutional content + node system prompt) is
+/// never scanned, because both inputs are trusted, version-controlled/
+/// operator-reviewed content per the trust-boundary table in
+/// `docs/spec/security.md`, not attacker-reachable text. See
+/// `pipeline::detect_injection`'s own doc comment ("do not call on trusted
+/// sources") for the same rule stated at the detector's call-site contract.
 fn scan_for_prompt_injection(context: &ContextPackage) -> Result<(), LlmError> {
     for item in &context.items {
         let source_label = item

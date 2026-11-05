@@ -264,6 +264,13 @@ async fn load_registry_contracts(
 /// `InterfaceMap` (see module-level spec-gap notes: this node has no
 /// `DomainServiceClient::extract_interfaces` source), returning only the
 /// blocking findings.
+///
+/// This is "fail-closed" only in the sense that it never fabricates a
+/// comparison; the practical effect is either vacuous (empty registry) or an
+/// unconditional blocking failure on any populated registry — not a genuine
+/// cross-domain check. Tracked as Medium security finding #1 and Spec Gap #3
+/// in `.llm/findings/architecture-node.md`; an Architect decision on the real
+/// `InterfaceMap` source is tracked in beads issue `architecture-node-p0k`.
 fn cross_domain_blocking_findings(contracts: &[InterfaceDefinition]) -> Vec<ConstraintFinding> {
     let extracted = InterfaceMap { entries: vec![] };
     validate_cross_domain_constraints(contracts, &extracted)
@@ -376,6 +383,16 @@ fn response_cost(response: &StructuredResponse, model: &ModelConfig) -> TokenCos
 /// Returns an empty string (never fabricates content) if the field is absent
 /// or not a string — a malformed or schema-mismatched response must not be
 /// reported as a successfully populated `architecture_doc`.
+///
+/// In practice this fallback is defensive-only, not reachable through a
+/// conformant provider: `LlmProvider::complete`'s contract (`pipeline::tools`)
+/// guarantees that an `Ok(StructuredResponse)` already satisfies `schema`
+/// (here, `architecture_output_schema()`'s `required: ["architecture_document"]`
+/// with `type: "string"`), so a non-conformant provider response would
+/// surface as `Err(LlmError::SchemaValidationFailed)` before reaching this
+/// function. A schema-valid *empty* string (the LLM legitimately returning
+/// `""`) is a distinct, allowed case this function intentionally passes
+/// through rather than treating as an error.
 fn extract_architecture_document(response: &StructuredResponse) -> String {
     response
         .content()
