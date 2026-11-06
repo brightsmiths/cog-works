@@ -102,8 +102,8 @@ Core orchestration domain — domain concepts, newtype identifiers, shared primi
 | `IssueTracker` | trait | `crates/pipeline/src/github.rs:495` | trait in crates/pipeline/src/github.rs | core, pipeline, trait |
 | `Label` | struct | `crates/pipeline/src/github.rs:299` | struct in crates/pipeline/src/github.rs | core, pipeline |
 | `LlmCallRecord` | struct | `crates/pipeline/src/audit.rs:44` | struct in crates/pipeline/src/audit.rs | core, pipeline |
-| `LlmError` | enum | `crates/pipeline/src/tools.rs:291` | enum in crates/pipeline/src/tools.rs | core, pipeline |
-| `LlmProvider` | trait | `crates/pipeline/src/tools.rs:393` | trait in crates/pipeline/src/tools.rs | core, pipeline, trait |
+| `LlmError` | enum | `crates/pipeline/src/tools.rs:302` | enum in crates/pipeline/src/tools.rs; gained `InjectionDetected { source, offending_text, pattern }` (task #59 security follow-up H2); `Display`/`Error` are hand-implemented, not `#[derive(thiserror::Error)]`, because the `source` field is a plain `String` label | core, pipeline |
+| `LlmProvider` | trait | `crates/pipeline/src/tools.rs:454` | trait in crates/pipeline/src/tools.rs | core, pipeline, trait |
 | `LoadedContextPacks` | struct | `crates/pipeline/src/context.rs:333` | struct in crates/pipeline/src/context.rs | core, pipeline |
 | `MergedGuidance` | struct | `crates/pipeline/src/context.rs:316` | struct in crates/pipeline/src/context.rs | core, pipeline |
 | `merge_pack_guidance` | fn | `crates/pipeline/src/context.rs` | Union-merges `safe_patterns`, `anti_patterns`, and `required_artifacts` from all provided `ContextPack` slices. `required_artifacts` are deduplicated by path after sorting. An empty slice returns an empty `MergedGuidance`. Infallible, pure. | context, assembly, pipeline |

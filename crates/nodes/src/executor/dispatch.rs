@@ -11,8 +11,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use pipeline::{
-    BudgetAcquisition, GateConfig, GateStatus, MergedGuidance, NextAction, NodeGate, NodeId,
-    PipelineGraph, PipelineState, SatisfactionScore, compute_eligible_nodes,
+    BudgetAcquisition, ConstitutionalRules, GateConfig, GateStatus, MergedGuidance, NextAction,
+    NodeGate, NodeId, PipelineGraph, PipelineState, SatisfactionScore, compute_eligible_nodes,
 };
 
 use crate::node::{BudgetTracker, NodeExecutionResult, NodeInput};
@@ -196,7 +196,7 @@ async fn execute_single(
         return StepResult::Halted(err);
     }
     let input = build_node_input(state);
-    match runner.run_node(&id, input).await {
+    match runner.run_node(&id, input, &ctx.rules).await {
         NodeExecutionResult::Success(output) => {
             apply_completions_and_persist(ctx, state, gate_config, vec![(id, output)]).await
         }
@@ -223,7 +223,7 @@ async fn execute_parallel(
     }
 
     state.active_parallel_branches.push(ids.clone());
-    let outcomes = run_batch_concurrently(runner, state, &ids).await;
+    let outcomes = run_batch_concurrently(runner, state, &ids, &ctx.rules).await;
     state.active_parallel_branches.retain(|b| b != &ids);
 
     let mut completions = Vec::with_capacity(outcomes.len());
@@ -246,6 +246,7 @@ async fn run_batch_concurrently(
     runner: &dyn NodeRunner,
     state: &PipelineState,
     ids: &[NodeId],
+    rules: &ConstitutionalRules,
 ) -> Vec<(NodeId, NodeExecutionResult)> {
     let futures: Vec<NodeFuture<'_>> = ids
         .iter()
@@ -253,7 +254,7 @@ async fn run_batch_concurrently(
             let id = id.clone();
             let input = build_node_input(state);
             let fut = async move {
-                let result = runner.run_node(&id, input).await;
+                let result = runner.run_node(&id, input, rules).await;
                 (id, result)
             };
             Box::pin(fut) as NodeFuture<'_>
@@ -332,3 +333,7 @@ async fn join_all_local<'a, T>(
     }
     .await
 }
+
+#[cfg(test)]
+#[path = "dispatch_tests.rs"]
+mod tests;

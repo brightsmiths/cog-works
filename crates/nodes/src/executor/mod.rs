@@ -167,31 +167,11 @@ impl PipelineExecutor {
 
 // ─── Shared hashing helpers ───────────────────────────────────────────────────
 //
-// Used by both `steps` (constitutional-rules content hash, step 1) and this
-// module's `run_step_with_runner` (pipeline-graph hash, step 4).
-
-/// Computes a SHA-256 hex digest.
-///
-/// Mirrors `pipeline::security`'s private hashing helper (same crate, same
-/// algorithm) so `ConstitutionalRules::source_hash` and
-/// `PipelineStateComment::graph_hash` are computed consistently even though
-/// `pipeline::security`'s own helper is not exported. This duplication is
-/// tracked as a deferred cross-crate finding — see
-/// `.llm/findings/pipeline-executor-57.md`.
-///
-/// `pub(crate)` (rather than module-private) so test fixtures elsewhere in
-/// this crate (`gateway_tests.rs`, `intake_tests.rs`) can share this single
-/// implementation instead of each defining their own copy.
-pub(crate) fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    use std::fmt::Write as _;
-    Sha256::digest(data)
-        .iter()
-        .fold(String::with_capacity(64), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
-}
+// `sha256_hex` is used by both `steps` (constitutional-rules content hash,
+// step 1) and this module's `run_step_with_runner` (pipeline-graph hash, step
+// 4); it now lives in `crate::sha256_hex` (`lib.rs`) as the single
+// `nodes`-crate-wide hashing helper (see that function's doc comment for the
+// deferred cross-crate duplication with `pipeline::security`).
 
 /// Canonicalises a [`PipelineGraph`] to the JSON text whose hash becomes
 /// `PipelineStateComment::graph_hash`.
@@ -278,7 +258,7 @@ pub(crate) async fn run_step_with_runner(
             Err(halted) => return halted,
         };
 
-    let graph_hash = sha256_hex(canonical_graph_json(&graph).as_bytes());
+    let graph_hash = crate::sha256_hex(canonical_graph_json(&graph).as_bytes());
     let ctx = StepContext {
         executor,
         work_item_id,

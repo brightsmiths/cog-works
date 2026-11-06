@@ -132,8 +132,11 @@ use pipeline::{
 use pipeline::{DependencyGraph, DependencyResult};
 
 use crate::node::{CliConfig, NodeExecutionResult, NodeFailure, NodeInput};
+use crate::sha256_hex;
 
-use super::{NodeRunner, PipelineExecutor, StepResult, run_step, run_step_with_runner, sha256_hex};
+use super::{NodeRunner, PipelineExecutor, StepResult, run_step, run_step_with_runner};
+
+// ─── Small local helpers ───────────────────────────────────────────────────────
 
 /// Computes the `graph_hash` this test file expects `run_step_with_runner` to
 /// derive from `graph`. See spec-gap note #1 at the top of this file: every
@@ -893,6 +896,13 @@ struct MockNodeRunner {
     calls: Mutex<Vec<NodeId>>,
     delay: Duration,
     intervals: Mutex<Vec<(Instant, Instant)>>,
+    /// Records the `content` of the `ConstitutionalRules` value each
+    /// `run_node` call actually received (Fix H1, task #59 follow-up:
+    /// `run_node` gained a `rules: &ConstitutionalRules` parameter that
+    /// `dispatch_action`/`execute_single`/`execute_parallel`/
+    /// `run_batch_concurrently` must thread through as `&ctx.rules` — the
+    /// genuinely loaded rules, not some placeholder).
+    rules_seen: Mutex<Vec<String>>,
 }
 
 impl MockNodeRunner {
@@ -902,6 +912,7 @@ impl MockNodeRunner {
             calls: Mutex::new(vec![]),
             delay: Duration::ZERO,
             intervals: Mutex::new(vec![]),
+            rules_seen: Mutex::new(vec![]),
         }
     }
 
@@ -917,12 +928,24 @@ impl MockNodeRunner {
     fn intervals(&self) -> Vec<(Instant, Instant)> {
         self.intervals.lock().unwrap().clone()
     }
+
+    /// Every `ConstitutionalRules::content` value `run_node` was called with,
+    /// in call order. See the `rules_seen` field doc.
+    fn rules_seen(&self) -> Vec<String> {
+        self.rules_seen.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
 impl NodeRunner for MockNodeRunner {
-    async fn run_node(&self, id: &NodeId, _input: NodeInput) -> NodeExecutionResult {
+    async fn run_node(
+        &self,
+        id: &NodeId,
+        _input: NodeInput,
+        rules: &ConstitutionalRules,
+    ) -> NodeExecutionResult {
         self.calls.lock().unwrap().push(id.clone());
+        self.rules_seen.lock().unwrap().push(rules.content.clone());
 
         let start = Instant::now();
         if !self.delay.is_zero() {
@@ -1289,6 +1312,120 @@ async fn test_run_step_with_runner_fresh_run_dispatches_first_node_via_runner() 
         intake_state.status,
         NodeStatus::Completed,
         "the dispatched node must be marked Completed after a successful run"
+    );
+}
+
+// ─── Fix H1 — real ConstitutionalRules threaded through NodeRunner::run_node ──
+//
+// Security Reviewer finding H1 (task #59 follow-up): `NodeRunner::run_node`
+// gained a `rules: &ConstitutionalRules` parameter, and `dispatch_action`'s
+// `execute_single`/`execute_parallel`/`run_batch_concurrently` helpers must
+// pass `&ctx.rules` — the rules genuinely loaded by
+// `steps::load_constitutional_rules` at the top of `run_step_with_runner` —
+// through to every `run_node` call, not some default-constructed
+// placeholder.
+
+/// `run_node` must receive the exact `ConstitutionalRules` content that was
+/// loaded for this step (via the mock `CodeRepository`'s configured file
+/// content), proving the dispatch path forwards the real, once-per-step
+/// loaded rules rather than a placeholder or empty value.
+#[tokio::test]
+async fn test_run_step_with_runner_execute_single_passes_loaded_rules_to_run_node() {
+    let graph = linear_graph(&["solo"]);
+    let issues = Arc::new(MockIssueTracker::empty());
+    let code_repository = Arc::new(MockCodeRepository::with_content(
+        &valid_constitutional_rules_content(),
+    ));
+    let config_loader = Arc::new(single_graph_loader(graph));
+    let llm_provider = Arc::new(MockLlmProvider::new());
+    let executor = build_executor(issues, code_repository, config_loader, llm_provider);
+
+    let mut responses = HashMap::new();
+    responses.insert(node_id("solo"), node_output("solo-output"));
+    let runner = MockNodeRunner::new(responses);
+
+    let config = cli_config(None);
+    let result = run_step_with_runner(&executor, work_item(), &config, &runner).await;
+
+    assert!(
+        matches!(result, StepResult::Completed { .. }),
+        "expected StepResult::Completed, got {result:?}"
+    );
+    let rules_seen = runner.rules_seen();
+    assert_eq!(
+        rules_seen.len(),
+        1,
+        "run_node must have been called exactly once with a rules argument"
+    );
+    assert_eq!(
+        rules_seen[0],
+        valid_constitutional_rules_content(),
+        "run_node must receive the genuinely loaded ConstitutionalRules content, \
+         not a default-constructed or empty placeholder"
+    );
+}
+
+/// `ExecuteParallel` dispatch (`execute_parallel`/`run_batch_concurrently`)
+/// must also forward the loaded rules to every node in the batch — not only
+/// the single-node (`execute_single`) path. Resumes from a prior state in
+/// which `root` is already `Completed`, so that `branch-b` and `branch-c`
+/// (the two fan-out successors) become eligible together and are dispatched
+/// via `ExecuteParallel`, matching the setup used by
+/// `test_run_step_with_runner_parallel_branch_executes_concurrently_and_preserves_input_order`.
+#[tokio::test]
+async fn test_run_step_with_runner_execute_parallel_passes_loaded_rules_to_every_batch_node() {
+    let graph = fan_out_graph();
+    let hash = graph_hash(&graph);
+    let run_id = PipelineRunId::new_random();
+    let wi = work_item();
+
+    let mut node_states = HashMap::new();
+    node_states.insert(node_id("root"), completed_node_state(1, 0));
+    let prior_comment = issue_comment(
+        1,
+        serde_json::to_string(&state_comment(
+            run_id,
+            wi,
+            node_states,
+            vec![],
+            TokenCost::zero(),
+            hash,
+        ))
+        .expect("state comment serialises"),
+    );
+
+    let issues = Arc::new(MockIssueTracker::new(vec![prior_comment]));
+    let code_repository = Arc::new(MockCodeRepository::with_content(
+        &valid_constitutional_rules_content(),
+    ));
+    let config_loader = Arc::new(single_graph_loader(graph));
+    let llm_provider = Arc::new(MockLlmProvider::new());
+    let executor = build_executor(issues, code_repository, config_loader, llm_provider);
+
+    let mut responses = HashMap::new();
+    responses.insert(node_id("branch-b"), node_output("B"));
+    responses.insert(node_id("branch-c"), node_output("C"));
+    let runner = MockNodeRunner::new(responses);
+
+    let config = cli_config(None);
+    let result = run_step_with_runner(&executor, wi, &config, &runner).await;
+
+    assert!(
+        matches!(result, StepResult::CompletedParallel { .. }),
+        "expected StepResult::CompletedParallel, got {result:?}"
+    );
+    let rules_seen = runner.rules_seen();
+    assert_eq!(
+        rules_seen.len(),
+        2,
+        "both batch nodes must have been dispatched via run_node"
+    );
+    assert!(
+        rules_seen
+            .iter()
+            .all(|content| content == &valid_constitutional_rules_content()),
+        "every node dispatched in this step, including under ExecuteParallel, must \
+         receive the same genuinely loaded ConstitutionalRules content; got {rules_seen:?}"
     );
 }
 
@@ -2644,7 +2781,11 @@ async fn test_default_node_runner_run_node_unrecognised_node_id_returns_failure_
     };
 
     let result = runner
-        .run_node(&node_id("totally-unrecognised-node"), input)
+        .run_node(
+            &node_id("totally-unrecognised-node"),
+            input,
+            &valid_constitutional_rules(),
+        )
         .await;
 
     match result {
@@ -2674,6 +2815,164 @@ async fn test_default_node_runner_run_node_unrecognised_node_id_returns_failure_
              for an unrecognised node id, not panic (and not Success); got {other:?}"
         ),
     }
+}
+
+// ── Fix H1 end-to-end: DefaultNodeRunner::run_architecture forwards the ────────
+// ── caller-supplied rules all the way to ArchitectureNode::execute ─────────────
+//
+// `architecture_tests.rs` already proves `ArchitectureNode::execute` itself
+// uses its `rules` parameter rather than a node-internal constant. What that
+// suite cannot prove is that the *production* dispatch path — the real
+// `DefaultNodeRunner::run_node` implementation, not the `MockNodeRunner` test
+// seam used throughout the rest of this file — actually forwards the
+// `rules: &ConstitutionalRules` it receives into `run_architecture` and from
+// there into `ArchitectureNode::execute`, unmodified. `cargo mutants` cannot
+// surface a regression here either: every mutant generated against
+// `runner.rs` replaces a whole function body with `Default::default()`, which
+// fails to compile for every return type in this file (`NodeExecutionResult`,
+// `ContextAssembler`, `ConstraintValidator` have no `Default` impl) — found
+// during the #59 cycle-2 mutation audit (`cargo mutants --file
+// crates/nodes/src/executor/runner.rs` reports 12/12 mutants Unviable, 0
+// caught, 0 missed: no mutation coverage signal is possible for this file at
+// all with the default mutation genres).
+
+struct RulesCapturingLlmProvider {
+    captured_system_prompts: Mutex<Vec<String>>,
+}
+
+impl RulesCapturingLlmProvider {
+    fn new() -> Self {
+        Self {
+            captured_system_prompts: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn captured(&self) -> Vec<String> {
+        self.captured_system_prompts
+            .lock()
+            .expect("captured mutex poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl LlmProvider for RulesCapturingLlmProvider {
+    async fn complete(
+        &self,
+        system_prompt: &str,
+        _messages: &[ChatMessage],
+        _schema: &OutputSchema,
+        _model: &ModelConfig,
+    ) -> Result<StructuredResponse, LlmError> {
+        self.captured_system_prompts
+            .lock()
+            .expect("captured mutex poisoned")
+            .push(system_prompt.to_string());
+        Ok(StructuredResponse::new(
+            serde_json::json!({ "architecture_document": "# doc" }),
+            TokenCount::new(4),
+            TokenCount::new(2),
+            5,
+        ))
+    }
+}
+
+/// A valid `ConstitutionalRules` value with a distinctive content marker not
+/// present in [`valid_constitutional_rules`] — proves the production
+/// `DefaultNodeRunner::run_node("architecture", ...)` path forwards the exact
+/// `rules` value it was given, rather than some other value, all the way to
+/// the LLM provider's system prompt.
+fn distinctive_constitutional_rules() -> ConstitutionalRules {
+    let content = format!(
+        "{}RULE_FIXTURE_MARKER_0xDEADC0DE_DEFAULT_NODE_RUNNER\n",
+        valid_constitutional_rules_content()
+    );
+    ConstitutionalRules {
+        source_hash: sha256_hex(content.as_bytes()),
+        content,
+        source_branch: approved_branch(),
+    }
+}
+
+/// `DefaultNodeRunner::run_node` for the `"architecture"` node id must
+/// forward its `rules` parameter, unmodified, through `run_architecture` into
+/// `ArchitectureNode::execute` — proven by observing the distinctive rules
+/// marker in the system prompt the LLM provider actually receives.
+#[tokio::test]
+async fn test_default_node_runner_run_architecture_forwards_caller_supplied_rules_to_execute() {
+    let issues = Arc::new(MockIssueTracker::empty());
+    let code_repository = Arc::new(MockCodeRepository::with_content(
+        &valid_constitutional_rules_content(),
+    ));
+    let config_loader = Arc::new(single_graph_loader(linear_graph(&["architecture"])));
+    let llm_provider = Arc::new(RulesCapturingLlmProvider::new());
+    let executor = build_executor(issues, code_repository, config_loader, llm_provider.clone());
+    let config = cli_config(None);
+    let runner = super::runner::DefaultNodeRunner::new(&executor, &config);
+
+    let mut artifacts = HashMap::new();
+    artifacts.insert(
+        "classification".to_string(),
+        serde_json::json!({
+            "task_type": "Feature",
+            "safety_affecting": false,
+            "estimated_scope": 1,
+            "affected_modules": [],
+        }),
+    );
+    artifacts.insert(
+        "traceability_matrix".to_string(),
+        serde_json::json!({
+            "rows": [],
+            "pipeline_run_id": PipelineRunId::new_random(),
+            "work_item_id": work_item(),
+            "complete": false,
+        }),
+    );
+
+    let input = NodeInput {
+        artifacts,
+        pipeline_state: PipelineState {
+            run_id: PipelineRunId::new_random(),
+            node_states: HashMap::new(),
+            active_parallel_branches: vec![],
+            cost_accumulator: TokenCost::zero(),
+        },
+        loaded_context_packs: LoadedContextPacks {
+            matched_packs: vec![],
+            merged_guidance: MergedGuidance::default(),
+            strictest_threshold: SatisfactionScore::new(0.0)
+                .expect("0.0 is always a valid SatisfactionScore"),
+        },
+    };
+
+    let result = runner
+        .run_node(
+            &node_id("architecture"),
+            input,
+            &distinctive_constitutional_rules(),
+        )
+        .await;
+
+    match &result {
+        NodeExecutionResult::Success(_) => {}
+        other => panic!("expected NodeExecutionResult::Success, got {other:?}"),
+    }
+
+    let captured = llm_provider.captured();
+    assert_eq!(
+        captured.len(),
+        1,
+        "the generation LLM call must have been made exactly once"
+    );
+    assert!(
+        captured[0].contains("RULE_FIXTURE_MARKER_0xDEADC0DE_DEFAULT_NODE_RUNNER"),
+        "the system prompt sent to the LLM provider via the real \
+         DefaultNodeRunner::run_node -> run_architecture -> \
+         ArchitectureNode::execute dispatch path must contain the \
+         caller-supplied rules' distinctive content verbatim; got: {:?}",
+        captured[0]
+    );
 }
 
 // ── Finding #3 (step-2 node-name allowlist): deliberately NOT implemented ──────

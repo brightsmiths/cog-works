@@ -36,7 +36,11 @@
 // These attributes are removed when the stubs are implemented (PR implementation phase).
 #![allow(dead_code, unused_variables)]
 
+use std::fmt::Write as _;
 use std::sync::Mutex;
+
+use pipeline::OutputSchema;
+use sha2::{Digest, Sha256};
 
 pub mod architecture;
 pub mod code_generation;
@@ -66,6 +70,35 @@ pub(crate) fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, 
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Computes the SHA-256 digest of `data` as a 64-character lowercase hex string.
+///
+/// Single `nodes`-crate-wide hashing helper, used wherever a content hash is
+/// needed (e.g. `ConstitutionalRules::source_hash`, `PipelineStateComment::graph_hash`).
+/// Mirrors `pipeline::security`'s own private hashing helper (same algorithm);
+/// that duplication is a deliberate cross-crate boundary — see
+/// `.llm/findings/architecture-node.md` under "Deferred Issues" — since
+/// `pipeline::security`'s helper is not exported for reuse outside that crate.
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
+    Sha256::digest(data)
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
+/// Builds an [`OutputSchema`] from a literal, hand-written JSON schema value.
+///
+/// Every call site in this crate passes a `serde_json::json!` literal that is
+/// structurally guaranteed to be a valid JSON object, so `OutputSchema::new`
+/// cannot actually fail in practice; this helper centralises the
+/// `unwrap_or_else(|| unreachable!(..))` tail that was previously repeated at
+/// every schema-builder call site (`architecture.rs`, `executor/completion.rs`).
+pub(crate) fn literal_output_schema(schema: serde_json::Value) -> OutputSchema {
+    OutputSchema::new(schema)
+        .unwrap_or_else(|| unreachable!("literal schema is always a valid JSON object"))
 }
 
 // ─── Re-exports ───────────────────────────────────────────────────────────────

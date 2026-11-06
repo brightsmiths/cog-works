@@ -32,8 +32,8 @@ use std::time::{Duration, Instant};
 
 use pipeline::{
     ApprovedBranches, ChatMessage, ConstitutionalError, ConstitutionalRules, ContextPackage,
-    LlmError, LlmProvider, ModelConfig, OutputSchema, PromptAssembly, StructuredResponse,
-    validate_constitutional_prompt,
+    InjectionDetectionResult, LlmError, LlmProvider, ModelConfig, OutputSchema, PromptAssembly,
+    StructuredResponse, detect_injection, validate_constitutional_prompt,
 };
 use tracing::instrument;
 
@@ -243,6 +243,9 @@ impl LlmGateway {
     /// * `LlmError::SchemaValidationFailed` — The completion did not conform to `schema`.
     /// * `LlmError::NetworkError` — Transport failure before a response was received.
     /// * `LlmError::ContextWindowExceeded` — The assembled prompt exceeds the model's context window.
+    /// * `LlmError::InjectionDetected` — A context item's content matched a prompt-injection
+    ///   pattern (Security Reviewer finding H2, task #59 follow-up); the provider is never
+    ///   called on this path.
     ///
     /// See `docs/spec/interfaces/nodes.md` §LlmGateway::call.
     #[instrument(skip_all, fields(model_id = %model.model_id))]
@@ -274,21 +277,27 @@ impl LlmGateway {
             }
         }
 
-        // Step 3: assemble the system message (constitutional content leading).
+        // Step 3: scan every context item for prompt-injection patterns
+        // before any of it is assembled into a prompt or sent to the
+        // provider (Security Reviewer finding H2, task #59 follow-up).
+        // Fails closed on the first match — the provider is never called.
+        scan_for_prompt_injection(context)?;
+
+        // Step 4: assemble the system message (constitutional content leading).
         let system = format!(
             "{}\n\n{}",
             prompt.constitutional_content(),
             prompt.system_prompt()
         );
 
-        // Step 4: convert context items to user messages, skipping empty content.
+        // Step 5: convert context items to user messages, skipping empty content.
         let messages: Vec<ChatMessage> = context
             .items
             .iter()
             .filter_map(|item| ChatMessage::user(item.content.clone()))
             .collect();
 
-        // Step 5: the actual HTTP call — no lock held.
+        // Step 6: the actual HTTP call — no lock held.
         let result = self
             .provider
             .complete(&system, &messages, schema, model)
@@ -296,22 +305,61 @@ impl LlmGateway {
 
         match result {
             Ok(response) => {
-                // Step 6: clear any stale backoff flag on success.
+                // Step 7: clear any stale backoff flag on success.
                 let mut guard = crate::lock_or_recover(&self.rate_limit);
                 guard.backoff_active = false;
                 Ok(response)
             }
             Err(LlmError::RateLimited { retry_after }) => {
-                // Step 7: record the new backoff window and propagate.
+                // Step 8: record the new backoff window and propagate.
                 let mut guard = crate::lock_or_recover(&self.rate_limit);
                 guard.backoff_active = true;
                 guard.window_reset = Some(Instant::now() + retry_after.unwrap_or(DEFAULT_BACKOFF));
                 Err(LlmError::RateLimited { retry_after })
             }
-            // Step 8: any other error is propagated unchanged.
+            // Step 9: any other error is propagated unchanged.
             Err(other) => Err(other),
         }
     }
+}
+
+/// Scans every item in `context` for prompt-injection patterns, failing
+/// closed with [`LlmError::InjectionDetected`] on the first match.
+///
+/// Extracted from [`LlmGateway::call`]'s step 3 (Security Reviewer finding
+/// H2, task #59 follow-up) to keep `call` within the project's function-
+/// length standard; this is a single-call-site helper, not a reusable
+/// abstraction shared across modules.
+///
+/// Scope is deliberately limited to `context.items` — the untrusted-content
+/// channel (issue bodies, context packs, domain-service output). The system
+/// message (`call`'s step 4: constitutional content + node system prompt) is
+/// never scanned, because both inputs are trusted, version-controlled/
+/// operator-reviewed content per the trust-boundary table in
+/// `docs/spec/security.md`, not attacker-reachable text. See
+/// `pipeline::detect_injection`'s own doc comment ("do not call on trusted
+/// sources") for the same rule stated at the detector's call-site contract.
+fn scan_for_prompt_injection(context: &ContextPackage) -> Result<(), LlmError> {
+    for item in &context.items {
+        let source_label = item
+            .source_path
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "context item".to_string());
+        if let InjectionDetectionResult::InjectionDetected {
+            source,
+            offending_text,
+            pattern,
+        } = detect_injection(&item.content, &source_label)
+        {
+            return Err(LlmError::InjectionDetected {
+                source,
+                offending_text,
+                pattern,
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

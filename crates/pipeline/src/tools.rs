@@ -50,7 +50,6 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 use crate::{
     identifiers::{SkillName, ToolName},
@@ -286,21 +285,31 @@ impl StructuredResponse {
 
 /// Errors returned by [`LlmProvider::complete`].
 ///
+/// # Design note: manual `Display`/`Error` impl, not `#[derive(thiserror::Error)]`
+///
+/// [`InjectionDetected`](Self::InjectionDetected) has a field literally named
+/// `source` (required by its call sites and tests), but it is a plain
+/// `String` label, not a nested error value. `thiserror`'s derive macro
+/// unconditionally treats any field named `source` as the
+/// [`std::error::Error::source`] return value — generating code that
+/// requires the field's type to implement [`std::error::Error`] — regardless
+/// of any attribute. A `String` field cannot satisfy that bound, so this
+/// enum implements `Display`/`Error` by hand instead of via the derive
+/// macro, preserving every other variant's exact `Display` wording.
+///
 /// See `docs/spec/interfaces/domain-traits.md` §LlmError.
-#[derive(Debug, Error, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum LlmError {
     /// The provider is enforcing a rate limit.
     ///
     /// The `retry_after` duration is derived from `Retry-After` or
     /// `x-ratelimit-reset` response headers when available.
-    #[error("LLM provider rate-limited; retry after {retry_after:?}")]
     RateLimited {
         /// Minimum duration to wait before retrying, if known.
         retry_after: Option<std::time::Duration>,
     },
 
     /// The provider returned a non-2xx HTTP status code.
-    #[error("LLM API error (HTTP {status_code}): {message}")]
     ApiError {
         /// HTTP status code from the provider response.
         status_code: u16,
@@ -314,7 +323,6 @@ pub enum LlmError {
     /// The raw completion is included for audit trail and debug purposes.
     /// Callers must not use the `content` field for domain logic — they
     /// should treat this as a failure and apply their retry budget.
-    #[error("LLM completion failed schema validation: {violations:?}")]
     SchemaValidationFailed {
         /// Raw completion content that failed validation.
         content: serde_json::Value,
@@ -323,7 +331,6 @@ pub enum LlmError {
     },
 
     /// A transport-level error occurred before the provider returned a response.
-    #[error("LLM provider network error: {message}")]
     NetworkError {
         /// Description of the network failure.
         message: String,
@@ -333,14 +340,63 @@ pub enum LlmError {
     ///
     /// Callers should reduce the context package (lower summary levels or
     /// fewer items) before retrying.
-    #[error("Prompt context window exceeded: requested {requested} tokens, model limit is {limit}")]
     ContextWindowExceeded {
         /// Number of tokens in the assembled prompt.
         requested: TokenCount,
         /// Maximum tokens the model accepts.
         limit: TokenCount,
     },
+
+    /// A prompt-injection pattern was detected in a piece of untrusted
+    /// context content before it was ever sent to the LLM provider (Security
+    /// Reviewer finding H2, task #59 follow-up: `pipeline::detect_injection`
+    /// is wired into `nodes::LlmGateway::call`).
+    ///
+    /// `Display` deliberately omits `offending_text` — the error message
+    /// must not itself re-amplify the injected text in any place that could
+    /// re-interpret it (e.g. a log sink or a downstream prompt).
+    InjectionDetected {
+        /// Human-readable label identifying the source of the content.
+        source: String,
+        /// The specific text span that triggered detection. Not included in
+        /// `Display` output; retained for structured audit records only.
+        offending_text: String,
+        /// The pattern class that was matched.
+        pattern: crate::InjectionPattern,
+    },
 }
+
+impl std::fmt::Display for LlmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RateLimited { retry_after } => {
+                write!(f, "LLM provider rate-limited; retry after {retry_after:?}")
+            }
+            Self::ApiError {
+                status_code,
+                message,
+            } => write!(f, "LLM API error (HTTP {status_code}): {message}"),
+            Self::SchemaValidationFailed { violations, .. } => {
+                write!(f, "LLM completion failed schema validation: {violations:?}")
+            }
+            Self::NetworkError { message } => write!(f, "LLM provider network error: {message}"),
+            Self::ContextWindowExceeded { requested, limit } => write!(
+                f,
+                "Prompt context window exceeded: requested {requested} tokens, model limit is {limit}"
+            ),
+            Self::InjectionDetected {
+                source, pattern, ..
+            } => {
+                write!(
+                    f,
+                    "prompt injection detected in {source}: pattern {pattern:?}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for LlmError {}
 
 impl LlmError {
     /// Whether this error is likely transient and safe to retry.
@@ -357,9 +413,14 @@ impl LlmError {
             // HTTP 408 (Request Timeout) falls through to ApiError and is
             // treated as NonRetryable here. The LlmGateway in `nodes` applies
             // its own retry budget; revisit if 408s prove common in practice.
+            //
+            // InjectionDetected is NonRetryable: retrying would just
+            // re-submit the exact same malicious content and re-trigger the
+            // same detection.
             Self::ApiError { .. }
             | Self::SchemaValidationFailed { .. }
-            | Self::ContextWindowExceeded { .. } => RetryPolicy::NonRetryable,
+            | Self::ContextWindowExceeded { .. }
+            | Self::InjectionDetected { .. } => RetryPolicy::NonRetryable,
         }
     }
 }

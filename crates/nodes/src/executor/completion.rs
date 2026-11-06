@@ -114,12 +114,11 @@ const EDGE_CONDITION_SYSTEM_PROMPT: &str = "Evaluate whether the following condi
      exact shape {\"result\": true} or {\"result\": false}.";
 
 fn edge_condition_output_schema() -> OutputSchema {
-    OutputSchema::new(serde_json::json!({
+    crate::literal_output_schema(serde_json::json!({
         "type": "object",
         "properties": { "result": { "type": "boolean" } },
         "required": ["result"]
     }))
-    .unwrap_or_else(|| unreachable!("literal schema is always a valid JSON object"))
 }
 
 fn edge_condition_model_config() -> ModelConfig {

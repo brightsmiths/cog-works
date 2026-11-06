@@ -19,8 +19,9 @@ use crate::node::{
     BudgetTracker, CliConfig, ConstraintValidator, ContextAssembler, ContextPackLoader,
     NodeExecutionResult, NodeFailure, NodeInput, PipelineConfig, WorkingCopyManager,
 };
+use crate::sha256_hex;
 
-use super::{PipelineExecutor, sha256_hex};
+use super::PipelineExecutor;
 
 // ─── NodeRunner seam ──────────────────────────────────────────────────────────
 
@@ -38,7 +39,17 @@ use super::{PipelineExecutor, sha256_hex};
 #[async_trait::async_trait]
 pub(crate) trait NodeRunner: Send + Sync {
     /// Executes the node identified by `node_id` with the given `input`.
-    async fn run_node(&self, node_id: &NodeId, input: NodeInput) -> NodeExecutionResult;
+    ///
+    /// `rules` is the real, operator-reviewed `ConstitutionalRules` value
+    /// loaded once per pipeline step (Fix H1, task #59 security follow-up).
+    /// Implementations must forward it, unmodified, into any node `execute`
+    /// function that accepts a `ConstitutionalRules` parameter.
+    async fn run_node(
+        &self,
+        node_id: &NodeId,
+        input: NodeInput,
+        rules: &ConstitutionalRules,
+    ) -> NodeExecutionResult;
 }
 
 // ─── DefaultNodeRunner ────────────────────────────────────────────────────────
@@ -182,7 +193,11 @@ impl DefaultNodeRunner {
         .await
     }
 
-    async fn run_architecture(&self, input: NodeInput) -> NodeExecutionResult {
+    async fn run_architecture(
+        &self,
+        input: NodeInput,
+        rules: &ConstitutionalRules,
+    ) -> NodeExecutionResult {
         let context = self.context_assembler();
         let constraint_validator = self.constraint_validator();
         let pack_loader = ContextPackLoader::new(self.code_repository.clone());
@@ -193,6 +208,7 @@ impl DefaultNodeRunner {
             &constraint_validator,
             &pack_loader,
             self.code_repository.as_ref(),
+            rules,
         )
         .await
     }
@@ -271,10 +287,15 @@ impl DefaultNodeRunner {
 
 #[async_trait::async_trait]
 impl NodeRunner for DefaultNodeRunner {
-    async fn run_node(&self, node_id: &NodeId, input: NodeInput) -> NodeExecutionResult {
+    async fn run_node(
+        &self,
+        node_id: &NodeId,
+        input: NodeInput,
+        rules: &ConstitutionalRules,
+    ) -> NodeExecutionResult {
         match node_id.as_str() {
             "intake" => self.run_intake(input).await,
-            "architecture" => self.run_architecture(input).await,
+            "architecture" => self.run_architecture(input, rules).await,
             "interface_design" => self.run_interface_design(input).await,
             "planning" => self.run_planning(input).await,
             "code_generation" => self.run_code_generation(input).await,
