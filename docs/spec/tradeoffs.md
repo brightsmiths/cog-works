@@ -229,7 +229,7 @@ This also clarifies the boundary of the "GitHub as sole durable state" principle
 
 **Risk**: A provider or orchestrator failure can interrupt persistence or cleanup. The orchestrator attempts durable persistence before cleanup, requests cleanup even if persistence fails, and resumes only from the last successfully persisted state.
 
-**ADR**: [ADR-0009: Provider-Neutral Implementation Job Runtime](../adr/ADR-0009-provider-neutral-implementation-job-runtime.md)
+**ADR**: [ADR-0004: Provider-Neutral Implementation Job Runtime](../adr/ADR-0004-provider-neutral-stage-attempt-runtime.md)
 
 ---
 
@@ -241,7 +241,7 @@ This also clarifies the boundary of the "GitHub as sole durable state" principle
 
 **Risk**: The exact signed payload, trust policy, and attestation chain format must be defined by the concrete interface contract before implementation.
 
-**ADR**: [ADR-0010: Vault-Backed Credential and Attestation Providers](../adr/ADR-0010-vault-backed-credential-and-attestation-providers.md)
+**ADR**: [ADR-0005: Vault-Backed Credential and Attestation Providers](../adr/ADR-0005-credential-and-attestation-provider-boundaries.md)
 
 ---
 
@@ -334,24 +334,27 @@ This also clarifies the boundary of the "GitHub as sole durable state" principle
 
 ---
 
-## 20. Fixed Linear Pipeline vs. Configurable Graph Pipeline
+## 20. Repository-Configured Pipeline vs. Harness-Sourced Stage Graph
 
-**Decision**: Configurable directed graph loaded from `.cogworks/pipeline.toml`, with a built-in default that preserves the original seven-node linear pipeline when no configuration file is present.
+**Decision**: The stage graph is resolved from the pinned harness for the work item's `(tier, discipline)` pair. The target repository does not supply a pipeline configuration file and cannot define, extend or override the graph.
 
-| Factor | Fixed Linear Pipeline | Configurable Graph |
-| -------- | ---------------------- | ------------------- |
-| **Simplicity** | No configuration required | Requires TOML schema understanding |
-| **Flexibility** | One-size-fits-all | Per-repo customisation (skip, reorder, parallelise) |
-| **Onboarding** | Zero setup | Must learn config schema (but default works out of the box) |
-| **Rework loops** | Review → Code Gen only | Arbitrary rework edges with max_traversals termination |
-| **Parallel execution** | Not possible | Fan-out / fan-in for independent nodes |
-| **Validation cost** | None | DAG validation at load time (cycle detection, reachability) |
-| **Testing surface** | Single path | Multiple paths per named pipeline; need graph-specific tests |
+| Factor | Repository-Configured | Harness-Sourced |
+| -------- | ---------------------- | ---------------- |
+| **Flexibility** | Each repository shapes its own graph | Graph varies by tier and discipline, not by repository |
+| **Rigor follows risk** | A repository can shape its graph independently of its tier | A tier's stages are a property of the tier |
+| **Review surface** | Graph changes are reviewed per repository, by that repository's reviewers | Graph changes are reviewed once, by the harness maintainers |
+| **Rollout** | Each repository adopts changes on its own schedule | Versioned and pinned; changes roll out by canary |
+| **Validation cost** | Structural validation per repository configuration | Structural validation plus stage-type registry check on the resolved graph |
+| **Testing surface** | Combinatorial across repository configurations | Bounded by the tier and discipline matrix |
 
-**Rationale**: Different repositories have different workflows. A documentation repo does not need code generation or test execution; a safety-critical embedded repo needs extra review gates. The configurable graph lets each repository define the pipeline that matches its needs, while the built-in default ensures CogWorks works without any configuration. Graph validation at load time catches misconfigurations before any LLM tokens are spent. See ADR-0004 for full decision context.
+**Rationale**: The stage graph decides which assurance stages run and which gates apply, so it is a risk control rather than a convenience. Sourcing it from the pinned harness keeps that control with the harness maintainers and makes a tier's stage set a property of the tier instead of a property of whoever configured the repository. A repository that could define its own graph could omit stages its tier requires, which matters most for the control-plane repositories that are mapped to the higher tiers — including this one. Pinning gives each repository a stable, explicitly adopted version, so a harness change cannot alter a repository's behaviour until its pin moves.
+
+**Risk**: Every run depends on the harness being resolvable at the pinned version, and a repository with a genuine need the harness does not cover has to change the harness rather than its own configuration. The first is handled by failing closed — an unresolvable or withdrawn pin halts the run rather than falling back to a default. The second is intentional: it routes the need through the harness review that a risk control warrants.
 
 ---
 
+
+**ADR**: [ADR-0006](../adr/ADR-0006-a-node-is-a-stage-type-profiles-and-graphs-from-the-harness.md)
 ## 21. Pipeline State Persistence: GitHub Issue Comments vs. Local File
 
 **Decision**: Pipeline execution state is persisted as a structured JSON comment on the GitHub issue, not as a local file in the working directory.
@@ -367,23 +370,3 @@ This also clarifies the boundary of the "GitHub as sole durable state" principle
 
 **Rationale**: The system's design principle is "GitHub is the sole durable state store" (no external databases, no persistent local state that isn't reproducible). Writing pipeline state to the issue ensures that a crash-and-resume on a different host can pick up exactly where the previous run left off. The latency cost of an API call per node transition is acceptable because node execution itself (LLM calls, domain service operations) dominates wall-clock time. State writes are infrequent (once per node boundary) so rate-limit impact is minimal.
 
----
-
-## 20. MCP Servers vs. Generated Adapters for External Integrations
-
-**Decision**: Generated adapters from API specifications are the default mechanism for integrating external services. MCP (Model Context Protocol) servers are retained only as a fallback for bidirectional/streaming protocols that static tool definitions cannot represent.
-
-| Factor | MCP Servers | Generated Adapters | In-Process (Direct API Client) |
-| -------- | ------------- | ------------------- | ------------------------------- |
-| **Operational overhead** | Separate process per integration; lifecycle management needed | No runtime process; tool definitions are configuration | No additional process; compiled into CogWorks |
-| **Scope enforcement** | Difficult — MCP server owns its execution; scope enforced by proxy | Native — generated tools participate in standard scope enforcement | Native — but requires CogWorks code changes per service |
-| **Audit trail** | Requires MCP-to-audit bridge | Standard tool invocation audit (same as built-in tools) | Standard (built into CogWorks) |
-| **Versioning** | MCP server version must match CogWorks expectations | Regenerate from updated spec; CI drift detection | Recompile CogWorks |
-| **Bidirectional/streaming** | Supported natively | Not representable as static tool definitions | Requires explicit async implementation |
-| **Adding new integrations** | Deploy new MCP server process | Run CLI command against API spec | Modify CogWorks source code |
-| **Domain-ignorant principle** | MCP servers are external; CogWorks doesn't know their internals | Adapter definitions are external config; CogWorks doesn't know their internals | Violates domain-ignorant principle |
-| **Failure modes** | MCP server crash, connection timeout, version mismatch | Spec drift (detectable via CI), invalid generated definition (caught at registration) | API changes require CogWorks rebuild |
-
-**Rationale**: Most external service integrations (inventory systems, CI/CD APIs, monitoring APIs) are request-response with published API specifications. Generated adapters handle these with zero runtime overhead and full scope enforcement integration. MCP servers add operational complexity (process management, connection lifecycle, audit bridging) without benefit for the common case. The MCP fallback path is retained for genuinely bidirectional protocols (e.g., language servers, real-time data feeds) where a persistent process is inherently required. In-process clients are rejected because they violate the domain-ignorant principle and create recompilation dependencies.
-
-See ADR-0005 for full decision context.
