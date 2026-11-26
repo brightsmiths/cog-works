@@ -144,18 +144,29 @@ This document records the significant design alternatives considered and the rat
 
 ---
 
-## 9. Anthropic API vs. Multi-Provider from Day One
+## 9. Direct Provider Access vs. a Model Gateway
 
-**Decision**: Anthropic API initially, with a provider-agnostic trait for future expansion.
+**Decision**: every model call goes through a model gateway. CogWorks holds no provider credential.
 
-| Factor | Anthropic Only | Multi-Provider |
-| -------- | --------------- | ---------------- |
-| **Simplicity** | One API to implement and test | Multiple APIs, response normalization |
-| **Cost optimization** | N/A | Route different nodes to cheapest provider |
-| **Resilience** | Single point of failure | Failover between providers |
-| **Time to market** | Faster | Slower |
+| Factor | Direct provider access | Model gateway |
+| -------- | --------------------- | ------------- |
+| **Credential surface** | A provider key in CogWorks and in every sandbox | No key in CogWorks or any sandbox |
+| **Rate limiting** | Per-process, blind to the rest of the factory | One place that sees all traffic and can enforce coherently |
+| **Provider choice** | A provider name appears in the codebase | Resolved by the gateway from a logical model name |
+| **Cost attribution** | Per-process accounting | Factory-wide, per-service |
+| **Dependency** | One fewer service on the critical path | The gateway is on the path of every model call |
 
-**Rationale**: The LLM Provider trait is provider-agnostic. The initial implementation targets Anthropic. Adding providers later requires only a new trait implementation, not changes to business logic. This is the correct order — build one provider well, then add more.
+**Rationale**: the decisive factor is the credential. A provider key held here would also have to
+be reachable from every sandbox running an agent, which multiplies the places it can leak by the
+number of attempts. With a gateway there is no key in this process to leak — a stronger property
+than careful handling of one.
+
+Rate limiting follows the same logic: per-process throttling cannot see the other processes
+sharing the same quota, so it either over-throttles or fails to prevent exhaustion. Only the
+component holding the credentials can enforce a quota coherently.
+
+The cost is a service on the critical path of every model call. Accepted, because CogWorks already
+cannot function without the stage runner and the gate service — one more is not a change in kind.
 
 ---
 

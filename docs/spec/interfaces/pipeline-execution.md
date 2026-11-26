@@ -291,8 +291,8 @@ verdicts read for the relevant commits.
 
 **No condition is evaluated by a model.** Routing, gating, context packaging,
 retries and escalation are code, so which edge is taken never depends on model
-output. There is no `LlmEvaluated` variant and no results map parameter: a model
-cannot participate in routing even by configuration.
+output. The signature admits no model-evaluated variant and no results map, so a
+model cannot participate in routing even by configuration.
 
 **Fail closed.** A condition that cannot be evaluated — an unresolvable state
 reference, a verdict that is absent when the condition requires one — returns

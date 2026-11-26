@@ -85,9 +85,9 @@ pub struct ClassificationResult {
 **Fields**:
 
 - `task_type` — what category of work this is.
-- `safety_affecting` — `true` if any affected module is in the safety-critical registry
-  (see `SafetyCriticalRegistry` in PR 7). Safety-affecting tasks require human approval
-  before any PR is merged.
+- `affected_paths` — the repository paths this work is expected to touch. These are the input
+  to tier derivation; the tier itself is never part of a classification result, because a model
+  must not be able to influence it.
 - `estimated_scope` — a magnitude estimate `1..=10` (1 = trivial, 10 = large).
   Used by `check_scope_threshold` (PR 7) to detect over-scoped tasks.
 - `affected_modules` — repo-relative paths of modules the change is expected to touch.

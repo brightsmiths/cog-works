@@ -59,7 +59,7 @@ direction. See `docs/spec/interfaces/README.md` for the full dependency graph.
   `extension-api`, or `listener` directly.
 - **`cli` is the sole composition root**: Only `cli` imports all other workspace
   crates and constructs concrete infrastructure instances. This is the only place
-  where `GithubClient`, `AnthropicProvider`, `ExtensionApiClient`,
+  where `GithubClient`, `ModelGatewayProvider`, `ExtensionApiClient`,
   `GitHubWebhookEventSource`, and `QueueEventSource` are instantiated.
 - **Readiness mapping is an infrastructure concern**: Trigger sources report
   work-item readiness through the `pipeline::EventSource` abstraction. The

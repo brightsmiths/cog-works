@@ -2,23 +2,70 @@
 
 ## What CogWorks Is
 
-CogWorks is a deterministic orchestration system that receives engineering work items, executes a structured pipeline (classify → design → plan → test-first implementation → validate and iterate → review), and prepares changes for human-controlled integration. It supports software and other engineering domains by coordinating LLM reasoning, deterministic tools, and domain-specific validation behind interfaces.
+CogWorks is the **deterministic foreman**. It is a stateless step function: read GitHub state,
+decide the next action, execute one step, write results to GitHub, exit.
+
+It runs a graph of **stages**. For each stage it deterministically resolves an agent profile from
+a pinned harness, assembles the exact set of inputs that stage is permitted to see, and asks a
+separate service to run the attempt in a fresh sandbox. Whether the resulting work passes is
+decided by a separate gate service, whose check runs CogWorks reads and never overrules.
+
+The governing rule, which this whole design exists to serve: **an LLM is a component inside a
+deterministic machine, never the machine itself.** Routing, gating, context packaging, retries
+and escalation are code.
+
+CogWorks is one service in a larger system. The system-level architecture lives in the
+[`brightsmiths/handbook`](https://github.com/brightsmiths/handbook) repository under `docs/`.
+
+## What CogWorks Does Not Do
+
+Three capabilities are deliberately outside this service. They are boundaries, not gaps, and each
+is held by a component with no stake in CogWorks' decisions:
+
+| Not this | Whose it is | Why not here |
+|----------|-------------|--------------|
+| Running an agent | The stage runner service | Isolation needs virtualisation privilege. The component deciding what to run should not hold the privilege to run anything. |
+| Deciding pass or fail | The gate service | A verdict computed by the component whose run it concludes is self-certification. |
+| Pushing commits | The stage runner, under each stage's identity role | A push credential here would let one flaw write code to every repository. |
+
+CogWorks also holds no model API key, decides no ordering across work items, and never merges a
+pull request or cuts a release.
+
+What it does is decide what runs next, decide what each agent may see and touch, and record what
+happened.
 
 ## Design Philosophy
 
 These principles are load-bearing — they constrain every architectural decision:
 
-1. **Deterministic by default.** Every step that can be performed by conventional tooling MUST be. LLMs are invoked only for reasoning, synthesis, or natural language understanding. This controls cost and makes the system debuggable.
+1. **Deterministic by default.** Every step that can be performed by conventional tooling MUST
+   be. Models are invoked only for reasoning, synthesis, or natural language understanding — and
+   never for routing, gating or selecting a profile. This controls cost and makes the system
+   debuggable.
 
-2. **Quality through test-first iteration.** Establish tests or equivalent domain acceptance checks before implementation, then iterate on structured validation feedback. One implementation with maximum context, not many candidates in parallel.
+2. **Quality through an independent oracle.** The tests that judge an implementation are written
+   by a different stage, under a different identity, in a different sandbox, and sealed before
+   implementation begins. One implementation with maximum context, iterating on structured
+   feedback from gates it cannot influence.
 
-3. **Structured I/O at every boundary.** Every LLM call has defined input and output schemas. Outputs are validated before the pipeline proceeds.
+3. **Structured I/O at every boundary.** Every model call has a defined input and output schema,
+   declared by the harness. Output is validated before the pipeline proceeds.
 
-4. **Stateless and observable.** All durable state lives in GitHub. No hidden databases. The system can be fully understood by reading GitHub state.
+4. **Stateless and observable.** All durable state lives in GitHub. No hidden databases. A run's
+   position is fully reconstructable by reading GitHub.
 
-5. **Follows the human process.** Design → contracts → plan → implement → review. Each node produces a human-recognisable artifact.
+5. **Agent-shaping configuration comes from outside the repository being worked on.** Profiles,
+   contracts, graphs, prompts, schemas and rules resolve from a pinned harness. A repository
+   cannot reconfigure the agents working on it — which matters because CogWorks operates on its
+   own repository.
 
-6. **Constitutional boundaries.** External content is data, not instructions. Non-overridable behavioral rules are loaded before any context assembly or LLM call. The boundary between trusted instructions and untrusted input is explicit and enforced.
+6. **Constitutional boundaries.** External content is data, never instructions. Non-overridable
+   rules load before any model call. The boundary between trusted instructions and untrusted
+   input is explicit and enforced.
+
+7. **Fail closed, never default.** A missing pin, an unverifiable harness, a malformed risk map,
+   an unresolvable profile, a missing stage graph: each halts. Substituting a default would run
+   agents under configuration nobody chose, and the failure would be invisible in a passing run.
 
 ## Execution Model: CLI-First
 
@@ -32,155 +79,200 @@ This design choice has several consequences:
 
 - **Simplicity**: No connection pooling, no graceful shutdown, no in-memory state management
 - **Testability**: Each invocation is independent and deterministic given the same GitHub state
-- **Crash recovery**: Restart and re-invoke; the system reads GitHub state and picks up where it left off
-- **Concurrency**: Multiple CLI invocations can run for different work items simultaneously
-- **Future service mode**: Poll/webhook modes become thin wrappers that invoke the same step function in a loop or on events
+- **Crash recovery**: Restart and re-invoke; the system reads GitHub state and picks up where it
+  left off
+- **Concurrency**: Multiple invocations can run for different work items simultaneously
+- **Asynchronous stages**: A stage attempt and its verdict both complete outside this process, so
+  an invocation that finds either in flight returns a waiting result rather than blocking
 
-### Trigger Modes (Current and Future)
+### Trigger Modes
 
-| Mode | Phase | Description |
+| Mode | Level | Description |
 |------|-------|-------------|
-| **CLI** | Phase 1 | Direct invocation: `cogworks run --issue <number>` |
-| **Poll** | Phase 2+ | Periodically asks the work-item adapter for ready work, then invokes the step function |
-| **Webhook** | Phase 3+ | Provider events via a configured adapter invoke the step function; readiness mapping stays behind the EventSource interface |
+| **CLI** | L1 | Direct invocation: `cogworks run --issue <number>` |
+| **Queue** | L2 | Normalised events from the factory's event queue invoke the step function |
 
-All three modes share the same core step function. The difference is only in how and when the step function is triggered.
+CogWorks does not receive GitHub webhooks. Webhook ingress, HMAC verification and normalisation
+belong to the factory's ingress service, which routes normalised events onto durable queues.
+There is one place in the factory where an inbound signature is checked, and it is not here.
+
+A run starts only on the human-only trigger label. An event from an external actor that would
+start agent work is ignored.
+
+**An event is a prompt to read GitHub, never a source of truth.** Every decision is made from
+GitHub state re-read at the start of the step, so a lost, duplicated or out-of-order event can
+only delay or repeat a re-read — it cannot corrupt a run.
 
 ### Service-Ready Boundaries
 
 To ensure CLI-first doesn't block future service mode:
 
-- **Component construction is explicit** — dependencies are injected via constructors, not resolved from global state. A service wrapper can construct long-lived components with connection pools.
-- **No global mutable state** — all state flows through function parameters and return values.
-- **Resource cleanup is explicit** — temporary directories, git clones, and other resources are cleaned up by the caller, not by `Drop` side effects that assume single-invocation lifetime.
-- **Configuration is loaded once and passed** — not re-read on every operation. A service can load once at startup.
+- **Component construction is explicit** — dependencies are injected via constructors, not
+  resolved from global state
+- **No global mutable state** — all state flows through function parameters and return values
+- **Resource cleanup is explicit** — cleanup is requested by the caller on every terminal path,
+  not by `Drop` side effects that assume a single-invocation lifetime
+- **Configuration is loaded once and passed** — not re-read on every operation
 
 ## System Context
 
 ```
-┌──────────────┐          ┌───────────────────┐
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  The Harness (pinned, read-only, not writable by CogWorks or any agent)      │
+│  stage graphs per (tier, discipline) · agent profiles · stage contracts      │
+│  prompt templates · output schemas · Context Packs · constitutional rules    │
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │ resolved at .factory/pin.yaml
+┌──────────────┐          ┌──────▼────────────┐
 │   Human      │  creates │   GitHub          │
 │   Developer  │────────→ │   Issue           │
 │              │  labels  │   (Work Item)     │
-└──────────────┘  cogworks│                   │
-                  :run    └────────┬──────────┘
-                                   │ webhook / poll / CLI
+└──────────────┘  trigger └────────┬──────────┘
+                                   │ CLI / queue event
                                    ▼
                           ┌───────────────────┐
-                          │   CogWorks CLI    │
+                          │   CogWorks        │
                           │   (Step Function) │
                           │                   │
-                          │  Reads state      │
-                          │  Executes action  │
-                          │  Writes results   │
-                          └──┬────┬───────┬───┘
-                             │    │       │
-              ┌──────────────┘    │       └──────────────┐
-              ▼                   ▼                      ▼
-    ┌───────────────────┐ ┌──────────────────┐  ┌───────────────────┐
-    │   LLM Provider    │ │ Domain Services  │  │   GitHub API      │
-    │   (Anthropic)     │ │ (External Procs) │  │   (Issues, PRs,   │
-    │                   │ │                  │  │    Labels, Files) │
-    └───────────────────┘ │ ┌──────────────┐ │  └───────────────────┘
-              ▲           │ │ Rust Service │ │            ▲
-              │           │ │ (firmware)   │ │            │
-    ┌─────────┴─────────┐ │ ├──────────────┤ │  ┌─────────┴─────────┐
-    │  Prompt Templates │ │ │ Future:      │ │  │  Repo Config      │
-    │  Output Schemas   │ │ │ KiCad, etc.  │ │  │  (.cogworks/)     │
-    │  Constitutional   │ │ └──────────────┘ │  │  Constraints      │
-    │   Rules           │ └──────────────────┘  │  Interface Registry│
-    │  (version-ctrl'd) │      ▲                │  Context Packs    │
-    └───────────────────┘      │                │  ADRs, Standards  │
-                    ┌──────────┴──────────┐     └───────────────────┘
-                    │  Extension API      │
-                    │  (Unix socket/HTTP) │
-                    │  JSON messages      │
-                    └─────────────────────┘
+                          │  Resolves profile │
+                          │  Builds bundle    │
+                          │  Reads verdicts   │
+                          │  Writes state     │
+                          └──┬───┬───┬───┬──┬─┘
+          ┌──────────────────┘   │   │   │  └──────────────────┐
+          ▼                      ▼   │   ▼                     ▼
+┌───────────────────┐ ┌───────────────┴──┐ ┌──────────────┐ ┌──────────────────┐
+│  Stage Runner     │ │  GitHub API      │ │ Write-Scope  │ │ Domain Services  │
+│  one fresh micro- │ │  issues · labels │ │ Service      │ │ (External Procs) │
+│  VM per attempt   │ │  comments · PRs  │ │ mount plans  │ │  Extension API   │
+│  pushes commits   │ │  check runs (r)  │ │ scope checks │ │  (socket / HTTP) │
+└────────┬──────────┘ └──────────────────┘ └──────────────┘ └──────────────────┘
+         │ agent turn happens HERE, not in CogWorks
+         ▼
+┌───────────────────┐        ┌──────────────────────────────────────────────────┐
+│  Model Gateway    │        │  Gate Service                                    │
+│  holds provider   │        │  recomputes every verdict from a commit SHA in   │
+│  API keys         │        │  a clean sandbox, under its own identity;        │
+│  enforces limits  │        │  the ONLY source of pass or fail                 │
+└───────────────────┘        └────────────────────┬─────────────────────────────┘
+                                                  │ publishes check runs
+                                                  ▼  (CogWorks reads, never writes)
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  The target repository supplies exactly two things, both human-owned:        │
+│  .factory/pin.yaml  (which harness version governs this repository)          │
+│  risk-map.yaml      (path globs → tiers, from which the tier is derived)     │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Domain services are external processes that communicate with CogWorks through the Extension API. CogWorks is domain-ignorant — it does not contain code for any specific domain. The Rust domain service ships alongside CogWorks as a reference implementation but uses the same Extension API as any third-party domain service.
+Note what the target repository does **not** supply: no stage graph, no profiles, no prompt
+templates, no tool allowlists, no constitutional rules. An agent working in a repository could
+edit anything stored there, and the agents CogWorks runs are exactly the ones that configuration
+is meant to constrain.
+
+Domain services are external processes reached through the Extension API. CogWorks is
+domain-ignorant and contains code for no specific domain.
 
 ## Pipeline Flow
 
-The pipeline is a configurable directed graph of nodes. The default pipeline preserves the standard 7-node linear sequence. Repositories may define custom graphs in `.cogworks/pipeline.toml` with parallel fan-out, conditional edges, and rework loops.
+The stage graph is resolved from the pinned harness for the run's `(tier, discipline)` pair. The
+full stage set and the graphs per tier are described in the handbook under
+`docs/architecture/workflow.md`; what follows is the L1 slice.
 
-### Default Pipeline
-
-The default pipeline has two phases. Nodes 1–4 execute once per work item. Nodes 5–7 execute as a unit for each sub-work-item in dependency order.
+### The L1 slice
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│ Per Work Item (once)                                                    │
-│                                                                         │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐           │
-│  │ 1. Task  │    │ 2. Arch  │    │ 3. Iface │    │ 4. Plan  │           │
-│  │ Intake & │───→│ (Spec    │───→│ Design   │───→│ (Sub-WI  │           │
-│  │ Classify │    │  Doc)    │    │ (Code)   │    │  Create) │           │
-│  └──────────┘    └────┬─────┘    └────┬─────┘    └────┬─────┘           │
-│                       │PR             │PR              │Issues          │
-│                       ▼               ▼                ▼                │
-│                  [Gate]          [Gate]           [Gate]                │
-└──────────────────────────────────────────┬──────────────────────────────┘
-                                           │
-                                           ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ Per Sub-Work-Item (in dependency order, optionally parallel)            │
-│                                                                         │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐           │
-│  │ 5. Code  │───→│ Determin.│───→│ Scenario │───→│ 6. Review│───→PR     │
-│  │ Generate │    │ Checks + │    │ Validate │    │ Gate     │           │
-│  │          │    │ Tests    │    │          │    │          │           │
-│  └────┬─────┘    └──────────┘    └────┬─────┘    └──────────┘           │
-│       │ rework edge (max 5 traversals)           │                      │
-│       └──────────────────────────────────────────┘                      │
-└─────────────────────────────────────────────────────────────────────────┘
+┌──────────┐    ┌──────────────┐    ┌────────────┐              ┌──────────┐
+│  intake  │───→│ unit-oracle  │───→│  implement │─────────────→│   pull   │
+│          │    │              │    │            │              │  request │
+│ tier     │    │ locked tests │    │ src/ and   │              │          │
+│ scope    │    │ + sealed     │    │ own tests  │              │ opened/  │
+│ attests  │    │   manifest   │    │            │              │ updated  │
+└──────────┘    └──────┬───────┘    └─────┬──────┘              └──────────┘
+                       │                  │
+                 oracle identity    builder identity
+                 writes tests/      writes src/; locked
+                 locked/            tests are READ-ONLY
+                       │                  │
+                       ▼                  ▼
+                 ┌─────────────────────────────────┐
+                 │  Gate service verdict on the    │
+                 │  attempt's commit SHA           │
+                 └──────────┬──────────────────────┘
+                            │ fails
+                            ▼
+                 ┌─────────────────────────────────┐
+                 │ rework: structured feedback,    │
+                 │ a NEW sandbox, bounded by the   │
+                 │ stage contract's limits         │
+                 └─────────────────────────────────┘
 ```
 
-Scenario validation is optional — it only runs for sub-work-items that have applicable scenarios.
+Two stages, two identities, two sandboxes. That separation is the most important property of the
+pipeline: the thing being measured cannot shape what it is measured against.
 
-Each node gate is configurable: `auto-proceed` or `human-gated`. Safety-critical work items force human gates for all code-producing nodes.
+There is no node that runs checks inside CogWorks. All checks are the gate service's, recomputed
+from a commit SHA under its own identity.
 
-### Custom Pipeline Graphs
+Each node gate is configurable `auto-proceed` or `human-gated`, and the derived tier can force
+human gates regardless of configuration.
 
-Repositories may define custom pipeline graphs with:
+### Graph capabilities
 
-- **Parallel fan-out**: Multiple nodes executing concurrently when their inputs are all available
-- **Fan-in synchronisation**: A node waiting for all upstream parallel nodes to complete
-- **Conditional edges**: Deterministic expressions, LLM-evaluated conditions, or boolean composites that control which downstream nodes activate
-- **Rework loops**: Cycles with explicit termination conditions (maximum traversals, cost budget)
-- **Spawning nodes**: Nodes that create derivative work items without blocking the pipeline
+A resolved stage graph may use:
 
-Multiple named pipelines can be defined in a single configuration file. The Intake node's classification output selects which pipeline to execute.
+- **Parallel fan-out**: multiple nodes executing concurrently when their inputs are all available
+- **Fan-in synchronisation**: a node waiting for all upstream parallel nodes to complete
+- **Conditional edges**: deterministic expressions over pipeline state and verdicts, or boolean
+  composites. **No edge condition is evaluated by a model** — which edge is taken never depends on
+  model output, because routing is code
+- **Rework loops**: cycles with explicit termination conditions (maximum traversals, cost budget)
 
-## Data Flow Across Nodes
+Several nodes may share a stage type: a graph with three `implement` nodes, one per slice, has
+three node identities and one stage type.
 
-Each node produces artifacts that flow into downstream nodes via durable repository/work-item records or a job-local workspace:
+## Data Flow Across Stages
 
-| Node | Input | Output | Storage |
-|------|-------|--------|---------|
-| 1. Intake | GitHub Issue | Classification result | Issue comment + labels |
-| 2. Architecture | Classification + repo context + loaded Context Packs | Specification document (Markdown) | Pull Request |
-| 3. Interface Design | Approved spec + repo context | Interface definition files (source code) | Pull Request |
-| 4. Planning | Approved spec + approved interfaces | Sub-work-item issues with dependency graph | GitHub Issues |
-| 5. Code Generation | Sub-work-item + spec + interfaces + prior SWI outputs | Tests or equivalent acceptance checks, then implementation | Ephemeral implementation container → repository branch |
-| 6. Review Gate | Generated code | Review results (pass/fail + findings) | Pipeline state (fed back to Code Gen or forward to Integration) |
-| 7. Integration | Reviewed code | Pull Request | GitHub PR |
+| Stage | Input | Output | Storage | Level |
+|-------|-------|--------|---------|-------|
+| intake | Work item, risk map, upstream attestations | Derived tier, scope finding, traceability matrix | Issue comment + labels | L1 |
+| `specify` | Work item + repo context | Intent and acceptance criteria with REQ-IDs | Specification pull request | L2 |
+| `architect` | Approved intent | Decision record, threat-model delta, risk-map patch | Specification pull request | L4 |
+| `contract` | Approved specification | Compilable stubs, program design | Specification pull request | L2 |
+| `plan` | Approved contracts | `plan.yaml`: slices, sizes, REQ mapping, dependency DAG | Specification PR, then sub-issues in DAG order | L2 |
+| `unit-oracle` | Slice + contracts + specification | Locked tests + signed manifest | Branch, pushed under the oracle identity | L1 |
+| `implement` | Slice + contracts + locked tests (read-only) | Implementation and its own tests | Branch, pushed under the builder identity | L1 |
+| `acceptance-oracle` | Approved specification | Visible and holdout acceptance sets | Acceptance repository | L4 |
+| `review-semantic` / `review-security` | The change under review | Structured findings only — no verdict, no file changes | Pull request comments | L4 |
+| Pull request | Branch pushed by the runner | Pull request opened or updated | GitHub PR | L1 |
 
-In custom pipeline graphs, node inputs and outputs are declared in the pipeline configuration and the orchestrator verifies all inputs are available before starting a node.
+Stage inputs are not merely declared — they are **allowlisted** by the resolved stage contract and
+hashed. An input the allowlist does not name is absent from the bundle, which is what makes the
+trust-zone barriers structural rather than a list of exclusions to maintain.
 
 ## Working Copy Management
 
-CogWorks needs file access in two distinct modes:
+CogWorks keeps **no working copy**. It reads what it needs through the GitHub Contents API:
+individual files, directory listings, configuration. Those reads are lightweight and
+API-based.
 
-1. **Lightweight reads** (context assembly, file existence checks): Use GitHub Contents API. No local clone needed. Suitable for reading individual files, directory listings, and configuration.
+Full toolchain operations need real files on disk, and they happen where the files are:
 
-2. **Full toolchain operations** (validate, simulate, normalise, extract interfaces): Requires a local git clone. Domain services need real files on disk to invoke their toolchains.
+- **Inside a stage attempt's sandbox.** The stage runner creates one fresh sandbox per attempt,
+  checks out what the mount plan permits, runs the attempt, and pushes the resulting commits under
+  the stage's identity role. The sandbox is torn down afterwards and is never a state store.
+- **Inside the gate service's sandbox.** Verdicts are recomputed there from a commit SHA, in a
+  clean environment CogWorks does not control.
+- **Behind the Domain Service Client.** Domain services manage their own working copies for the
+  toolchain operations they own.
 
-Strategy:
+Durable outputs — specifications, contracts, plans, implementations and pipeline state — are
+persisted through the repository and work-item interfaces. Sandbox-local files are never a source
+of durable recovery data.
 
-- **Implementation job containers**: The orchestrator requests one ephemeral container per implementation job through a runtime-provider interface. CogWorks owns the request and cleanup lifecycle; the selected provider owns runtime-specific operations. The container is temporary and is not a pipeline-state store.
-- **Domain-specific validation**: Tests, toolchains, and validation are delegated through the Domain Service Client. CogWorks defines the generic test-first, implementation, validation, and iteration flow but does not select domain-specific tools.
-- **Durable outputs**: Specifications, interfaces, plans, implementation outputs, and pipeline state are persisted through the repository and work-item interfaces as required by the current pipeline. Container-local files are cleaned up with the job.
-- **Branch per artifact**: `cogworks/<work-item-number>/<node-slug>` (e.g., `cogworks/42/spec`, `cogworks/42/interfaces`, `cogworks/42/swi-3`)
+**Branch scheme**: `cogworks/<work-item-number>/<stage>` for a stage's own branch, and
+`cogworks/<work-item-number>/slice-<n>` for a slice. For example `cogworks/42/spec`,
+`cogworks/42/contract`, `cogworks/42/slice-3`.
 
-CogWorks does not merge changes, own releases, or publish artifacts. External factory/GateKeeper approvals are represented through the work-item interface and remain distinct from CogWorks' configurable node gates and safety overrides.
+CogWorks does not merge changes, own releases, or publish artifacts. External approvals are
+represented through the work-item interface and remain distinct from CogWorks' configurable node
+gates and the tier's human gates.

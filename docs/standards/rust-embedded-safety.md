@@ -4,7 +4,7 @@
 > **Pack ID:** `rust-embedded-safety`
 > **Trigger:** `component:firmware` or `safety_affecting: true` for Rust artifacts
 
-> **Relationship to Context Packs:** This document is the *source material* for the `rust-embedded-safety` Context Pack's `domain-knowledge.md`, `safe-patterns.md`, and `anti-patterns.md` files. It lives in `docs/standards/` so it can be reviewed and maintained independently. When completed, its content is copied/summarised into the pack files at `.cogworks/context-packs/rust-embedded-safety/`. The Context Pack Loader does **not** follow references to `docs/standards/` — only the files inside the pack directory are loaded into the LLM context window.
+> **Relationship to Context Packs:** This document is the *source material* for the corresponding Context Pack in the harness's software discipline pack. It lives in `docs/standards/` so it can be reviewed and maintained independently, and moves to the harness once that repository exists. Its content is summarised into the pack's knowledge, safe-pattern and anti-pattern files; the pack loader does **not** follow references back to `docs/standards/` — only the pack's own files reach a context bundle.
 
 This document provides the domain knowledge reference for the `rust-embedded-safety` Context Pack. It informs the LLM about Rust `no_std` conventions, safety patterns, and anti-patterns specific to embedded targets.
 

@@ -163,9 +163,9 @@ pub enum EdgeConditionKind {
 }
 ```
 
-There is no `LlmEvaluated` variant. Routing, gating, context packaging, retries
-and escalation are code, so which edge is taken never depends on model output. A
-model cannot participate in routing even by configuration.
+Every variant is deterministic. Routing, gating, context packaging, retries and
+escalation are code, so which edge is taken never depends on model output, and no
+variant admits a model into that decision.
 
 **Fail closed.** A condition that cannot be evaluated — an unresolvable state
 reference, or a verdict that is absent when the condition requires one —

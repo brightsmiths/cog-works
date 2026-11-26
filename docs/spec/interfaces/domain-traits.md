@@ -45,7 +45,7 @@ pipeline (trait definitions)
 |-----------------|-----------|
 | `ArtifactPath`, `DomainServiceName`, `InterfaceId` | `shared-types.md` |
 | `NodeId`, `StageTypeId`, `ProfileId`, `HarnessVersion`, `DisciplineId` | `shared-types.md` |
-| `CommitSha`, `TokenCount`, `SatisfactionScore`, `ApiVersion` | `shared-types.md` |
+| `CommitSha`, `TokenCount`, `AlignmentScore`, `ApiVersion` | `shared-types.md` |
 | `Diagnostic`, `DiagnosticSeverity` | `shared-types.md` |
 | `RetryPolicy` | `shared-types.md` |
 | `PipelineConfiguration`, `PipelineGraph` | `pipeline-graph.md` |

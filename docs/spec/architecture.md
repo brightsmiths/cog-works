@@ -225,10 +225,10 @@ routing is code, so which edge is taken never depends on model output.
 
 Deterministic post-processing of LLM classification output.
 
-- **Input**: LLM classification result, safety-critical module registry
-- **Output**: Final classification (potentially with safety override)
+- **Input**: Model classification result, the derived tier, the scope threshold
+- **Output**: Final classification
 - **Rules**:
-  - If any affected module is in the safety-critical registry → override `safety_affecting` to true
+  - The tier is **not** taken from the classification. It is derived from `risk-map.yaml` over the affected paths, raise-only, so a model cannot argue its way to a lower tier
   - If estimated scope exceeds threshold → produce escalation result
 
 ### Dependency Graph

@@ -304,7 +304,7 @@ Thin abstraction over LLM API calls with validation, cost tracking, budget enfor
 
 **Collaborators:**
 
-- LLM API provider (external: Anthropic initially)
+- Model gateway (external; holds the provider credentials)
 - Budget Tracker (reports token usage per call)
 - Configuration Manager (reads model selection per node)
 
