@@ -140,7 +140,7 @@ This document records the significant design alternatives considered and the rat
 | **Independent evolution** | Each pass can be tuned independently | One monolithic prompt |
 | **Parallelism** | LLM passes can run in parallel (future) | N/A |
 
-**Rationale**: The spec requires four passes — one deterministic constraint check followed by three separate LLM passes — (REQ-REVIEW-002). The focused approach produces better findings because each review prompt can include specific checklists and examples for its domain. The cost is bounded (3 LLM calls × sub-work-item count × remediation cycles), and the review node uses a high-quality model anyway.
+**Rationale**: Separate assurance stages per concern (REQ-ASSURE-001) produce better findings, because each stage's profile can carry checklists and examples specific to its domain. The cost is bounded, and because a review stage produces findings rather than a verdict, adding a perspective adds information rather than another thing that can veto a correct change.
 
 ---
 

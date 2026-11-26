@@ -31,7 +31,7 @@ Business logic is pure — no I/O, no mocks needed. Test with direct input/outpu
 - All valid node transitions via edge conditions
 - Invalid transitions (node activated without inputs available)
 - Human-gated vs. auto-proceed behavior
-- Safety-critical gate override
+- Tier-driven gate override (raise-only derivation)
 - Processing lock detection (back off when another instance is active)
 - Sub-work-item ordering within code-generation/review/integration nodes
 - Default linear pipeline used when no configuration file exists
@@ -89,7 +89,7 @@ Business logic is pure — no I/O, no mocks needed. Test with direct input/outpu
 ### Label Parsing and Generation
 
 - Round-trip: structured type → label string → structured type = identity
-- All label patterns: node, status, processing, safety-critical, hold, awaiting-review
+- All label roles: active stage, slice status, run lock, hold, awaiting-review, trigger
 - Dependency and ordering information is read from native GitHub typed issue links and the sub-issue API, not from labels
 - Invalid label strings → parse error (not panic)
 
@@ -178,7 +178,7 @@ Node implementations orchestrate calls between business logic and abstractions. 
 
 - Happy path: Issue body → LLM classification → safety cross-validation → labels applied
 - LLM returns invalid schema → retry with error → valid response → proceed
-- Safety override triggered → safety-critical label applied
+- Tier derived above the recorded tier → the higher tier applies; a lower derivation never lowers it
 - Scope exceeded → escalation produced
 
 **Specification Generator (Architecture Node):**
@@ -236,7 +236,7 @@ Node implementations orchestrate calls between business logic and abstractions. 
 - Work item in hold state → invocation detects hold state, exits without action
 - Re-processing after crash at each node → resumes from failed node using persisted state
 - Human-gated node → stops and waits
-- Safety-critical work item → forced human gates
+- Higher-tier work item → forced human gates
 - Protected path violation in generated files → PR creation blocked
 - Custom pipeline graph → correct traversal order
 - Fan-out → parallel nodes activated and execute concurrently
@@ -261,12 +261,14 @@ Each infrastructure implementation tested against the real external system or a 
 - Test rate limit handling: verify backoff when rate limit headers indicate low budget
 - Test pagination: verify correct handling of paginated responses
 
-### Anthropic LLM Provider
+### Model Gateway Client
 
-- Use mock HTTP server (e.g., `wiremock`) simulating Anthropic API
-- Test: successful completion, rate limit response, server error, malformed response
+- Use a mock HTTP server (e.g., `wiremock`) simulating the model gateway
+- Test: successful completion, throttling response, gateway unavailable, malformed response
 - Test token counting accuracy against known inputs
-- Test retry behavior with exponential backoff
+- Test retry behaviour with exponential backoff
+- Assert the client carries **no credential field**, so a leak is impossible by construction rather than by careful handling
+- Assert no request or response body is logged at any level
 
 ### Extension API Client
 
@@ -285,7 +287,7 @@ Each infrastructure implementation tested against the real external system or a 
 
 ### Interface Registry Loader
 
-- Use fixture `.cogworks/interfaces/` directory with known TOML files
+- Use a fixture interface-registry directory with known TOML files
 - Test: valid definitions loaded and parsed correctly
 - Test: malformed TOML → clear error with file name and line
 - Test: schema-violating definition → clear error identifying the violation
@@ -348,12 +350,12 @@ Full pipeline tests against real GitHub and real LLM API. These are expensive an
 
 - Dedicated test repository on GitHub with known structure
 - Test issues with known expected outcomes
-- LLM API key with cost budget for testing
+- A model gateway endpoint with a cost budget for testing. No provider API key is used, because the process holds none
 
 ### Scenarios
 
 - **Happy path**: Create issue → configure the EventSource/work-item adapter to report readiness → verify the pipeline completes → verify PRs are created with correct content
-- **Safety-critical path**: Create issue touching safety-critical module → verify human gates enforced
+- **Higher-tier path**: Create issue touching a path the risk map rates at a higher tier → verify the derived tier and the human gates it requires
 - **Escalation path**: Create issue with scope exceeding threshold → verify escalation comment posted
 - **Re-trigger path**: Fail a sub-work-item intentionally → re-trigger → verify recovery
 
@@ -370,12 +372,12 @@ Full pipeline tests against real GitHub and real LLM API. These are expensive an
 The test suite requires several fixture types:
 
 - **Fixture domain projects**: Small, valid projects for each supported domain (e.g., Rust crate, KiCad schematic) with known validation results, simulation results, and interface surfaces. Stored in `tests/fixtures/domains/`.
-- **Fixture interface registries**: Hand-crafted `.cogworks/interfaces/` directories with known valid, invalid, and conflicting TOML definitions. Stored in `tests/fixtures/interfaces/`.
+- **Fixture interface registries**: Hand-crafted registry directories with known valid, invalid, and conflicting TOML definitions. Stored in `tests/fixtures/interfaces/`.
 - **GitHub API response fixtures**: Recorded or hand-crafted JSON responses for GitHub API calls. Stored in `tests/fixtures/github/`.
 - **LLM response fixtures**: Recorded or hand-crafted LLM responses for each node type's output schema. Stored in `tests/fixtures/llm/`.
 - **Extension API message fixtures**: Hand-crafted JSON request/response pairs for each Extension API method. Stored in `tests/fixtures/extension_api/`.
-- **Configuration fixtures**: Various `.cogworks/config.toml` files exercising different configuration options (including domain service registration). Stored in `tests/fixtures/config/`.
-- **Pipeline configuration fixtures**: Various `.cogworks/pipeline.toml` files exercising: default linear pipeline, custom graph with fan-out/fan-in, graph with rework loops, graph with conditional edges (deterministic and LLM-evaluated), graph with spawning nodes, multiple named pipelines, invalid graphs (unterminated cycles, orphan nodes, duplicate names). Stored in `tests/fixtures/pipelines/`.
+- **Configuration fixtures**: Various process-configuration files exercising different configuration options (including domain service registration). Stored in `tests/fixtures/config/`.
+- **Harness fixtures**: Resolved-harness fixtures carrying known stage graphs, stage-type registries, profiles and stage contracts, including invalid graphs and unresolvable profiles
 - **Alignment check fixtures**: Hand-crafted alignment check inputs and expected results for each pipeline stage. Includes: deterministic check inputs (input/output pairs with known misalignments), LLM alignment check response fixtures (JSON responses with scores, findings, traceability entries), merged finding sets, and rework context fixtures. Stored in `tests/fixtures/alignment/`.
 
 ---
@@ -427,97 +429,52 @@ For integration tests that do not need to exercise alignment logic:
 
 ---
 
-## Tool Scoping and Enforcement Tests
+## Factory Boundary Tests
 
-### Tool Profile Resolution Tests
+These exercise the boundaries CogWorks depends on but does not implement. Each has
+a test double, and each double exists to let a test assert a property CogWorks
+must hold regardless of how the real service behaves.
 
-- **Default profile application**: No `[tool_profiles]` in config. Assert: each core node receives its built-in default profile with expected tools.
-- **Profile override**: Base profile is `reader`; node has `tool_overrides` adding `fs.write` with `allowed_write_paths`. Assert: resolved profile includes base tools plus `fs.write` with specified scope.
-- **Template variable resolution**: Profile with `allowed_write_paths = ["src/{{affected_modules}}/**"]` and pipeline state `affected_modules = "auth"`. Assert: resolved path is `["src/auth/**"]`.
-- **Unresolvable template variable**: Profile references `{{undefined_var}}`. Assert: profile resolution fails with structured error; node does not activate.
-- **Unknown tool in profile**: Profile references `nonexistent.tool`. Assert: warning logged; profile resolves without the unknown tool.
+### Test doubles
 
-### Tool Filtering Tests (Layer 1)
+| Double | Stands in for | Must be able to simulate |
+|--------|---------------|--------------------------|
+| `MockHarnessLoader` | The pinned harness | Absent pin, malformed pin, withdrawn version, unverifiable content, unreachable source, no graph for a `(tier, discipline)` pair, no profile for a resolution key, content drift between invocations |
+| `MockStageRunner` | The stage runner service | Attempt accepted then completed, attempt rejected, completion never observed, cancellation |
+| `MockCheckRunReader` | The gate service's check runs | Passing, failing, in-progress, absent, authored by an unexpected App, bound to a stale SHA, two conflicting runs from the gate identity |
+| `MockMountPlanProvider` | The write-scope service | Plan produced, plan narrower than requested, no plan available |
+| `MockRiskMapLoader` | `risk-map.yaml` | Present, absent, malformed, overlapping globs at different tiers |
+| `MockAttestationProvider` | The signing library | Verifies, fails verification, absent attestation, unexpected signing identity |
 
-- **Only profiled tools in LLM call**: Node profile includes `fs.read`, `search.code`. Assert: LLM tool list contains exactly these tools and no others.
-- **Empty profile**: Node has a profile with no tools. Assert: LLM call includes no tools (but the call itself still proceeds for nodes that may operate without tools).
-- **Adapter tools in profile**: Profile includes an adapter-generated tool. Assert: tool appears in LLM tool list with correct schema.
-- **Skill tools in profile**: Node has Active skills. Assert: `skill.list`, `skill.run`, `skill.inspect` appear in tool list.
+### What these tests must prove
 
-### Scope Enforcement Tests (Layer 2)
+- **Halt, never default.** For every failure mode of the harness loader, the run
+  halts and no substitute graph, profile or rule set is used. This is the single
+  most important property to test, because a silent fallback would be invisible in
+  a passing run.
+- **Only one verdict author counts.** A passing check run from an unexpected App
+  yields an absent verdict, not a passing one. Assert on the discarded author too,
+  so the test fails if filtering is removed rather than merely passing for the
+  wrong reason.
+- **Pending is not passing.** In-progress and absent verdicts both yield a waiting
+  result.
+- **A fresh sandbox per attempt.** Assert that a retry issues a new attempt
+  request, not that it reuses a handle.
+- **The allowlist bounds the bundle.** With an unbounded token budget, a
+  non-allowlisted input is still absent. Testing this with a tight budget would
+  pass for the wrong reason.
+- **The contract is withheld.** For every stage type, the stage contract is absent
+  from the bundle of the stage it governs.
+- **Raise-only tier derivation.** A narrower later derivation does not lower a
+  recorded tier.
 
-- **Path within scope**: `fs.write` with path inside `allowed_write_paths`. Assert: operation proceeds.
-- **Path outside scope**: `fs.write` with path outside `allowed_write_paths`. Assert: operation rejected, structured error returned, `SCOPE_VIOLATION` event in audit.
-- **Denied path takes precedence**: Path matches both `allowed_write_paths` and `denied_write_paths`. Assert: operation rejected (deny takes precedence).
-- **Protected path override attempt**: `fs.write` targeting `.cogworks/constitutional-rules.md` even though profile allows the path. Assert: operation rejected with `PROTECTED_PATH_VIOLATION`.
-- **Branch pattern enforcement**: `git.commit` on branch not matching `branch_pattern`. Assert: commit rejected.
-- **Service scope enforcement**: `domain.validate` with service name not in `allowed_services`. Assert: invocation rejected.
-- **Violation threshold**: 5 scope violations in one node execution. Assert: audit warning emitted after 5th violation.
+### The `NodeRunner` seam
 
-### Tool Audit Tests
-
-- **Invocation recording**: Tool call succeeds. Assert: audit trail entry contains tool name, parameters, scope parameters, result, duration.
-- **Violation recording**: Scope violation occurs. Assert: `SCOPE_VIOLATION` event in audit with tool name, attempted params, violated constraint.
-- **Usage report**: Pipeline completes. Assert: pipeline summary includes tool usage report with per-tool counts, violation counts, invocation type breakdown.
-
----
-
-## Skill Executor Tests
-
-### Skill Invocation Tests
-
-- **Valid invocation**: Active skill with valid parameters. Assert: skill executes, tool calls proceed through scope enforcement, result returned.
-- **Missing required parameter**: Skill invoked without a required parameter. Assert: execution rejected with structured error before any tool calls.
-- **Invalid parameter type**: Skill invoked with wrong parameter type. Assert: execution rejected with structured error.
-- **Scope violation within skill**: Skill calls `fs.write` to path outside node's scope. Assert: entire skill execution fails, scope violation recorded.
-
-### Skill Lifecycle Tests
-
-- **Only Active skills visible**: Skills in Proposed, Reviewed, Deprecated, Retired states. Assert: `skill.list` returns only Active skills (and Deprecated with warning).
-- **Deprecated skill warning**: Invoking a Deprecated skill. Assert: execution proceeds with warning referencing alternative.
-- **Retired skill rejected**: Invoking a Retired skill. Assert: execution rejected with structured error.
-- **Auto-deprecation**: Skill with 85% success rate (below 90% threshold). Assert: lifecycle state changes to Deprecated with `success_rate_below_threshold` reason.
-
-### Mock Skill Executor
-
-For integration tests that do not need to exercise skill logic:
-
-- Returns configurable skill execution results (success/failure)
-- Records all invocations for assertion
-- Default behavior: always succeeds
-
----
-
-## Adapter Generator Tests
-
-### Generation Tests
-
-- **OpenAPI 3.1 generation**: Valid OpenAPI spec with 3 endpoints. Assert: 3 TOML tool definition files generated with correct namespacing.
-- **EAB schema generation**: Valid EAB JSON Schema. Assert: tool definitions generated with correct parameter schemas.
-- **Schema conformance**: Generated tool definitions. Assert: all conform to the tool definition schema.
-
-### Drift Detection Tests
-
-- **No drift**: Generated adapters match source spec. Assert: drift check reports no differences.
-- **Removed endpoint**: Source spec has fewer endpoints than generated adapters. Assert: drift report identifies removed endpoint.
-- **Changed parameter**: Source spec has a different parameter type for an endpoint. Assert: drift report identifies the parameter change.
-
----
-
-## Progressive Discovery Tests
-
-### Activation Tests
-
-- **Above threshold**: Node with 20 tools. Assert: compact index presented, meta-tools available.
-- **Below threshold**: Node with 10 tools. Assert: full schemas presented, no meta-tools.
-- **Exact threshold**: Node with exactly 15 tools (default threshold). Assert: compact index activated.
-
-### Meta-Tool Tests
-
-- **tools.search**: Search query "validate". Assert: returns matching tools with descriptions.
-- **tools.schema**: Request schema for specific tool. Assert: returns full JSON Schema.
-- **tools.call**: Invoke tool via meta-tool. Assert: tool executes with scope enforcement.
-- **Skill priority**: Search matching both a skill and raw tool. Assert: skill ranked first.
+The dispatch seam remains how orchestration is tested without any stage driver
+being implemented: production code resolves a node's stage type, tests substitute
+a double. Orchestration tests use arbitrary node-id fixtures deliberately
+decoupled from real stage-type names, which proves the orchestration logic is
+independent of which concrete drivers exist.
 
 ---
 
