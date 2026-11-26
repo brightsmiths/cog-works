@@ -4,6 +4,23 @@ This document defines the functional requirements for CogWorks. Every requiremen
 
 Requirements are organized by functional area. Each requirement states what the system **MUST** or **MUST NOT** do. Implementation constraints (how it must be done) are in `constraints.md`.
 
+## Increment levels
+
+Each category carries a **Level** marker giving the increment at which its requirements come into force. Levels correspond to the increments of CogWorks' role in the wider factory, described in the [`brightsmiths/handbook`](https://github.com/brightsmiths/handbook) repository under `docs/roadmap.md`.
+
+| Level | Scope |
+| ----- | ----- |
+| **L1** | First dark slice: the `unit-oracle` and `implement` stage types on a single internal-tier repository, driven from the CLI, with profile selection and stage graphs resolved from the pinned harness and verdicts read from gate check runs. |
+| **L2** | Event-driven runs, the `specify`, `contract` and `plan` stage types producing specification pull requests, sub-issue creation, tier derivation and signed stage attestations. |
+| **L3** | Consumption of automated intake: upstream attestations verified and their machine-readable blocks consumed. |
+| **L4** | Product-tier support: the `architect`, `acceptance-oracle`, `refactor`, `review-semantic` and `review-security` stage types, holdouts, and the specification / implementation / acceptance repository split. |
+
+A requirement at a later level is specified now and implemented when that level is built. Requirements with no level marker are foundational and apply from L1.
+
+## Retired requirement IDs
+
+Some requirement IDs appear in this document only as retirement notes. A retired ID **MUST NOT** be reused for a new requirement: old IDs appear in commit messages, test names and issue history, and reassigning one would silently change what that history refers to. New requirements always take the next unused number in their category.
+
 ---
 
 ## REQ-PIPE: Pipeline Execution
@@ -18,7 +35,7 @@ CogWorks MUST apply `cogworks:node:<name>` labels to track the currently active 
 
 ### REQ-PIPE-003: Node advancement
 
-CogWorks MUST evaluate outgoing edge conditions when a node completes and activate all downstream nodes whose edge conditions are satisfied and whose other input requirements are met. When no configuration file exists, the default linear pipeline (Intake → Architecture → Interface Design → Planning → Code Generation → Review → Integration) is used.
+CogWorks MUST evaluate outgoing edge conditions when a node completes and activate all downstream nodes whose edge conditions are satisfied and whose other input requirements are met.
 
 ### REQ-PIPE-004: Idempotent operations
 
@@ -30,9 +47,9 @@ CogWorks MUST post a structured status comment on the work item issue when enter
 
 ### REQ-PIPE-006: Node gate enforcement
 
-CogWorks MUST respect node gate configuration (`auto-proceed` or `human-gated`). Safety-critical work items MUST override all code-producing node gates to `human-gated` regardless of repository configuration.
+CogWorks MUST respect the node gate configuration (`auto-proceed` or `human-gated`) declared by the resolved stage graph. The work item's tier (REQ-TIER-001) determines which stages carry a human gate; a tier's human gates MUST NOT be weakened by any other configuration source.
 
-These are CogWorks pipeline-advancement gates. External factory or GateKeeper approvals are not CogWorks gate mechanisms; their results are conveyed through the work-item interface and do not change the configured CogWorks gates.
+These are CogWorks pipeline-advancement gates: they decide whether the stage graph advances, never whether an artifact passes. Gate verdicts are a separate concern, computed elsewhere and read through check runs (REQ-VERDICT-001). Human approvals recorded as pull request reviews are conveyed through the work-item interface and do not change the configured CogWorks gates.
 
 **Exception**: Constitutional rules loading (REQ-CONST-001) is unconditional and not subject to gate configuration. It runs on every pipeline invocation regardless of gate settings.
 
@@ -48,17 +65,11 @@ The orchestrator MUST prevent duplicate pipeline runs for the same work item. If
 
 Re-triggering a failed pipeline MUST support resuming from the failed node (using the persisted pipeline state from REQ-EXEC-002) rather than restarting from the beginning. A full restart MUST be supported only on explicit request through the configured work-item interface. `cogworks:restart` and `/cogworks restart` are default adapter mappings, not fixed business-logic signals.
 
-### REQ-PIPE-010: Configurable pipeline graph
+### REQ-PIPE-012: Stage attempt workspace
 
-The pipeline MUST support configurable directed graphs where nodes are processing steps and edges are transitions with conditions. The default configuration MUST be the existing linear pipeline. Edge conditions MUST support both deterministic evaluation (expression checks against pipeline state) and LLM evaluation (natural language conditions assessed against pipeline context). Graph cycles MUST have termination conditions (maximum traversals, cost budget) to prevent infinite loops.
+For each stage attempt, CogWorks MUST request one fresh sandbox through the stage-runner interface (REQ-SANDBOX-001). CogWorks MUST request cleanup on success, failure, or cancellation. The sandbox provider and isolation technology are infrastructure choices behind that interface. Durable pipeline state and deliverables MUST remain recoverable from the work-item system and repository; sandbox-local state is an execution aid, not a durability mechanism.
 
-### REQ-PIPE-011: Shift work boundary
-
-Each work item classification MUST define an explicit shift work boundary — the pipeline node after which CogWorks proceeds non-interactively. Nodes before the boundary MAY require human approval (configurable). Nodes after the boundary run autonomously with gate enforcement as the quality control. The boundary MUST be visible in the GitHub issue (as a label or comment) so humans know when to engage and when to let the system run.
-
-### REQ-PIPE-012: Implementation job workspace
-
-For each implementation job, CogWorks MUST request one ephemeral container through an infrastructure provider interface. CogWorks' orchestrator owns the job lifecycle and MUST request cleanup on success, failure, or cancellation. The container runtime and provider (for example Docker, Kubernetes, or a cloud runtime) are infrastructure choices behind that interface. Durable pipeline state and deliverables MUST remain recoverable from the work-item system and repository; container-local state is an execution aid, not a durability mechanism.
+_Note: Requirement IDs REQ-PIPE-010 and REQ-PIPE-011 are retired and MUST NOT be reused._
 
 ---
 
@@ -70,15 +81,13 @@ The pipeline MUST be a directed graph where nodes represent processing steps and
 
 ### REQ-GRAPH-002: Node identity and ordering
 
-Each node in the graph MUST have a unique name within the pipeline configuration. The orchestrator MUST compute the execution order from the edge definitions using topological sorting. For nodes that are not connected by any path, the orchestrator MUST support concurrent execution (see REQ-EXEC-006).
+Each node in the graph MUST have a unique name within the resolved stage graph, and MUST declare exactly one stage type (REQ-STAGE-001). The orchestrator MUST compute the execution order from the edge definitions using topological sorting. For nodes that are not connected by any path, the orchestrator MUST support concurrent execution (see REQ-EXEC-006).
 
-### REQ-GRAPH-003: Default linear pipeline
+### REQ-GRAPH-005: Stage graph source
 
-If a repository has no pipeline configuration file, the orchestrator MUST use a default pipeline equivalent to the original 7-node linear sequence: Intake → Architecture → Interface Design → Planning → Code Generation → Review → Integration. Default properties: all edges unconditional, review-to-code-generation rework edge has `max_traversals: 3` (matching REQ-REVIEW-005's default remediation cycle limit), safety-classified work items require human approval at Architecture, Interface Design, and Review, no parallel execution.
+The stage graph MUST be resolved from the harness at the version pinned by the target repository (REQ-HARNESS-001), selected by the work item's tier and discipline. The target repository MUST NOT be able to define, extend, override or replace the stage graph. There MUST be no fallback graph: if no graph exists for the resolved `(tier, discipline)` pair, CogWorks MUST halt the run rather than substitute a default.
 
-### REQ-GRAPH-004: Pipeline configuration file
-
-Pipeline graphs MUST be configurable per repository via a TOML configuration file at `.cogworks/pipeline.toml`. The configuration defines nodes, edges, and pipeline-level settings. Multiple named pipelines MAY be defined in the same file. The pipeline for a work item is selected by the Intake node's classification output.
+_Note: Requirement IDs REQ-GRAPH-003 and REQ-GRAPH-004 are retired and MUST NOT be reused._
 
 ---
 
@@ -86,19 +95,301 @@ Pipeline graphs MUST be configurable per repository via a TOML configuration fil
 
 ### REQ-NODE-001: Node interface
 
-Every node, regardless of type, MUST implement a common interface: name (unique identifier), type (`llm`, `deterministic`, or `spawning`), inputs (required artifacts or state), outputs (produced artifacts or state), validation (how success is determined), timeout (maximum wall-clock time), and cost budget (for LLM nodes). The orchestrator MUST verify all inputs are available before starting a node.
+Every node MUST implement a common interface: name (unique within the graph), stage type (REQ-STAGE-001), inputs (required artifacts or state), outputs (produced artifacts or state), validation (how success is determined), timeout (maximum wall-clock time), and cost budget. The orchestrator MUST verify all declared inputs are available before starting a node.
 
-### REQ-NODE-002: LLM nodes
+A node's behaviour is determined entirely by its stage type and the agent profile resolved for it (REQ-PROFSEL-001). CogWorks MUST NOT distinguish node kinds by any built-in taxonomy of its own.
 
-LLM nodes MUST specify a prompt template, context requirements, output schema, and retry behaviour. The orchestrator MUST assemble context, invoke the LLM gateway, validate output against the schema, retry on failure (up to the node's retry budget), and record the full prompt, response, validation result, and cost in the audit trail.
+_Note: Requirement IDs REQ-NODE-002, REQ-NODE-003 and REQ-NODE-004 are retired and MUST NOT be reused._
 
-### REQ-NODE-003: Deterministic nodes
+---
 
-Deterministic nodes MUST specify an execution method (`script`, `domain_service`, or `builtin`). The orchestrator MUST execute the specified method, capture output, parse it according to the node's output specification, and record the invocation and result in the audit trail.
+## REQ-STAGE: Stage Types
 
-### REQ-NODE-004: Spawning nodes
+### REQ-STAGE-001: Stage type registry
 
-Spawning nodes MUST specify a prompt template (for LLM-based analysis) or a script (for deterministic issue creation), an issue template, labels to apply, and whether to link new issues to the current work item. Spawning nodes MUST be non-blocking by default — the pipeline continues regardless of success. The orchestrator MUST create resulting issues, link them to the parent work item, and record them in the audit trail.
+CogWorks MUST resolve the set of valid stage types from a registry supplied by the harness at the pinned version. A stage type names a kind of work — for example `specify`, `architect`, `contract`, `plan`, `unit-oracle`, `acceptance-oracle`, `implement`, `refactor`, `review-semantic`, `review-security`, `drift-scan` or `debt-fix`. Each node in the resolved stage graph MUST declare exactly one stage type drawn from that registry.
+
+### REQ-STAGE-002: Registry validation at graph load
+
+When loading a stage graph, CogWorks MUST validate every node's declared stage type against the registry **before** dispatching any node. A stage type absent from the registry MUST halt the run with a graph-invalid error. Dispatch-time rejection of an unknown stage type MUST also be implemented, as a second line of defence, and MUST fail the node rather than terminate the process.
+
+### REQ-STAGE-003: No built-in stage types
+
+CogWorks MUST NOT contain a built-in list of stage types, agent personas, role prompts, or any discipline-specific logic. A stage type is data supplied by the harness. Adding a stage type MUST NOT require a change to CogWorks.
+
+---
+
+## REQ-PROFSEL: Agent Profile Selection
+
+_Note: the retired `REQ-PROFILE-*` IDs described per-node tool profiles and MUST NOT be reused. This category is distinct._
+
+### REQ-PROFSEL-001: Deterministic profile resolution
+
+For each stage, CogWorks MUST resolve exactly one agent profile from the pinned harness, keyed by `(stage type, discipline, language or toolchain, tier)`. Resolution MUST be deterministic: the same key against the same harness version MUST always resolve to the same profile at the same version. No LLM may participate in, influence, or override profile resolution.
+
+### REQ-PROFSEL-002: Stage contract loading
+
+Resolving a profile MUST also load its stage contract, which declares: the input allowlist, the output schema, the writable paths, the network profile, the budget, the maximum attempt count, and the identity role. CogWorks MUST take these values from the contract and MUST NOT substitute defaults of its own for any value the contract declares.
+
+### REQ-PROFSEL-003: Selection recorded in the attestation
+
+The resolved stage type, profile identifier, profile version, harness version, discipline, language or toolchain, and tier MUST be recorded in the stage attestation (REQ-ATTEST-003), so that the selection can be reproduced and audited after the fact.
+
+### REQ-PROFSEL-004: The agent never sees its own contract
+
+The stage contract MUST NOT be placed in the context bundle or otherwise made visible to the agent it governs. The contract is enforced by CogWorks, the mount-plan provider and the gate service; an agent that could read its own constraints could reason about evading them.
+
+### REQ-PROFSEL-005: Unresolvable profile halts
+
+If no profile resolves for a stage's key, CogWorks MUST halt the run with a diagnostic naming the unresolved key. CogWorks MUST NOT fall back to another profile, to a default profile, or to an unprofiled agent turn.
+
+---
+
+## REQ-HARNESS: Harness Loading and Pinning
+
+### REQ-HARNESS-001: The harness is the source of agent configuration
+
+CogWorks MUST load the stage-type registry, stage graphs, agent profiles, stage contracts, prompt templates, output schemas, Context Packs and constitutional rules from the harness, at the version pinned by the target repository in `.factory/pin.yaml`.
+
+### REQ-HARNESS-002: Pin resolution and verification
+
+CogWorks MUST read the pin from the target repository and MUST verify that the harness content it loaded matches that pin before using any of it. A missing, malformed, unresolvable or withdrawn pin MUST halt the run. CogWorks MUST NOT substitute a default version, the latest version, or a cached version from a previous run.
+
+### REQ-HARNESS-003: The harness is read-only
+
+CogWorks MUST treat the harness as read-only. CogWorks MUST NOT write to the harness, and MUST NOT grant any stage write access to it (REQ-BOUND-010).
+
+### REQ-HARNESS-004: No repository-supplied agent configuration
+
+The target repository MUST NOT be able to supply, extend or override any of the material listed in REQ-HARNESS-001. The repository contributes exactly two inputs to a run: `risk-map.yaml` and `.factory/pin.yaml`, both human-owned.
+
+### REQ-HARNESS-005: Harness content drift during a run
+
+CogWorks MUST record the resolved harness version and the hash of the resolved stage graph in the pipeline state. On resuming a run, a mismatch between the recorded values and the freshly resolved values MUST escalate for human decision rather than halting outright or silently continuing against the new content.
+
+---
+
+## REQ-BUNDLE: Context Bundles
+
+### REQ-BUNDLE-001: Allowlisted inputs only
+
+The context bundle for a stage attempt MUST be assembled strictly from the inputs its profile's allowlist declares. An input not on the allowlist MUST be absent from the bundle — not merely deprioritised, truncated or summarised. CogWorks MUST NOT add an input to a bundle because it appears useful.
+
+### REQ-BUNDLE-002: Bundle hashing
+
+Every context bundle MUST be hashed, and the hash MUST be recorded in the stage attestation and referenced from the resulting pull request (REQ-INT-002). The hash MUST cover every input in the bundle, including Context Pack content and constitutional rules.
+
+### REQ-BUNDLE-003: Trust-zone barrier
+
+Bundle assembly MUST enforce the information barrier its profile's trust zone requires. In particular: a stage that writes an oracle MUST NOT receive implementation source, and a stage that writes an implementation MUST NOT receive holdout content or, at product tier and above, acceptance source. Enforcement MUST be structural — a barrier that depends on the agent choosing not to look is not a barrier.
+
+### REQ-BUNDLE-004: Untrusted content is data
+
+Content originating outside the harness — issue bodies, comments, repository files, model output from an earlier stage — MUST be placed in the bundle as data to be analysed, never as instructions. Event or issue fields MUST NOT be interpolated into a prompt.
+
+---
+
+## REQ-SANDBOX: Stage Attempt Execution
+
+### REQ-SANDBOX-001: Stage attempts execute in a sandbox
+
+Every agent stage attempt MUST execute in a fresh sandbox obtained through the stage-runner interface. CogWorks MUST pass the image, the context bundle, the mount plan, the network profile, the resource limits and the identity role, and MUST NOT execute the agent itself (REQ-BOUND-001).
+
+### REQ-SANDBOX-002: Identity role and push
+
+Each stage attempt MUST run under the identity role its stage contract declares. Commits produced by the attempt MUST be pushed by the stage runner under that identity, never by CogWorks (REQ-BOUND-007).
+
+### REQ-SANDBOX-003: Mount plan
+
+The writable paths a stage attempt is permitted MUST be expressed as a mount plan obtained from the mount-plan provider for the stage's identity role, and passed to the stage runner. CogWorks MUST NOT be the only enforcement point for write boundaries.
+
+### REQ-SANDBOX-004: Completion observed through GitHub state
+
+A stage attempt's completion MUST be determined from GitHub state: the expected branch reference carrying the attempt's commits, and the attempt's output record. A queue or callback event MAY prompt CogWorks to re-read that state sooner, but MUST NOT be the authority for completion — a run must be reconstructable from GitHub alone after a restart.
+
+### REQ-SANDBOX-005: Network profile
+
+A stage attempt's egress MUST be restricted to the network profile its stage contract declares. No stage attempt may be granted general network access, and no secret may be placed inside a sandbox.
+
+---
+
+## REQ-VERDICT: Gate Verdicts
+
+### REQ-VERDICT-001: Verdicts are read, not computed
+
+CogWorks MUST obtain every pass/fail verdict by reading the gate service's check runs for the relevant commit SHA, together with their structured output.
+
+### REQ-VERDICT-002: CogWorks never authors a verdict
+
+CogWorks MUST NOT compute a pass/fail verdict, MUST NOT author or publish a check run, and MUST NOT configure which checks are required (REQ-BOUND-008). CogWorks' own stage pre/post checks bound an attempt — they may cause a retry, a rework cycle or an escalation — but they are never a verdict and are never published as a check run. An attempt that passes every CogWorks check still has to pass the gate.
+
+### REQ-VERDICT-003: Single trust anchor
+
+CogWorks MUST accept a check run as a verdict only when it was authored by the gate service's own identity. A check run authored by any other identity MUST be ignored regardless of its name, conclusion or content. This is CogWorks' only trust anchor for pass and fail, so it MUST NOT be configurable per repository.
+
+### REQ-VERDICT-004: Coarse feedback on hidden checks
+
+Where a verdict derives from checks hidden from the implementing stage, the feedback CogWorks passes back MUST be limited to the affected requirement identifiers. CogWorks MUST NOT relay hidden check names, assertions, source or output.
+
+### REQ-VERDICT-005: Pending and stale verdicts
+
+A pending verdict MUST cause CogWorks to wait, not to advance. A verdict bound to a SHA other than the one under consideration MUST be treated as absent. A missing verdict MUST NOT be interpreted as a pass.
+
+---
+
+## REQ-ORACLE: Oracle Separation
+
+### REQ-ORACLE-001: Separate stages, identities and sandboxes
+
+For a given slice, the oracle and the implementation MUST be produced by different stage types, running under different identity roles, in different sandboxes. CogWorks MUST NOT run a single stage that produces both.
+
+### REQ-ORACLE-002: Authorship barrier
+
+The stage that writes the oracle MUST NOT receive the implementation source, and the stage that writes the implementation MUST NOT be able to modify the oracle (REQ-BUNDLE-003).
+
+### REQ-ORACLE-003: Locked before implementation
+
+The oracle for a slice MUST be hashed into a manifest, and that manifest MUST be signed by the oracle identity, before the implementing stage for that slice starts. CogWorks MUST verify that a signed manifest exists and covers the slice before dispatching the implementing stage.
+
+### REQ-ORACLE-004: Locked paths are read-only to the implementer
+
+Locked oracle paths — including test sources, fixtures, snapshots and test-affecting configuration — MUST be mounted read-only for the implementing stage, and MUST be outside its declared writable paths.
+
+### REQ-ORACLE-005: Feedback never carries oracle source
+
+Structured feedback returned to an implementing stage MUST describe what failed, why it matters and what is permitted. It MUST NOT include oracle source, assertions or expected values.
+
+### REQ-ORACLE-006: Disputes rather than edits
+
+An agent that believes an oracle is wrong MUST have a route to raise a dispute, and MUST NOT be able to resolve the disagreement by editing the oracle. CogWorks MUST route a dispute to the oracle stage or to a human, and MUST record its resolution.
+
+---
+
+## REQ-REWORK: Rework and Escalation
+
+### REQ-REWORK-001: Bounded rework
+
+Rework MUST be bounded by the maximum attempt count the stage contract declares. Each rework cycle MUST pass the structured findings from the failed attempt into the next attempt's context bundle, subject to REQ-ORACLE-005 and REQ-VERDICT-004.
+
+### REQ-REWORK-002: Early escalation on a repeated failure class
+
+CogWorks MUST classify attempt failures and MUST escalate early when the same failure class recurs, rather than consuming the remaining attempt budget. A repeating failure class usually indicates that the specification or the oracle is wrong, not the implementation.
+
+### REQ-REWORK-003: Escalation produces a dossier for a human
+
+Escalation MUST produce an escalation issue acting as an evidence dossier for a human: the failure history, the findings from each attempt, any disputes raised with the agent's argument, the resolved profile and harness version, and the context bundle hashes. Escalation MUST NOT start another agent loop.
+
+---
+
+## REQ-TIER: Criticality Tiers
+
+**Level:** L2
+
+### REQ-TIER-001: Tier derived from the risk map
+
+The tier of a piece of work MUST be derived deterministically from the target repository's `risk-map.yaml`, which maps path globs to tiers and is human-owned. The tier of the work is the highest tier among the paths it touches.
+
+### REQ-TIER-002: Raise only
+
+CogWorks MAY raise a derived tier — for example from the affected areas an upstream scoping service reports — and MUST NOT lower one. Lowering a tier MUST require a human.
+
+### REQ-TIER-003: Human confirmation above internal tier
+
+For work at product tier or above, the derived tier MUST be confirmed by a human before the run proceeds past the design stages.
+
+### REQ-TIER-004: Missing or malformed risk map
+
+A missing, malformed or unparseable `risk-map.yaml` MUST halt the run. CogWorks MUST NOT assume the lowest tier, or any tier, in its absence.
+
+---
+
+## REQ-SPEC: Specification Stages
+
+**Level:** L2
+
+### REQ-SPEC-001: Specify stage output
+
+The `specify` stage MUST produce: the confirmed intent, acceptance criteria expressed in a structured form with unique requirement identifiers, the open questions it could not resolve, and a proposed tier with reasoning.
+
+### REQ-SPEC-002: Design stage output is a specification pull request
+
+Each design stage — `specify`, `architect`, `contract` and `plan` — MUST deliver its output as a specification pull request rather than by writing to a branch directly.
+
+### REQ-SPEC-003: Human approval is a pull request review
+
+Approval of a specification pull request MUST be a GitHub review by an authorised human followed by a merge. CogWorks MUST NOT approve, merge or self-certify a specification pull request, and MUST NOT treat its own stage checks as approval.
+
+### REQ-SPEC-004: Requirement identifiers are the traceability spine
+
+Requirement identifiers established by the `specify` stage MUST be carried through every downstream stage: mapped to slices by `plan`, traced by the oracle stages, and used as the unit of coarse feedback (REQ-VERDICT-004).
+
+---
+
+## REQ-ATTEST: Attestations
+
+### REQ-ATTEST-001: Upstream attestations are verified, not recomputed
+
+**Level:** L3
+
+Before acting on a work item, CogWorks MUST verify the signed attestations of the upstream intake, triage and scoping services that the configured trust policy requires, per REQ-BOUND-006. CogWorks MUST NOT repeat the checks those services performed.
+
+### REQ-ATTEST-002: Machine-readable blocks only
+
+**Level:** L3
+
+Where CogWorks consumes an upstream service's output, it MUST read the machine-readable block that service publishes. CogWorks MUST NOT parse prose to recover structured meaning.
+
+### REQ-ATTEST-003: Stage attestations are signed
+
+**Level:** L2
+
+CogWorks MUST produce a signed attestation for every stage attempt, recording what it selected, what the stage saw, and what the stage produced. Attestations MUST be transported as hidden signed comments through the work-item interface.
+
+### REQ-ATTEST-004: Attestation content
+
+**Level:** L2
+
+A stage attestation MUST record at least: the work item and slice, the stage type, the resolved profile and its version, the harness version, the discipline, the language or toolchain, the tier, the context bundle hash, the identity role, the commit SHA produced, and the verdict subsequently read for that SHA.
+
+---
+
+## REQ-ASSURE: Assurance Review Stages
+
+**Level:** L4
+
+### REQ-ASSURE-001: Reviews produce findings, not verdicts
+
+The `review-semantic` and `review-security` stage types MUST produce structured findings. They MUST NOT produce a pass/fail result, and their output MUST NOT be treated as a verdict (REQ-VERDICT-002).
+
+### REQ-ASSURE-002: Reviewers write nothing
+
+An assurance review stage MUST have no writable paths. Its sole output is its structured findings.
+
+### REQ-ASSURE-003: Reviewer visibility
+
+An assurance review stage MUST receive the diff, the specification and the accumulated evidence. It MUST NOT receive the implementing agent's transcript or reasoning, the pull request narrative, holdout content, or secrets.
+
+### REQ-ASSURE-004: Blocking is decided by the gate
+
+Whether a finding blocks is decided by the gate service from the findings and the tier's thresholds. CogWorks MUST surface findings and MUST NOT decide which of them block.
+
+---
+
+## REQ-SPLIT: Repository Split and Holdouts
+
+**Level:** L4
+
+### REQ-SPLIT-001: Repository layout per tier
+
+CogWorks MUST support the repository layout the work item's tier requires: a single repository with protected path zones at the lower tiers, and separate specification, implementation and acceptance repositories at product tier and above.
+
+### REQ-SPLIT-002: Holdouts live outside the implementation repository
+
+Holdout content MUST reside outside the implementation repository, in a private location per deployment. CogWorks MUST NOT place holdout content in a context bundle, a pull request, an issue comment, or an attestation.
+
+### REQ-SPLIT-003: Holdout runs are the gate's
+
+Holdout checks MUST be injected and run by the gate service at gate time, not by CogWorks. CogWorks reads the resulting verdict and relays only the affected requirement identifiers (REQ-VERDICT-004).
 
 ---
 
@@ -106,7 +397,9 @@ Spawning nodes MUST specify a prompt template (for LLM-based analysis) or a scri
 
 ### REQ-EDGE-001: Edge condition types
 
-The orchestrator MUST support three types of edge conditions: deterministic conditions (evaluated by the orchestrator against pipeline state via a simple expression language), LLM-evaluated conditions (natural-language conditions assessed by the LLM against current pipeline context), and composite conditions (boolean combinations AND/OR/NOT of deterministic and LLM-evaluated conditions). LLM-evaluated conditions MUST be recorded in the audit trail. LLM-evaluated conditions MUST have a deterministic fallback (edge either taken or not taken) when the LLM is unavailable or returns an ambiguous response.
+The orchestrator MUST support two types of edge conditions: deterministic conditions (evaluated by the orchestrator against pipeline state via a simple expression language) and composite conditions (boolean combinations AND/OR/NOT of deterministic conditions).
+
+Routing MUST be deterministic. No edge condition may be evaluated by an LLM, and no LLM output may select which edge is taken. An LLM produces artifacts; it does not decide control flow.
 
 ### REQ-EDGE-002: Edge priority and mutual exclusion
 
@@ -120,9 +413,9 @@ Edges that create cycles MUST specify a maximum traversal count, which node outp
 
 ## REQ-EXEC: Pipeline Execution
 
-### REQ-EXEC-001: Ephemeral implementation workspace
+### REQ-EXEC-001: Ephemeral stage attempt workspace
 
-Each implementation job MUST execute in one ephemeral container requested by CogWorks' orchestrator through an infrastructure provider interface. The orchestrator MUST arrange cleanup when the job succeeds, fails, or is cancelled. The provider supplies the runtime; CogWorks does not prescribe a specific container platform. Pipeline state MUST be reconstructable from durable work-item and repository records, so loss of the container MUST NOT require restarting the pipeline from scratch.
+Each stage attempt MUST execute in one fresh sandbox requested through the stage-runner interface. The orchestrator MUST arrange cleanup when the attempt succeeds, fails, or is cancelled. The provider supplies the isolation; CogWorks does not prescribe a specific sandbox platform. Pipeline state MUST be reconstructable from durable work-item and repository records, so loss of a sandbox MUST NOT require restarting the pipeline from scratch.
 
 ### REQ-EXEC-002: Pipeline state machine
 
@@ -130,7 +423,11 @@ The orchestrator MUST maintain a state machine for each pipeline run tracking: c
 
 ### REQ-EXEC-003: Node execution lifecycle
 
-Each node execution MUST follow this lifecycle: (1) precondition check — verify all declared inputs are available, (2) announce — update pipeline state comment, (3) execute — run the node, (4) validate — check output against validation criteria (schema validation, domain service validation, and alignment verification for LLM nodes), (5) record — write outputs and audit trail, (6) announce — update GitHub state, (7) evaluate edges — evaluate outgoing edge conditions. If execution fails and retries are available, the node re-enters execute with error info in context. If alignment verification fails and rework cycles are available, the node re-enters execute with specific misalignment findings in context. If retries and rework cycles are both exhausted, the node enters `failed` state.
+Each node execution MUST follow this lifecycle: (1) precondition check — verify all declared inputs are available, (2) resolve — select the agent profile and load its stage contract (REQ-PROFSEL-001), (3) announce — update pipeline state comment, (4) execute — run the stage attempt in its sandbox, (5) validate — check output against the output schema the harness declares, plus any configured stage pre/post checks, (6) record — write outputs and audit trail, (7) announce — update GitHub state, (8) evaluate edges — evaluate outgoing edge conditions.
+
+Stage pre/post checks bound an attempt; they never constitute a gate verdict and are never published as a check run (REQ-VERDICT-002). Where the resolved graph declares a gate on the node, the node's outcome additionally depends on the gate verdict read per REQ-VERDICT-001.
+
+If execution fails and retries are available, the node re-enters execute with error information in context. If a post-check or gate verdict fails and rework cycles are available, the node re-enters execute with the specific findings in context (REQ-REWORK-001). If retries and rework cycles are both exhausted, the node enters `failed` state.
 
 ### REQ-EXEC-004: Pipeline triggering
 
@@ -138,7 +435,7 @@ The pipeline MUST be triggerable through the EventSource abstraction, including 
 
 ### REQ-EXEC-005: Pipeline cancellation
 
-A running pipeline MUST be cancellable through the EventSource/work-item interface. The provider-specific cancellation signal is not prescribed here. On cancellation: active node executions are terminated (in-progress LLM calls are allowed to complete), current state is persisted through the work-item interface, a summary is posted, and active implementation containers are cleaned up.
+A running pipeline MUST be cancellable through the EventSource/work-item interface. The provider-specific cancellation signal is not prescribed here. On cancellation: active stage attempts are terminated, current state is persisted through the work-item interface, a summary is posted, and every active sandbox is cleaned up.
 
 ### REQ-EXEC-006: Parallel node execution
 
@@ -146,15 +443,15 @@ When the graph has multiple nodes whose inputs are all available simultaneously,
 
 ### REQ-EXEC-007: Sub-work-item execution within graph
 
-Sub-work-items produced by a planning node MUST be processed as a sub-graph within the pipeline. Each sub-work-item follows a code-generation → review → integration sequence (or a configured sub-graph). Sub-work-items MUST be processed in topological dependency order. Sub-work-items with no mutual dependency path MAY execute concurrently when the pipeline configuration allows parallel fan-out.
+Sub-work-items produced by the `plan` stage MUST be processed as a sub-graph within the pipeline, following the slice sub-graph the resolved stage graph declares. Sub-work-items MUST be processed in topological dependency order. Sub-work-items with no mutual dependency path MAY execute concurrently when the resolved graph allows parallel fan-out.
 
-### REQ-EXEC-008: Implementation job container lifecycle
+### REQ-EXEC-008: Stage attempt sandbox lifecycle
 
-For each implementation job, the orchestrator MUST request exactly one ephemeral container through an infrastructure provider interface and MUST own its lifecycle, including cleanup after success, failure, or cancellation. Retry attempts within the same active implementation job use that job's container; a new or resumed implementation job requests a new container. The provider interface MUST isolate CogWorks' orchestration contract from the selected runtime or hosting provider. The requirements do not prescribe provider-specific APIs or container configuration.
+For each stage attempt, the orchestrator MUST request exactly one fresh sandbox through the stage-runner interface and MUST request cleanup after success, failure, or cancellation. **A sandbox MUST NOT be reused across attempts.** Every retry, rework cycle or resumed attempt gets a new sandbox, so that no state, artifact or credential from a previous attempt can survive into the next one. The provider interface MUST isolate CogWorks' orchestration contract from the selected isolation technology or hosting provider. These requirements do not prescribe provider-specific APIs or sandbox configuration.
 
-### REQ-EXEC-009: Persist before implementation container cleanup
+### REQ-EXEC-009: Persist before sandbox cleanup
 
-Before requesting cleanup of an implementation container on a terminal path, the orchestrator MUST attempt to persist the latest recoverable pipeline state and deliverables through the work-item and repository interfaces. If persistence fails, the orchestrator MUST still request container cleanup, record the persistence failure through available operational logging, and resume only from the last successfully persisted state. Container-local state MUST NOT be treated as durable recovery data.
+Before requesting cleanup of a sandbox on a terminal path, the orchestrator MUST attempt to persist the latest recoverable pipeline state and deliverables through the work-item and repository interfaces. If persistence fails, the orchestrator MUST still request sandbox cleanup, record the persistence failure through available operational logging, and resume only from the last successfully persisted state. Sandbox-local state MUST NOT be treated as durable recovery data.
 
 ---
 
@@ -162,119 +459,123 @@ Before requesting cleanup of an implementation container on a terminal path, the
 
 ### REQ-CLASS-001: Classification schema
 
-The Task Classifier MUST produce structured output conforming to the classification schema: task type (enum), affected modules (list), estimated scope, safety_affecting flag, and rationale.
-
-### REQ-CLASS-002: Safety override
-
-If any module in the `affected_modules` list is registered in the safety-critical module registry, the final classification MUST set `safety_affecting: true`, regardless of what the LLM produced.
+The intake step MUST produce structured output conforming to the classification schema: task type (enum), affected modules (list), estimated scope, proposed tier, and rationale.
 
 ### REQ-CLASS-003: Scope threshold
 
-When the estimated scope exceeds the configured threshold, the Task Classifier MUST produce an escalation result and MUST NOT proceed to subsequent nodes.
+When the estimated scope exceeds the configured threshold, the intake step MUST produce an escalation result and MUST NOT proceed to subsequent nodes.
+
+_Note: Requirement ID REQ-CLASS-002 is retired and MUST NOT be reused. Tier derivation replaces the safety-critical module registry; see REQ-TIER-001._
 
 ---
 
-## REQ-ARCH: Architecture and Specification
+## REQ-ARCH: Architect Stage
+
+**Level:** L4
 
 ### REQ-ARCH-001: Architectural context
 
-The Specification Generator MUST include relevant ADRs, coding standards, and architectural constraints from the repository in its LLM context.
+The context bundle for the `architect` stage MUST include the relevant ADRs, coding standards and architectural constraints its profile's input allowlist declares (REQ-BUNDLE-001).
 
-### REQ-ARCH-002: Specification format
+### REQ-ARCH-002: Architect stage output
 
-The generated specification MUST be a structured Markdown document containing: affected modules, design decisions with rationale, dependency changes, risk assessment, and required ADRs.
+The `architect` stage MUST produce: one or more ADRs, the non-functional requirements for the work, a threat-model delta, and a patch to the repository's `risk-map.yaml` where the work changes the tier of any path.
 
 ### REQ-ARCH-003: Specification delivered as PR
 
-The specification document MUST be delivered via a Pull Request targeting the appropriate branch of the target repository.
+The `architect` stage's output MUST be delivered as a specification pull request targeting the repository that owns the specification paths for the work item's tier (REQ-SPLIT-001).
 
 ### REQ-ARCH-004: Specification gate
 
-The pipeline MUST NOT advance past the architecture node until the specification PR is merged or explicitly approved per the gate configuration.
+The pipeline MUST NOT advance past the `architect` node until the specification pull request has the approvals its tier requires and the corresponding gate verdict is green (REQ-VERDICT-001).
 
-### REQ-ARCH-005: Specification validation
+### REQ-ARCH-005: Architect stage pre/post checks
 
-The Specification Generator MUST validate that all referenced modules exist in the repository (or are explicitly marked new) and that proposed dependency changes do not violate the project's architectural constraints.
+The `architect` stage MUST run deterministic pre/post checks verifying that all referenced modules exist in the repository (or are explicitly marked new) and that proposed dependency changes do not violate the project's declared architectural constraints. These checks bound the attempt and MUST NOT be published as a check run (REQ-VERDICT-002).
 
 ---
 
-## REQ-IFACE: Interface Design
+## REQ-IFACE: Contract Stage
+
+**Level:** L2
 
 ### REQ-IFACE-001: Context from approved specification
 
-The Interface Generator MUST build its LLM context from the approved specification document, existing interface conventions in the repository, and any cross-domain interface registry entries relevant to the affected modules.
+The context bundle for the `contract` stage MUST be built from the approved specification, the existing interface conventions in the repository, and any cross-domain interface registry entries relevant to the affected modules, as declared by its profile's input allowlist.
 
-### REQ-IFACE-002: Structured interface output
+### REQ-IFACE-002: Structured contract output
 
-The Interface Generator MUST instruct the LLM to produce complete, syntactically valid interface definition files in the target domain's artifact format. Partial or template-placeholder files MUST be rejected.
+The `contract` stage MUST produce a program design — types, signatures, error model, call-tree and file-tree diff — together with compilable stubs in the target discipline's artifact format. Partial or placeholder stubs MUST be rejected against the stage's output schema.
 
-### REQ-IFACE-003: Domain service validation
+### REQ-IFACE-003: Contract stage pre/post checks
 
-Generated interface files MUST be validated via the domain service's `validate` method before a PR is created. Validation failures MUST be fed back to the LLM as structured diagnostics for correction.
+Generated stubs MUST be checked for syntactic validity and interface-convention conformance before the stage's output is accepted. Failures MUST be fed back as structured findings within the stage's rework budget (REQ-REWORK-001). Whether the contract passes is decided by its gate verdict, not by these checks (REQ-VERDICT-002).
 
 ### REQ-IFACE-004: Retry budget
 
-Each interface generation attempt MUST be counted against a configurable retry budget (default: 5). Exceeding the retry budget MUST trigger escalation with a summary of all attempts and their failure diagnostics.
+Each `contract` stage attempt MUST be counted against the retry budget its stage contract declares (REQ-PROFSEL-002). Exceeding the retry budget MUST trigger escalation with a summary of all attempts and their failure findings.
 
 ### REQ-IFACE-005: Delivered as a Pull Request
 
-Validated interface files MUST be delivered via a Pull Request. The PR MUST reference the parent work item and the specification PR.
+The `contract` stage's output MUST be delivered as a specification pull request. The pull request MUST reference the parent work item and the preceding specification pull requests.
 
-### REQ-IFACE-006: Interface design gate
+### REQ-IFACE-006: Contract gate
 
-The pipeline MUST NOT advance to the planning node until the interface design PR is merged or explicitly approved per the node gate configuration.
+The pipeline MUST NOT advance to the `plan` node until the contract pull request has the approvals its tier requires and the corresponding gate verdict is green.
 
 ### REQ-IFACE-007: Cross-domain registry consistency
 
-If the affected modules declare cross-domain interfaces in `.cogworks/interfaces/`, the Interface Generator MUST verify that generated interface definitions are consistent with the declared registry contracts. Inconsistencies MUST be reported before PR creation.
+Where the affected modules declare cross-domain interfaces in the repository's specification paths, the `contract` stage MUST verify that the generated definitions are consistent with the declared registry contracts. Inconsistencies MUST be reported as structured findings before the pull request is opened.
 
 ---
 
-## REQ-PLAN: Work Planning
+## REQ-PLAN: Plan Stage
 
-### REQ-PLAN-001: Planning schema
+**Level:** L2
 
-The Work Planner MUST produce structured output: a list of sub-work-items each with a title, description, file list, interface references, test specification, and dependency references.
+### REQ-PLAN-001: Plan schema
 
-### REQ-PLAN-002: Sub-work-item minimum
+The `plan` stage MUST produce a `plan.yaml` describing vertical slices, each with a title, description, size estimate, file list, contract references, requirement-ID mapping and dependency references, together with the dependency graph over those slices.
 
-A plan MUST contain at least one sub-work-item. A plan with zero sub-work-items is invalid and MUST be fed back to the LLM.
+### REQ-PLAN-002: Slice minimum
+
+A plan MUST contain at least one slice. A plan with zero slices is invalid and MUST be rejected against the stage's output schema.
 
 ### REQ-PLAN-003: Dependency graph validation
 
-The Work Planner MUST compute a topological ordering of sub-work-items. Circular dependencies MUST be detected, and the specific cycle MUST be returned as structured feedback to the LLM for replanning.
+CogWorks MUST compute a topological ordering of the plan's slices. Circular dependencies MUST be detected and the specific cycle returned as a structured finding within the stage's rework budget.
 
 ### REQ-PLAN-004: Granularity limit
 
-The Work Planner MUST enforce a configurable maximum number of sub-work-items per work item (default: 10). Exceeding the limit MUST trigger escalation.
+CogWorks MUST enforce a configurable maximum number of slices per work item (default: 10), and MUST enforce the per-slice size budget the plan declares. Exceeding either limit MUST trigger escalation.
 
-### REQ-PLAN-005: Sub-work-item issues
+### REQ-PLAN-005: Sub-issue creation
 
-Each sub-work-item MUST be created as a native GitHub sub-issue of the parent work item (using the sub-issue API), with all required labels applied. Dependencies between sub-work-items MUST be expressed via native GitHub typed issue links (`blocks` / `is blocked by`).
+Each slice of an **approved** plan MUST be created as a native GitHub sub-issue of the parent work item, in dependency order, with the required labels applied. Dependencies between sub-issues MUST be expressed via native GitHub typed issue links (`blocks` / `is blocked by`). Sub-issues MUST NOT be created from an unapproved plan.
 
-### REQ-PLAN-006: Interface coverage
+### REQ-PLAN-006: Requirement coverage
 
-The Work Planner MUST verify that every interface from the Interface Design node is covered by at least one sub-work-item.
+CogWorks MUST verify that every requirement ID established by the `specify` stage is mapped to at least one slice, and that every contract produced by the `contract` stage is covered by at least one slice.
 
 ### REQ-PLAN-007: Milestone inheritance
 
-When the parent work item has a GitHub Milestone set, all sub-work-items created by the Planning node MUST inherit the same milestone.
+When the parent work item has a GitHub Milestone set, all sub-issues created from the plan MUST inherit the same milestone.
 
 ---
 
-## REQ-CODE: Code Generation
+## REQ-CODE: Implement Stage
 
 ### REQ-CODE-001: Dependency-ordered processing with prior context
 
-Sub-work-items MUST be processed in topological dependency order. Each sub-work-item MUST receive the implementation outputs of all prior completed sub-work-items that it depends on as part of its context. Sub-work-items with no mutual dependency path MAY execute concurrently when the pipeline configuration allows parallel fan-out; each concurrent sub-work-item receives the outputs of its own dependency chain.
+Slices MUST be processed in topological dependency order. Each slice's context bundle MUST include the implementation outputs of the prior completed slices it depends on, where its profile's input allowlist declares them. Slices with no mutual dependency path MAY execute concurrently when the resolved graph allows parallel fan-out; each concurrent slice receives the outputs of its own dependency chain.
 
 ### REQ-CODE-002: Structured feedback loop
 
-CogWorks MUST feed structured diagnostics from the configured validation interface (artifact, location, severity, message) back to the LLM on failure. Validation may be domain-specific, but its integration MUST remain behind the domain-service interface. Failures that are not self-explanatory MUST be interpreted before being included in retry context.
+CogWorks MUST feed structured findings back to the agent on failure. Findings MUST describe what failed, why it matters and what is permitted; they MUST NOT include oracle or test source (REQ-ORACLE-005). Feedback on hidden checks MUST be limited to the affected requirement IDs (REQ-VERDICT-004).
 
 ### REQ-CODE-003: Retry budget
 
-Each sub-work-item MUST have a configurable maximum retry count (default: 5). Exceeding the retry budget MUST trigger escalation with a summary of all attempts and their failure reasons.
+Each slice MUST have a maximum attempt count taken from the stage contract its resolved profile declares (REQ-PROFSEL-002). Exceeding it MUST trigger escalation with a summary of all attempts and their failure reasons.
 
 ### REQ-CODE-004: Cost budget
 
@@ -282,88 +583,17 @@ The pipeline MUST track accumulated LLM token cost and halt when the pipeline bu
 
 ### REQ-CODE-005: Context truncation
 
-Context assembly MUST apply deterministic priority-based truncation when the assembled package would exceed the model's context window. The current sub-work-item's interface definition MUST never be removed regardless of truncation pressure.
+Context bundle assembly MUST apply deterministic priority-based truncation when the assembled bundle would exceed the model's context window. The current slice's contract definition MUST never be removed regardless of truncation pressure. Truncation MUST NOT be used to admit an input the profile's allowlist excludes, nor to drop an input the allowlist marks as required.
 
 ### REQ-CODE-006: Semantic stalling detection
 
-The retry logic MUST track diagnostic categories across consecutive retry attempts for each sub-work-item. If the same diagnostic category recurs for a configurable number of consecutive retries (default: 3), the system MUST escalate with a structured stalling report rather than consuming the remaining retry budget. The stalling report MUST include the recurring error category and a summary of all attempts. This is distinct from flaky test detection (EDGE-015), which covers identical code producing different results.
+CogWorks MUST track failure classes across consecutive attempts for each slice. If the same failure class recurs for a configurable number of consecutive attempts (default: 3), CogWorks MUST escalate with a structured stalling report rather than consuming the remaining attempt budget. A repeating failure class usually means the specification or the oracle is wrong rather than the implementation, so escalating early is correct. The stalling report MUST include the recurring failure class and a summary of all attempts. This is distinct from flaky test detection (EDGE-015), which covers identical code producing different results.
 
-### REQ-CODE-007: Test-first implementation loop
+### REQ-CODE-007: Oracle precedes implementation
 
-For each implementation job, CogWorks MUST establish the job's tests or equivalent domain-specific acceptance checks from the approved work-item and specification inputs before implementation proceeds. The job then implements the requested change, runs the configured validation, and iterates on structured feedback within its retry and rework budgets. This contract applies to software and other engineering domains; the test and validation mechanisms are selected through the domain-service interface.
+The oracle for a slice MUST exist, be locked and be signed before the `implement` stage for that slice starts (REQ-ORACLE-003). The oracle and the implementation MUST be produced by separate stages, under separate identities, in separate sandboxes (REQ-ORACLE-001). CogWorks MUST NOT run a stage that produces both the oracle and the implementation for the same slice.
 
----
-
-## REQ-SCEN: Scenario Validation
-
-### REQ-SCEN-001: Human-authored scenarios
-
-Scenario specifications MUST be authored and maintained by humans. CogWorks MUST NOT create or modify scenario specifications.
-
-### REQ-SCEN-002: Holdout principle
-
-Scenario specification files MUST NOT be included in any code generation context package, regardless of their relevance to affected modules.
-
-### REQ-SCEN-003: Multiple trajectories
-
-Each scenario MUST be executed for the configured number of independent trajectories (default: 10). Each trajectory MUST start with fresh state.
-
-### REQ-SCEN-004: Satisfaction scoring
-
-A satisfaction score MUST be computed as the fraction of trajectories that satisfy acceptance criteria. Any trajectory that triggers an explicit failure criterion MUST cause immediate failure of the entire validation, regardless of the overall score.
-
-### REQ-SCEN-005: Threshold enforcement
-
-Scenario validation MUST fail when the overall satisfaction score falls below the configured threshold (default: 0.95). Context Packs MAY declare a stricter satisfaction threshold for their domain; when present, the stricter threshold applies to scenarios covering that domain's interfaces.
-
-### REQ-SCEN-006: Below-threshold remediation
-
-When scenario validation fails, the failing scenario identifiers, trajectory observations, and failure details MUST be fed back to the Code Generator as structured context for remediation.
-
-### REQ-SCEN-007: Applicable scenario selection
-
-CogWorks MUST select only scenarios whose declared interface coverage overlaps with the interfaces implemented by the current sub-work-item. Sub-work-items with no applicable scenarios MUST skip scenario validation (not fail it).
-
-### REQ-SCEN-008: Scenario availability is optional
-
-The absence of scenario specifications for a sub-work-item MUST NOT be treated as a failure. Scenario validation is skipped silently when no applicable scenarios exist.
-
-### REQ-SCEN-009: Scenario audit trail
-
-Scenario validation results MUST be recorded in the audit trail, including: overall satisfaction score, per-scenario scores, trajectory count, failure details, and any explicit failure criteria that were triggered.
-
----
-
-## REQ-REVIEW: Review Gate
-
-### REQ-REVIEW-001: Review pass schema
-
-Each LLM review pass MUST produce structured output: overall pass/fail, per-criterion findings, each with file reference, line number (where applicable), severity (blocking/warning/informational), and explanation.
-
-### REQ-REVIEW-002: Four review passes
-
-The review gate MUST execute four passes in order:
-
-1. Deterministic cross-domain constraint validation (no LLM, no tokens)
-2. Code quality LLM review (coding standards, idioms, error handling, naming, documentation)
-3. Architecture compliance LLM review (matches spec, respects boundaries, no unplanned dependencies)
-4. Security LLM review (input validation, auth boundaries, unsafe code, vulnerability patterns)
-
-### REQ-REVIEW-003: Independent pass prompts
-
-Each of the three LLM review passes MUST use a separate, focused prompt. Review passes MUST NOT be combined into a single LLM call.
-
-### REQ-REVIEW-004: Blocking vs non-blocking aggregation
-
-Any blocking finding in any review pass MUST prevent PR creation and trigger the remediation loop. Non-blocking findings (warning, informational) MUST be collected and posted as PR review comments. Missing required artefacts (declared by loaded Context Packs) MUST be treated as blocking findings identifying the pack and the missing artefact.
-
-### REQ-REVIEW-005: Remediation loop
-
-Blocking findings MUST be fed back to the Code Generator as structured context for remediation. If blocking findings persist after the configured maximum remediation cycles (default: 3), escalation MUST be triggered.
-
-### REQ-REVIEW-006: Safety-critical human approval
-
-PRs for safety-critical work items MUST require explicit human approval before merge. CogWorks MUST NOT take any action that would merge a PR.
+The `implement` stage then produces the change, and iterates on structured gate feedback within its attempt and rework budgets. This contract applies to software and to other engineering disciplines; what constitutes an oracle is supplied by the discipline pack.
 
 ---
 
@@ -371,11 +601,15 @@ PRs for safety-critical work items MUST require explicit human approval before m
 
 ### REQ-INT-001: Non-blocking findings as inline comments
 
-Non-blocking review findings MUST be posted as inline review comments on the PR at the relevant file and line number.
+Non-blocking findings MUST be posted as inline review comments on the pull request at the relevant file and line number.
 
 ### REQ-INT-002: PR traceability references
 
-Every sub-work-item PR created by CogWorks MUST include references to: the sub-work-item issue, the parent work item, the specification PR, and the interface design PR.
+Every slice pull request opened by CogWorks MUST include references to: the slice sub-issue, the parent work item, the specification pull requests, the resolved harness version, and the context bundle hash for each stage attempt that contributed to it.
+
+### REQ-INT-003: CogWorks opens, the runner pushes
+
+CogWorks MUST open and update pull requests, and MUST NOT push commits. Commits are pushed into the branch by the stage runner under the stage's identity role (REQ-SANDBOX-002). CogWorks MUST NOT hold a credential capable of pushing to the target repository (REQ-BOUND-007).
 
 ---
 
@@ -409,9 +643,9 @@ CogWorks MUST use its existing tracing instrumentation and OpenTelemetry exporte
 
 ## REQ-BOUND: System Boundaries
 
-### REQ-BOUND-001: No code execution within CogWorks
+### REQ-BOUND-001: No code or agent execution within CogWorks
 
-CogWorks MUST NOT execute generated code or LLM output within its own process. Code execution is delegated to domain services.
+CogWorks MUST NOT execute generated code or LLM output within its own process. CogWorks MUST NOT run an agent in its own process or container: every agent turn executes inside a sandbox obtained through the stage-runner interface. CogWorks MUST NOT hold virtualisation privileges or host access.
 
 ### REQ-BOUND-002: No PR merging
 
@@ -427,31 +661,27 @@ CogWorks MUST consume readiness, implementation-stage, and external approval sta
 
 ### REQ-BOUND-005: Credential provider boundary
 
-Authentication and key lifecycle MUST be handled by the Vault library behind the credential-provider interface. CogWorks MUST rely on that provider to resolve credentials for infrastructure clients and MUST NOT prescribe Vault authentication or rotation details. Key material MUST NOT be included in LLM prompts or context, audit records, generated artifacts, or logs.
+Authentication and key lifecycle MUST be handled behind the credential-provider interface. CogWorks MUST rely on that provider to resolve credentials for infrastructure clients and MUST NOT prescribe the secret store's authentication or rotation details. Key material MUST NOT be included in context bundles or prompts, audit records, generated artifacts, or logs.
 
 ### REQ-BOUND-006: Attestation verification and signing
 
-Before acting on a work item, CogWorks MUST verify any upstream attestation required by the configured trust policy through an attestation-provider interface. Missing, invalid, or content-mismatched required attestations MUST fail closed: CogWorks MUST NOT process the work item and MUST record a non-secret failure outcome. CogWorks MUST sign its own action attestations through the attestation-provider boundary and publish them as comments through the work-item interface. Cryptographic implementation and key access are delegated to the provider; the specific signature algorithm and provider protocol are not prescribed here. The attestation provider uses the Vault-backed credential boundary for signing operations.
+Before acting on a work item, CogWorks MUST verify any upstream attestation required by the configured trust policy through an attestation-provider interface. Missing, invalid, or content-mismatched required attestations MUST fail closed: CogWorks MUST NOT process the work item and MUST record a non-secret failure outcome. CogWorks MUST sign its own action attestations through the attestation-provider boundary and publish them as comments through the work-item interface. Cryptographic implementation and key access are delegated to the provider; the specific signature algorithm and provider protocol are not prescribed here. The attestation provider uses the credential boundary for signing operations.
 
----
+### REQ-BOUND-007: No push tokens, no model API keys
 
-## REQ-LLM: LLM Gateway
+CogWorks MUST NOT hold a credential capable of pushing commits to a target repository, and MUST NOT hold a model provider API key. Commits are pushed by the stage runner under the stage's identity role. Model credentials are held by the model gateway; CogWorks and every sandbox reach models only through that gateway endpoint.
 
-### REQ-LLM-001: LLM API rate limit respect
+### REQ-BOUND-008: No verdict authorship
 
-The LLM Gateway MUST track rate-limit state per LLM provider using response headers (e.g., `retry-after`, `x-ratelimit-remaining`). When the remaining request budget is low, the gateway MUST proactively throttle subsequent calls to avoid exhausting the budget. When an HTTP 429 response is received, the gateway MUST wait for the duration specified in the provider's response headers before retrying.
+CogWorks MUST NOT compute a pass/fail verdict, MUST NOT author or publish a check run, and MUST NOT configure which checks are required. Verdicts are produced by the gate service and read per REQ-VERDICT-001.
 
-### REQ-LLM-002: Rate limit coordination across parallel nodes
+### REQ-BOUND-009: No cross-issue ordering
 
-When multiple nodes execute concurrently, the LLM Gateway MUST coordinate rate-limit state across all parallel LLM calls within the same pipeline invocation. Concurrent calls MUST NOT collectively exceed the provider's rate limit.
+CogWorks MUST NOT decide the priority or relative ordering of work items. It takes the next work item it is given and runs it. Concurrency limits on how many work items CogWorks processes at once are its own configuration and are not an ordering decision.
 
-### REQ-LLM-003: Rate limit halt threshold
+### REQ-BOUND-010: No agent-writable policy
 
-If the required wait time to respect a rate limit exceeds a configurable maximum (default: 30 minutes), the current step MUST halt with a retriable exit code rather than blocking indefinitely. A structured report MUST be posted identifying the rate limit and the required wait time.
-
-### REQ-LLM-004: Rate limit visibility
-
-The LLM Gateway MUST emit structured log entries when rate limiting is active, including: provider name, remaining request budget, reset time, and whether calls are being queued or throttled.
+CogWorks MUST NOT write to the harness, to the repository's `risk-map.yaml`, or to `.factory/`. Where a stage's output proposes a change to any of these (for example the `architect` stage's risk-map patch), that change MUST be delivered as a pull request for human review, never applied directly.
 
 ---
 
@@ -459,7 +689,7 @@ The LLM Gateway MUST emit structured log entries when rate limiting is active, i
 
 ### REQ-LABEL-001: Configurable workflow labels
 
-Workflow-semantic labels and signals (readiness/trigger, awaiting-review, safety-critical, hold, cancel, sub-work-item) MUST have configurable mappings via the `[labels]` section of `.cogworks/config.toml` or the corresponding provider adapter. Default label mappings MAY use the `cogworks:` prefix; business logic MUST NOT depend on a particular provider label or project status.
+Workflow-semantic labels and signals (trigger, awaiting-review, hold, cancel, slice) MUST have configurable mappings in CogWorks' own process configuration. Business logic MUST NOT depend on a particular label string or project status. A work item's tier MUST NOT be taken from a label (REQ-TIER-001).
 
 ### REQ-LABEL-002: Pipeline-internal labels are not configurable
 
@@ -468,54 +698,6 @@ Pipeline-internal labels (`cogworks:processing`, `cogworks:node:<name>`, `cogwor
 ### REQ-LABEL-003: Label configuration validation
 
 Label configuration MUST be validated at load time. If two workflow labels are configured to the same string, the system MUST produce a clear error and halt. Additionally, if any workflow label is configured to the same string as a pipeline-internal label (e.g., `cogworks:processing`, `cogworks:node:*`), the system MUST produce a clear error and halt — the same GitHub label string carrying two distinct semantic meanings causes undefined pipeline behavior.
-
----
-
-## REQ-PROJECT: GitHub Projects Integration
-
-### REQ-PROJECT-001: Optional project board sync
-
-CogWorks MUST support optionally syncing pipeline state to a GitHub Projects V2 board. When a `[github_project]` section is present in `.cogworks/config.toml`, CogWorks MUST add the work item to the configured project when a pipeline starts, update project fields (current node, safety classification, disposition) at each node boundary, and mark the item complete or failed on pipeline finish.
-
-### REQ-PROJECT-002: Project sync is non-blocking
-
-GitHub Project board updates MUST be fire-and-forget. Failures to update the project board MUST be logged as warnings but MUST NOT block, slow, or fail the pipeline. CogWorks MUST operate identically with or without a GitHub Project configuration.
-
-### REQ-PROJECT-003: Project field mapping
-
-The `[github_project]` configuration MUST support mapping between pipeline state properties (current node, safety classification, disposition, cost) and GitHub Project custom field names. Field mappings are repository-specific.
-
----
-
-## REQ-CTX: Context Assembly
-
-### REQ-CTX-001: Reference exemplars
-
-The context assembly service MUST support including files from external repositories as reference exemplars. Exemplars are declared in the architecture specification and included in the context package for code generation. Exemplars are read-only context — CogWorks MUST NOT modify files in referenced repositories. Exemplar inclusion MUST respect the pyramid summary levels (Level 2 for distant references, Level 3 for closely related references).
-
----
-
-## REQ-DTU: Digital Twin Utility
-
-### REQ-DTU-001: Twin specification format
-
-Digital Twin specifications MUST be structured documents (TOML/YAML) describing the external dependency being modelled, the expected behavioral contracts, and the fidelity requirements.
-
-### REQ-DTU-002: Twin lifecycle management
-
-Twins MUST be programmatically startable and stoppable. CogWorks MUST be able to start a twin before scenario execution and stop it cleanly after.
-
-### REQ-DTU-003: Twin state isolation
-
-Each trajectory execution MUST start with a fresh twin state. Twin state MUST NOT persist between trajectories.
-
-### REQ-DTU-004: Twin conformance testing
-
-Each Digital Twin MUST include a conformance test suite that validates its behavior against the specification.
-
-### REQ-DTU-005: Twin provisioning for scenarios
-
-When a scenario specification requires a Digital Twin, the twin MUST be started before the first trajectory and stopped after the last trajectory.
 
 ---
 
@@ -561,9 +743,11 @@ Domain services declaring an Extension API version incompatible with CogWorks MU
 
 ## REQ-XDOM: Cross-Domain Interface Registry
 
+**Level:** L4
+
 ### REQ-XDOM-001: Human-authored only
 
-Interface definitions in `.cogworks/interfaces/` MUST be authored and maintained by humans. CogWorks MUST NOT create or modify interface definitions autonomously. CogWorks MAY suggest additions as recommendations for human review.
+Cross-domain interface definitions live in the repository's specification paths and MUST be authored and maintained by humans. CogWorks MUST NOT create or modify interface definitions autonomously. CogWorks MAY suggest additions as recommendations for human review.
 
 ### REQ-XDOM-002: Schema conformance
 
@@ -585,9 +769,11 @@ The interface registry MUST be validated on every pipeline run, before any node 
 
 ## REQ-XVAL: Cross-Domain Constraint Validation
 
-### REQ-XVAL-001: Deterministic-first ordering
+**Level:** L4
 
-Cross-domain constraint validation MUST execute before any LLM review pass in the review gate. It MUST NOT consume LLM tokens.
+### REQ-XVAL-001: Deterministic and token-free
+
+Cross-domain constraint validation MUST be deterministic and MUST NOT consume LLM tokens. It runs as a stage pre/post check and therefore bounds an attempt rather than producing a verdict (REQ-VERDICT-002).
 
 ### REQ-XVAL-002: Interface extraction
 
@@ -601,9 +787,9 @@ Hard constraint violations (values outside declared min/max bounds) MUST produce
 
 Cross-domain constraint validation MUST be able to validate a single domain's artifacts against registry contracts without requiring other participating domains' services to be running.
 
-### REQ-XVAL-005: Architecture-node validation
+### REQ-XVAL-005: Architect-stage validation
 
-Cross-domain constraint validation MUST also run during the architecture node to catch violations before implementation begins.
+Cross-domain constraint validation MUST also run as a pre/post check on the `architect` stage, to catch violations before implementation begins (REQ-ARCH-005).
 
 ---
 
@@ -611,11 +797,13 @@ Cross-domain constraint validation MUST also run during the architecture node to
 
 ### REQ-CPACK-001: Pack trigger mechanism
 
-Context Pack loading MUST be driven deterministically by the work item's classification labels, component tags, and safety classification. The LLM MUST NOT choose which packs to load.
+Context Pack loading MUST be driven deterministically by the work item's tier, discipline, stage type and detected language or toolchain. The LLM MUST NOT choose which packs to load.
 
-### REQ-CPACK-002: Pack loading timing
+### REQ-CPACK-002: Pack source and loading timing
 
-Context Packs MUST be loaded at the Architecture node, before any LLM call in the Architecture node begins. Loaded packs MUST remain active for the entire pipeline run.
+Context Packs MUST be loaded from the harness at the pinned version (REQ-HARNESS-001). The target repository MUST NOT supply Context Packs: in-repository pack content would be prompt material that an agent working in that repository could edit.
+
+Packs MUST be loaded during context bundle assembly for a stage, before the stage attempt starts, and the resolved pack set MUST be recorded in the stage attestation.
 
 ### REQ-CPACK-003: Multiple simultaneous packs
 
@@ -629,17 +817,15 @@ Where loaded Context Packs contain contradictory guidance, the more restrictive 
 
 If a work item matches a Context Pack's trigger criteria, the pack MUST be loaded. There MUST NOT be an option to skip a matched pack.
 
-### REQ-CPACK-006: Required artefact enforcement
-
-Context Packs MAY declare required artefacts. At the Review node, CogWorks MUST verify all declared required artefacts are present. Missing artefacts MUST produce blocking findings identifying the pack and the specific missing artefact.
-
 ### REQ-CPACK-007: Pack audit trail
 
-The set of Context Packs loaded for each pipeline run MUST be recorded in the audit trail and included in the PR description.
+The set of Context Packs loaded for each stage attempt MUST be recorded in the audit trail and included in the pull request description.
 
-### REQ-CPACK-008: Pack content in context assembly
+### REQ-CPACK-008: Pack content in bundle assembly
 
-Context Pack domain knowledge, safe patterns, and anti-patterns MUST be included in the context package for all LLM calls from the Architecture node onward, subject to the standard context priority and truncation rules.
+Context Pack domain knowledge, safe patterns, and anti-patterns MUST be included in the context bundle for every stage whose profile allowlists them, subject to the standard bundle priority and truncation rules, and MUST be covered by the bundle hash (REQ-BUNDLE-002).
+
+_Note: Requirement ID REQ-CPACK-006 is retired and MUST NOT be reused. Required-artefact enforcement is a pass/fail judgement and therefore belongs to the gate service, not to CogWorks._
 
 ---
 
@@ -647,31 +833,35 @@ Context Pack domain knowledge, safe patterns, and anti-patterns MUST be included
 
 ### REQ-CONST-001: Unconditional loading
 
-Constitutional rules MUST be loaded on every pipeline run, before context assembly and before any LLM call. This is NOT a configurable gate.
+Constitutional rules MUST be loaded and validated on every pipeline run, before context bundle assembly and before any stage attempt starts. This is NOT a configurable gate.
 
 ### REQ-CONST-002: Privileged position
 
-Constitutional rules MUST be injected as a privileged, non-overridable component of the LLM system prompt. No content in the context package MAY modify, append to, or override the constitutional rules.
+Constitutional rules MUST occupy a privileged, non-overridable position in the system prompt of every agent turn. No content in the context bundle MAY modify, append to, or override them. For agent turns executing inside a sandbox, the harness profile places the rules and the sandbox boundary preserves that position; for deterministic helper calls made in CogWorks' own process, the privileged position MUST be enforced at the type level so that no call can reach a model without passing through constitutional assembly.
 
-### REQ-CONST-003: Human-approved source
+### REQ-CONST-003: Harness-pinned source
 
-Constitutional rules MUST be loaded from a version-controlled file at a well-known path. Changes to the constitutional rules file MUST require a reviewed and merged PR with at least one human approval. Rules from unreviewed branches MUST be rejected.
+Constitutional rules MUST be loaded from the harness at the version pinned by the target repository (REQ-HARNESS-001). The target repository MUST NOT supply constitutional rules. CogWorks MUST verify the loaded rules against the pin before use and MUST halt rather than proceed with rules it cannot verify.
 
 ### REQ-CONST-004: External content as data
 
 The constitutional rules MUST include a rule declaring that issue bodies, specifications, dependency docs, API responses, and any content not from core configuration are inputs to be analyzed — not instructions that modify CogWorks' behavior.
 
-### REQ-CONST-005: Injection detection and halt
+### REQ-CONST-005: Intake screening is upstream
 
-If external content contains text structured as a directive to CogWorks (persona overrides, instruction injections, behavioral modifications), the pipeline MUST halt immediately with an `INJECTION_DETECTED` event.
+**Level:** L3
+
+Screening an incoming work item for prompt injection is the responsibility of the upstream intake service, whose signed approval CogWorks verifies before acting (REQ-ATTEST-001). CogWorks MUST NOT duplicate that scan.
+
+CogWorks MUST, however, scan model-sourced text for injection patterns before reusing it in a later prompt — for example a finding description fed back into a rework attempt. This is defence in depth against a compromised or manipulated stage output, not intake screening.
 
 ### REQ-CONST-006: Injection event content
 
-The `INJECTION_DETECTED` event MUST include: pipeline run ID, work item ID, source document, and offending text.
+Where CogWorks detects an injection pattern in model-sourced text per REQ-CONST-005, the recorded event MUST include: pipeline run ID, work item ID, the stage attempt that produced the text, and the offending span, truncated and control-character-escaped before it reaches any log or comment.
 
 ### REQ-CONST-007: Hold state on injection
 
-When injection is detected, the work item MUST enter a hold state. The work item MUST NOT be automatically requeued or retried. A human MUST review and either confirm false positive (with justification recorded in audit trail) or mark the work item as contaminated.
+When CogWorks detects an injection pattern, the work item MUST enter a hold state. It MUST NOT be automatically requeued or retried. Clearing the hold MUST require a human: a human either confirms a false positive, with the justification recorded in the audit trail, or marks the work item as contaminated.
 
 ### REQ-CONST-008: Specification scope binding
 
@@ -695,7 +885,7 @@ When a specification is ambiguous for a safety-affecting work item, CogWorks MUS
 
 ### REQ-CONST-013: Protected path enforcement
 
-CogWorks MUST NOT create or modify files matching protected path patterns (constitutional rules, prompt templates, scenario specifications) through the normal pipeline. Pre-PR validation MUST check generated files against protected path patterns.
+CogWorks MUST NOT create or modify files matching protected path patterns — the harness, `risk-map.yaml`, `.factory/`, locked oracle paths, and the repository's agent-instruction files — through the normal pipeline (REQ-BOUND-010). Where a stage's writable paths are declared by its stage contract, CogWorks MUST pass those paths to the mount-plan provider rather than enforcing them itself; the authoritative enforcement is the sandbox mount plan and the commit-range scope check.
 
 ---
 
@@ -820,18 +1010,6 @@ The alignment check between the sub-work-item description, interface definitions
 - Scope discipline: Does the code implement only what the sub-work-item specifies, without adding unrequested features?
 - Error handling alignment: Does the code handle error conditions described in the spec and interfaces using the declared error types?
 
-### REQ-ALIGN-014: Review to spec alignment
-
-The review gate alignment check MUST verify that the review was spec-aware:
-
-**Deterministic checks:**
-
-- The review examined all files produced by code generation
-
-**LLM alignment check** (optional, default: off) — assesses:
-
-- Spec-awareness: Did the review check the code against the spec, or only against general quality standards?
-
 ### REQ-ALIGN-015: End-to-end alignment check
 
 After all sub-work-items are complete and before the pipeline reports success, a final end-to-end alignment check MUST verify that the aggregate output addresses the original work item. This check runs as a pipeline-level validation step after the terminal node (Integration) completes — it is not a separate node in the pipeline graph but a pipeline executor responsibility triggered on successful pipeline completion. This check is necessary because small acceptable deviations at each stage can compound into significant drift from the original intent.
@@ -874,7 +1052,7 @@ The traceability matrix MUST be:
 - Generated automatically from the alignment check results at each stage
 - Posted as a comment on the work item issue at pipeline completion
 - Included in the audit trail
-- Available for the Review Gate to reference during gate evaluation (REQ-REVIEW-001)
+- Available to the assurance review stages and to the gate service as evidence
 
 ### REQ-ALIGN-031: Traceability matrix accumulation
 
@@ -892,265 +1070,31 @@ If a requirement is not addressed at a stage (e.g., a mechanical requirement in 
 
 If a node has no explicit alignment configuration, the orchestrator MUST apply defaults appropriate to the node type:
 
-| Node | Default behaviour |
-|------|-------------------|
-| Intake / Classification | No alignment check (first node — nothing to align against) |
-| Architecture | Deterministic + LLM alignment against work item. Score threshold: 0.90. Max rework: 3. |
-| Interface Design | Deterministic + LLM alignment against architecture spec. Score threshold: 0.90. Max rework: 3. |
-| Planning | Deterministic alignment against architecture spec + interfaces. LLM check: off. Score threshold: 0.85. Max rework: 2. |
-| Code Generation | Deterministic + LLM alignment against sub-work-item + interfaces. Score threshold: 0.90. Max rework: 3. |
-| Review | Deterministic alignment against code + spec. LLM check: off. Score threshold: 0.80. Max rework: 1. |
-| Integration | No alignment check (deterministic node). |
-| Deterministic nodes | No alignment check. |
-| Spawning nodes | No alignment check. |
-| End-to-end (pipeline-level) | Deterministic + LLM alignment against original work item. Score threshold: 0.90. Not a graph node — runs as pipeline executor post-completion step (REQ-ALIGN-015). |
-
-### REQ-ALIGN-041: Safety classification impact on alignment
-
-For safety-classified work items, alignment checks MUST be stricter:
-
-| Parameter | Standard | Safety-Critical |
-|-----------|----------|------------------|
-| Score threshold | 0.90 | 0.95 |
-| Max rework cycles | 3 | 5 |
-| LLM alignment check | Configurable (default: on) | Always on (cannot be disabled) |
-| End-to-end alignment check | Default on | Always on (cannot be disabled) |
-| Traceability matrix | Generated | Generated and requires human sign-off |
-| Blocking finding tolerance | 0 (any blocking finding fails) | 0 (additionally, more than 3 warnings also fails) |
-
----
-
-## Tool Registry & Scoped Tools
-
-> **Numbering convention**: Tool requirements use categorical groupings: 001–009 for registry-level concerns, 010–019 for filesystem tools, 020–029 for git tools, 030–039 for domain service tools, 040–049 for shell tools, 050–059 for search/network tools. New tool categories should use the next available decade range. Do not fill gaps within a category unless the new requirement belongs to that category.
-
-### REQ-TOOL-001: Tool registry
-
-The orchestrator MUST maintain a central registry of all available tools. Each tool entry contains: unique name, category, description, parameter JSON Schema, scope parameter declarations, and implementation reference. Tools from three sources (built-in, adapter-generated, skill-derived) all register through the same mechanism.
-
-### REQ-TOOL-002: Scoped tool access
-
-Each pipeline node MUST receive a tool list restricted by its assigned tool profile. Tools not in the node's profile MUST NOT appear in the LLM call's tool list. The LLM must not be able to discover or invoke unscoped tools.
-
----
-
-## Tool Definitions — Filesystem
-
-### REQ-TOOL-010: Filesystem read tool
-
-The orchestrator MUST provide `fs.read` and `fs.list` filesystem read tools. Scope parameters: `allowed_read_paths` (glob patterns), `denied_read_paths` (glob patterns — takes precedence), `max_file_size_bytes`.
-
-### REQ-TOOL-011: Filesystem write tool
-
-The orchestrator MUST provide `fs.write`, `fs.create`, and `fs.delete` filesystem write tools. Scope parameters: `allowed_write_paths` (glob patterns), `denied_write_paths` (glob patterns — takes precedence). Write tools MUST enforce protected path patterns at the tool level — operations targeting protected paths are refused regardless of profile configuration.
-
-### REQ-TOOL-012: Filesystem search tool
-
-The orchestrator MUST provide `fs.search` (content search) and `fs.glob` (path matching) tools. Scope parameters: `allowed_search_paths` (inherits from `allowed_read_paths`).
-
-### REQ-TOOL-013: Filesystem scope enforcement
-
-Every filesystem tool invocation MUST validate its target path(s) against the calling node's scope parameters before executing. Violations produce a structured error returned to the LLM and a `SCOPE_VIOLATION` audit trail event.
-
----
-
-## Tool Definitions — Git
-
-### REQ-TOOL-020: Git tools
-
-The orchestrator MUST provide git tools: `git.status`, `git.diff`, `git.commit`, `git.branch`, `git.log`. Scope parameters: `branch_pattern` (regex — commits only allowed to branches matching the pattern), `allowed_commit_paths` (glob patterns — only changes within these paths may be committed).
-
----
-
-## Tool Definitions — Domain Service
-
-### REQ-TOOL-030: Domain service tools
-
-The orchestrator MUST provide `domain.validate`, `domain.simulate`, `domain.normalise`, `domain.review_rules`, `domain.extract_interfaces` tools that delegate to domain services via the Extension API. Scope parameters: `allowed_services` (list of domain service names the node may invoke), `allowed_methods` (list of domain service methods the node may call).
-
----
-
-## Tool Definitions — Shell
-
-### REQ-TOOL-040: Restricted shell tool
-
-The orchestrator MUST provide a `shell.run_restricted` tool for executing pre-configured commands. Scope parameters: `allowed_commands` (explicit list of permitted command patterns), `working_directory` (path constraint), `max_execution_time_seconds`, `network_access` (boolean — whether the command may access the network). This tool executes infrastructure operations (build, test, lint), not arbitrary LLM-generated shell commands.
-
----
-
-## Tool Definitions — Search & Network
-
-### REQ-TOOL-050: Search tools
-
-The orchestrator MUST provide `search.code` (code search across repository) and `search.docs` (documentation search) tools. Scope parameters: `allowed_search_scope` (directories or file patterns).
-
-### REQ-TOOL-051: Network tools
-
-The orchestrator MAY provide `net.fetch` for read-only HTTP requests to approved URLs. Scope parameters: `allowed_urls` (URL prefix patterns), `max_response_size_bytes`. Default: not enabled in any profile (opt-in only).
-
----
-
-## Tool Profiles
-
-### REQ-PROFILE-001: Per-node tool profiles
-
-Every LLM-executing pipeline node MUST have an assigned tool profile. The profile is referenced by name in the pipeline configuration (`.cogworks/pipeline.toml`). If no explicit profile is assigned, the orchestrator MUST apply the built-in default profile appropriate to the node type.
-
-### REQ-PROFILE-002: Profile overrides
-
-Pipeline configuration MUST support per-node `tool_overrides` that modify scope parameters of the base profile without redefining the entire profile. Template variable placeholders (`{{variable}}`) MUST be resolved from pipeline state at node activation time.
-
-### REQ-PROFILE-003: Default profiles
-
-The orchestrator MUST provide default tool profiles for all 7 core pipeline nodes:
-
-| Node | Default Profile | Key Tools | Key Scope Constraints |
-|------|----------------|-----------|----------------------|
-| Intake | `reader` | `fs.read`, `fs.list`, `search.code` | Read-only, full repo read access |
-| Architecture | `reader` | `fs.read`, `fs.list`, `search.code`, `search.docs` | Read-only, full repo read access |
-| Interface Design | `reader` | `fs.read`, `fs.list`, `search.code` | Read-only, full repo read access |
-| Planning | `reader` | `fs.read`, `fs.list`, `search.code` | Read-only, full repo read access |
-| Code Generation | `generator` | All `reader` tools + `fs.write`, `fs.create`, `fs.delete`, `git.commit`, `git.branch`, `domain.*`, `shell.run_restricted` | Write access limited to `{{affected_modules}}`; git commits to `cogworks/swi-*` branches only |
-| Review | `reviewer` | `reader` tools + `domain.validate`, `domain.review_rules`, `domain.simulate` | Read-only filesystem; domain validation only |
-| Integration | `integrator` | `git.status`, `git.diff`, `git.branch`, `git.log`, `fs.read` | Branch operations and status checks only; read-only filesystem; no `git.commit` (merges use GitHub API via Pull Request Manager abstraction) |
-
----
-
-## Enforcement
-
-### REQ-ENFORCE-001: Tool filtering (Layer 1)
-
-The orchestrator MUST filter the tool list before every LLM call. Only tools present in the node's resolved profile are included in the LLM call's tool/function list. This is the first layer of defence.
-
-### REQ-ENFORCE-002: Scope enforcement (Layer 2)
-
-Each tool implementation MUST validate scope parameters before executing. This validation is independent of Layer 1 — even tools that pass filtering may have their specific invocations rejected based on scope parameters. This is the second layer of defence.
-
-### REQ-ENFORCE-003: OS-level sandboxing (Layer 3)
-
-For Code Generation nodes (the only core node with write access), the orchestrator SHOULD apply OS-level sandboxing (e.g., `landlock`, `seccomp-bpf`, containerised execution) to constrain filesystem and network access at the process level. This is the third layer of defence, independent of Layers 1 and 2. For safety-critical work items (REQ-PIPE-006) or work items from untrusted sources, OS-level sandboxing MUST be applied. SHOULD becomes MUST when the work item's safety classification is set.
-
----
-
-## Tool Audit
-
-### REQ-TOOL-AUDIT-001: Tool invocation audit
-
-Every tool invocation MUST be recorded in the audit trail with: tool name, parameters (with scope parameters identified separately), result (success/error), duration, and the calling node's identity.
-
-### REQ-TOOL-AUDIT-002: Scope violation audit
-
-Every scope violation MUST be recorded as a `SCOPE_VIOLATION` event in the audit trail with: tool name, attempted parameters, violated scope constraint, calling node identity.
-
-### REQ-TOOL-AUDIT-003: Tool usage report
-
-The pipeline completion summary MUST include a tool usage report containing: per-tool call counts, scope violation counts, invocation type breakdown (raw tool / skill / progressive discovery).
-
----
-
-## Custom Tools
-
-### REQ-TOOL-CUSTOM-001: Repository-local tool definitions
-
-Repository maintainers MAY define custom tools in `.cogworks/tools/` as TOML files following the tool definition schema. Custom tools are registered in the tool registry at pipeline startup.
-
-### REQ-TOOL-CUSTOM-002: Custom tool scope binding
-
-Custom tool definitions MUST declare their scope parameter schema. Tools without scope parameter declarations are rejected at registration time.
-
----
-
-## Skill Crystallisation
-
-### REQ-SKILL-001: Skill definition format
-
-Skills MUST be defined as a TOML manifest (declaring name, parameters, scope, lifecycle state, description) paired with a shell script (containing the parameterised tool invocation sequence). Skills are stored in `.cogworks/skills/`.
-
-### REQ-SKILL-002: Skill extraction
-
-The orchestrator MUST support offline skill extraction from audit trail data. Extraction identifies repeating tool invocation patterns across successful pipeline runs and proposes them as candidate skills for human review.
-
-### REQ-SKILL-003: Skill invocation by LLM
-
-Active skills MUST be exposed to LLM nodes via `skill.list` (enumerate available skills with descriptions), `skill.run` (execute a named skill with parameters), and `skill.inspect` (view a skill's parameter schema and description).
-
-### REQ-SKILL-004: Skill scope enforcement
-
-Every tool call within a skill execution MUST be validated against the calling node's tool profile. A skill MUST NOT bypass scope restrictions. If a tool call within a skill violates scope, the entire skill execution fails with a structured error identifying the violating call.
-
-### REQ-SKILL-005: Skill lifecycle management
-
-Skills MUST follow a lifecycle: Proposed → Reviewed → Active → Deprecated → Retired. Only Active skills are available to LLM nodes. Deprecated skills remain available but produce a warning when invoked, referencing the preferred alternative. Retired skills are removed from tool lists.
-
-Valid state transitions:
-
-| From | To | Trigger | Approval |
-|------|----|---------|----------|
-| Proposed | Reviewed | Human reviews and approves the skill script and parameter schema | Human (required) |
-| Reviewed | Active | Operator activates via `cogworks skill activate` | Human (required) |
-| Reviewed | Proposed | Operator rejects and sends back for revision via `cogworks skill rework` | Human (required) |
-| Reviewed | Retired | Operator abandons the skill via `cogworks skill retire` | Human (required) |
-| Active | Deprecated | Manual deprecation or auto-deprecation via REQ-SKILL-006 (success rate below threshold) | Automatic (REQ-SKILL-006) or human |
-| Deprecated | Active | Operator re-activates after fixing the underlying issue | Human (required) |
-| Deprecated | Retired | Operator retires via `cogworks skill retire` | Human (required) |
-| Active | Retired | Operator retires directly (e.g., skill no longer applicable) | Human (required) |
-
-Transitions not listed above are invalid. The Proposed → Active transition (skipping review) is explicitly prohibited.
-
-### REQ-SKILL-006: Skill success tracking
-
-The orchestrator MUST track per-skill success/failure rates. When a skill's success rate drops below a configurable threshold (default: 90% over the last 20 invocations), the skill MUST be automatically flagged for review (status change to Deprecated with reason `success_rate_below_threshold`).
-
----
-
-## Progressive Discovery
-
-### REQ-DISC-001: Compact tool index
-
-When a node's resolved tool list meets or exceeds a configurable threshold (default: 15 tools), the orchestrator MUST present a compact tool index (name + one-line description) instead of full schemas in the LLM tool list.
-
-### REQ-DISC-002: Meta-tools for on-demand schema
-
-When progressive discovery is active, the orchestrator MUST provide three meta-tools: `tools.search` (semantic search across tool names and descriptions), `tools.schema` (retrieve full JSON Schema for a named tool), and `tools.call` (invoke a tool by name with parameters). Tool invocations through `tools.call` MUST pass through the same scope enforcement as direct tool invocations (REQ-ENFORCE-002). The `tools.call` meta-tool MUST NOT provide a bypass of any enforcement layer.
-
-### REQ-DISC-003: Tool index generation
-
-The compact tool index MUST be regenerated whenever the node's resolved tool list changes (profile update, adapter regeneration, skill lifecycle transition). The index MUST be deterministic — same tool list produces the same index.
-
-### REQ-DISC-004: Skill priority in search
-
-In progressive discovery search results, skills MUST rank above raw tools when both match a query, to encourage reuse of proven patterns.
-
----
-
-## Adapter Generation
-
-### REQ-ADAPT-001: OpenAPI adapter generation
-
-The orchestrator MUST provide a CLI command to generate CogWorks tool definitions from OpenAPI 3.0/3.1 specifications (JSON and YAML formats). Each API operation produces a separate tool definition.
-
-### REQ-ADAPT-002: Tool definition output
-
-Generated adapter tool definitions MUST be TOML files conforming to the tool definition schema. Each definition includes: namespaced tool name (e.g., `inventree.stock.list`), parameter schema derived from the API spec, and authentication/connection scope parameters.
-
-### REQ-ADAPT-003: Scope integration
-
-Generated adapter tools MUST participate in the same scope enforcement as all other tools. Adapter tool definitions MUST declare scope parameters for endpoint URL, authentication, and rate limiting.
-
-### REQ-ADAPT-004: EAB schema format
-
-The orchestrator MUST support adapter generation from EAB (Extension API Bridge) JSON Schema format, in addition to OpenAPI. The generated tool definitions follow the same schema and registration mechanism.
-
-### REQ-ADAPT-005: Drift detection
-
-The orchestrator MUST provide a CLI command to compare generated adapter definitions against their source API specifications and report differences (new endpoints, removed endpoints, parameter changes). This command SHOULD be runnable as a CI check.
-
-### REQ-ADAPT-006: Supported specification formats
-
-The adapter generator MUST support: OpenAPI 3.0 (JSON + YAML), OpenAPI 3.1 (JSON + YAML), and EAB JSON Schema. Additional formats MAY be added as extensions.
-
----
-
-## MCP Integration (Superseded)
-
-> **Note**: Requirement IDs REQ-MCP-001 through REQ-MCP-004 were defined in COGWORKS-TOOLSCOPE-001 §9 and are superseded by REQ-ADAPT-001 through REQ-ADAPT-006. See ADR-0005 for decision context. MCP integration is retained only as a fallback for bidirectional or streaming protocols that generated adapters cannot represent. No new requirements should use the REQ-MCP-* prefix.
+| Stage type | Default behaviour |
+| ---------- | ----------------- |
+| `intake` | No alignment check (first step — nothing to align against) |
+| `specify` | Deterministic + LLM alignment against the work item. Score threshold: 0.90. Max rework: 3. |
+| `architect` | Deterministic + LLM alignment against the confirmed intent. Score threshold: 0.90. Max rework: 3. |
+| `contract` | Deterministic + LLM alignment against the specification. Score threshold: 0.90. Max rework: 3. |
+| `plan` | Deterministic alignment against the specification + contracts. LLM check: off. Score threshold: 0.85. Max rework: 2. |
+| `unit-oracle`, `acceptance-oracle` | Deterministic alignment against the slice + contracts (requirement-trace completeness). LLM check: off. Max rework: 2. |
+| `implement`, `refactor` | Deterministic + LLM alignment against the slice + contracts. Score threshold: 0.90. Max rework: 3. |
+| `review-semantic`, `review-security` | No alignment check — these stages produce findings, not artifacts. |
+| End-to-end (pipeline-level) | Deterministic + LLM alignment against the original work item. Score threshold: 0.90. Not a graph node — runs as a pipeline post-completion step (REQ-ALIGN-015). |
+
+Where a stage's resolved profile declares its own alignment configuration, that configuration takes precedence over this table.
+
+### REQ-ALIGN-041: Tier impact on alignment
+
+Alignment checks MUST become stricter as the work item's tier rises (REQ-TIER-001):
+
+| Parameter | T0–T1 | T2 | T3 |
+| --------- | ----- | -- | -- |
+| Score threshold | 0.90 | 0.95 | 0.95 |
+| Max rework cycles | 3 | 5 | 5 |
+| LLM alignment check | Configurable (default: on) | Always on | Always on |
+| End-to-end alignment check | Default on | Always on | Always on |
+| Traceability matrix | Generated | Generated | Generated and requires human sign-off |
+| Blocking finding tolerance | 0 (any blocking finding fails) | 0, and more than 3 warnings also fails | 0, and any warning fails |
+
+Where the resolved profile for a stage declares stricter values than this table, the profile's values apply. A tier's values MUST NOT be weakened by a profile or by any repository-level configuration.
