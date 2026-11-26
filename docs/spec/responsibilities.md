@@ -11,7 +11,7 @@ The central coordinator. Knows the pipeline graph structure and executes it by t
 **Responsibilities:**
 
 - Knows: Pipeline graph definition (nodes, edges, conditions), node gate configuration (auto/human per node), current pipeline state (reconstructed from GitHub), constitutional rules file path, shift work boundary per classification, maximum concurrent LLM calls limit
-- Does: Loads constitutional rules at the start of every run (unconditional, before any other action), loads pipeline configuration (or falls back to default linear pipeline), determines the next action(s) for a given work item by traversing the graph, delegates to the appropriate node implementations, evaluates edge conditions to determine downstream activation, manages parallel fan-out and fan-in synchronisation, enforces CogWorks node gate rules, manages the processing lock, requests one ephemeral container per implementation job through the runtime provider and requests cleanup on every terminal path, writes pipeline state through the work-item interface at each node boundary, supports resume from failed node
+- Does: Resolves the harness at the repository's pinned version, loads constitutional rules from it at the start of every run (unconditional, before any other action), resolves and validates the stage graph for the derived tier and discipline, determines the next action(s) by traversing the graph, delegates each stage to its driver, evaluates edge conditions deterministically to determine downstream activation, manages parallel fan-out and fan-in synchronisation, enforces node gate rules, manages the processing lock, requests one fresh sandbox per stage attempt through the stage runner and requests cancellation on every terminal path, writes pipeline state through the work-item interface at each stage boundary, and supports resume from a failed stage
 
 **Collaborators:**
 
@@ -19,7 +19,7 @@ The central coordinator. Knows the pipeline graph structure and executes it by t
 - Pipeline Configuration Manager (loads and validates pipeline graph definition)
 - Edge Condition Evaluator (evaluates edge conditions to determine downstream node activation)
 - GitHub Client (reads current state: labels, issues, PRs; writes pipeline state comments)
-- Node Implementations (delegates execution of each node)
+- Stage Drivers (delegates execution of each stage)
 - Audit Recorder (logs node transitions, edge evaluations, pipeline state)
 - Configuration Manager (reads gate configuration, shift work boundary)
 
@@ -35,10 +35,10 @@ The central coordinator. Knows the pipeline graph structure and executes it by t
 **Key behavior:**
 
 - Load constitutional rules before any other action (REQ-CONST-001) — failure to load is a pipeline-halting error
-- Load pipeline configuration from `.cogworks/pipeline.toml` or fall back to default linear pipeline
+- Resolve the stage graph from the pinned harness for the derived tier and discipline, and validate it against the stage-type registry
 - Given a work item, reconstruct its pipeline state from GitHub (labels, sub-issues, PR status, state comments)
 - Determine which node(s) are eligible for execution (inputs available, edge conditions satisfied)
-- For each eligible node: check gate configuration; if auto-proceed, delegate to node implementation; if human-gated, do nothing (exit and wait)
+- For each eligible node: check gate configuration; if auto-proceed, delegate to the stage driver; if human-gated, do nothing (exit and wait)
 - When multiple nodes are eligible simultaneously, execute them concurrently (respecting max concurrent LLM calls)
 - On node completion: evaluate outgoing edge conditions, activate eligible downstream nodes
 - Write pipeline state to GitHub after each node boundary (crash-recovery point)
@@ -72,248 +72,224 @@ Evaluates edge conditions to determine which downstream nodes to activate after 
 
 ---
 
-## Pipeline Configuration Manager
+## Intake Step
 
-Loads, validates, and provides access to pipeline graph definitions.
+Reads a work item and establishes the facts the rest of the run depends on: its tier, its scope,
+and whether the upstream approvals it requires are present.
 
 **Responsibilities:**
 
-- Knows: Pipeline configuration schema, configuration file location (`.cogworks/pipeline.toml`), default linear pipeline definition, graph validation rules (cycle termination, reachability, node uniqueness)
-- Does: Loads pipeline configuration from the repository, validates graph structure (no cycles without termination conditions, all nodes reachable, all edges have valid source/target), selects the correct named pipeline based on classification output, falls back to default linear pipeline when no configuration exists
+- Knows: The structured fields a work item carries, the scope threshold, and which upstream attestations the configured trust policy requires
+- Does: Reads the work item and its structured fields, derives the tier from the risk map, checks scope against the threshold, verifies required upstream attestations, and records what it found
+- Does not: Parse prose to infer triage or affected areas, scan the work item for injection, or assign priority
 
 **Collaborators:**
 
-- GitHub Client (reads configuration file from repository)
-- Configuration Manager (reads configuration file path)
+- GitHub Client (reads the work item, its labels and its signed comments; posts the intake record)
+- Risk-Map Loader (supplies the path-glob-to-tier mapping)
+- Tier Deriver (derives the tier, raise-only)
+- Attestation Provider (verifies upstream signatures)
 
 **Roles:**
 
-- Loader: Reads and parses pipeline configuration from TOML
-- Validator: Ensures graph structure is well-formed (no orphan nodes, cycles have termination, all node names unique)
-- Selector: Chooses the correct named pipeline based on work item classification
-- Default provider: Supplies the built-in 7-node linear pipeline when no configuration file exists
+- Tier deriver: Establishes the criticality that selects stages and thresholds
+- Escalation trigger: Raises a scope escalation when the threshold is exceeded
+- Trust checkpoint: Fails closed when a required upstream attestation is missing or invalid
+
+**Key behaviour:**
+
+- Read the work item body and its machine-readable blocks. Never parse prose for triage or affected areas
+- Verify every upstream attestation the trust policy requires, and halt if one is missing, unsigned or mismatched
+- Derive the tier from the risk map over the affected paths, raising but never lowering a recorded tier
+- If the estimated scope exceeds the threshold, escalate rather than proceed
+- Record the derived tier, the scope finding and the verified attestations on the work item
+
+Screening untrusted text for injection belongs to the upstream intake service, which signs its
+approval. CogWorks verifies that signature rather than repeating the scan.
 
 ---
 
-## Spawning Node Executor
+## Architect Stage Driver (`architect`)
 
-Executes spawning nodes that create derivative work items without blocking the pipeline.
+Drives the stage that produces the architectural decision, the threat-model delta and the
+risk-map patch for a work item. **Level: L4.**
 
 **Responsibilities:**
 
-- Knows: Issue creation template, label configuration, linking rules
-- Does: Analyzes pipeline context (via LLM prompt or deterministic script) to determine what derivative work items to create, creates GitHub Issues for each, links them to the parent work item, applies configured labels, records created issues in audit trail
+- Knows: The stage contract for `architect`, the specification paths it may write, and the deterministic constraint checks its output must satisfy
+- Does: Resolves the architect profile, assembles the bundle, requests the attempt, and runs the deterministic constraint and alignment checks over the result as stage post-checks
+- Does not: Decide whether its own output passes, write outside the specification paths, or lower a tier
 
 **Collaborators:**
 
-- LLM Gateway (for LLM-based analysis of what issues to create)
-- GitHub Client (creates issues, applies labels, links to parent)
-- Audit Recorder (logs spawned issues)
+- Profile Resolver, Context Bundle Builder, Mount-Plan Client, Stage Runner Client
+- Constraint Validator (deterministic cross-domain constraint checks)
+- Alignment Verifier (semantic alignment against the work item)
+- Verdict Reader (reads the gate's conclusion on the specification pull request)
 
 **Roles:**
 
-- Analyzer: Determines what derivative work items to create from pipeline context
-- Issue creator: Creates well-structured GitHub Issues with proper templates
-- Linker: Links spawned issues to the parent work item
-- Non-blocking executor: Pipeline continues regardless of spawning outcome
+- Architect driver: Produces the decision record, threat-model delta and risk-map patch
+- Pre/post-check runner: Bounds the attempt on deterministic constraint results, without publishing a verdict
 
 ---
 
-## Task Classifier (Intake Node Implementation)
+## Contract Stage Driver (`contract`)
 
-Analyzes a work item to determine its type, scope, and safety impact.
+Drives the stage that turns an approved specification into compilable contracts and a program
+design. **Level: L2.**
 
 **Responsibilities:**
 
-- Knows: Classification output schema, safety-critical module registry, scope thresholds
-- Does: Invokes LLM to classify the work item, cross-validates safety classification against registry, checks scope against threshold, posts classification summary
+- Knows: The stage contract for `contract`, and the specification paths it may write
+- Does: Resolves the contract profile, assembles the bundle, requests the attempt, and opens a specification pull request carrying the result
+- Does not: Write implementation source, or decide whether the contracts pass
 
 **Collaborators:**
 
-- LLM Gateway (sends classification prompt, receives structured response)
-- GitHub Client (reads issue body, posts classification comment, applies labels)
-- Configuration Manager (reads safety registry path, scope thresholds)
+- Profile Resolver, Context Bundle Builder, Mount-Plan Client, Stage Runner Client
+- Pull Request Manager (opens the specification pull request)
+- Verdict Reader (reads the gate's conclusion on that pull request)
+- Interface Registry Manager (registers cross-domain contracts)
 
 **Roles:**
 
-- Classifier: Determines task type and scope
-- Safety validator: Enforces safety classification override rules
-- Escalation trigger: Raises scope escalation when threshold exceeded
-
-**Key behavior:**
-
-- Read the issue body and any structured fields
-- Load the list of repository modules and the safety-critical registry
-- Invoke LLM with classification prompt and validate response against schema
-- If LLM says "not safety-affecting" but affected modules include a registered safety-critical module → override to safety-affecting
-- If estimated scope exceeds threshold → escalate (don't proceed)
-- Post classification summary as issue comment, apply node and safety labels
+- Contract driver: Produces compilable stubs and the program design
+- Specification author: Produces a pull request a human approves by review
 
 ---
 
-## Specification Generator (Architecture Node Implementation)
+## Plan Stage Driver (`plan`)
 
-Produces a technical specification document from the classified work item.
+Drives the stage that decomposes approved contracts into slices, and creates the sub-issues those
+slices become. **Level: L2.**
 
 **Responsibilities:**
 
-- Knows: Specification document structure, architectural constraint rules, Context Pack trigger rules
-- Does: Loads applicable Context Packs based on classification labels/tags, assembles context (including loaded pack knowledge), invokes LLM to generate spec, validates references and dependency changes, runs cross-domain constraint validation against interface registry at architecture node, creates specification PR
+- Knows: The stage contract for `plan`, the `plan.yaml` shape (slices, sizes, requirement mapping, dependency DAG), and milestone inheritance
+- Does: Resolves the plan profile, assembles the bundle, requests the attempt, opens a specification pull request carrying `plan.yaml`, and — once a human approves it — creates one sub-issue per slice in dependency order
+- Does not: Order work across work items, assign priority, or create a sub-issue from an unapproved plan
 
 **Collaborators:**
 
-- Context Pack Loader (loads domain knowledge packs based on classification labels and component tags)
-- Context Assembler (builds context package from repo files, ADRs, constraints, and loaded Context Pack knowledge)
-- LLM Gateway (sends spec generation prompt, receives Markdown)
-- Constraint Validator (checks proposed architecture against cross-domain interface contracts)
-- GitHub Client (creates branch, commits spec, creates PR, updates labels)
+- Profile Resolver, Context Bundle Builder, Mount-Plan Client, Stage Runner Client
+- Pull Request Manager (opens the specification pull request)
+- GitHub Client (creates the sub-issues, inherits the parent milestone)
+- Dependency Graph (topologically orders the slices)
 
 **Roles:**
 
-- Generator: Produces the specification document
-- Validator: Ensures referenced modules exist and dependency changes are valid
-- Constraint checker: Verifies proposed architecture doesn't violate cross-domain contracts
-- Retry coordinator: Feeds validation errors back to LLM on failure
-- Pack loader: Triggers deterministic Context Pack loading based on classification
+- Plan driver: Produces the slice decomposition and its dependency DAG
+- Sub-issue creator: Realises an approved plan as sub-issues, in dependency order
+
+Creating sub-issues is deterministic: the order comes from the DAG in the approved `plan.yaml`,
+not from a model.
 
 ---
 
-## Interface Generator (Interface Design Node Implementation)
+## Oracle Stage Driver (`unit-oracle`)
 
-Produces concrete interface definitions in the target domain's artifact format.
+Drives the stage that writes the locked tests and their signed manifest for a slice. It is the
+first half of the system's most important boundary: the identity that writes the tests is never
+the identity that writes the implementation.
 
 **Responsibilities:**
 
-- Knows: Interface definition conventions for the target domain
-- Does: Reads approved spec, assembles context, invokes LLM to generate interfaces, validates via domain service, creates interface PR
+- Knows: The stage contract for `unit-oracle`, the trust zone it runs in, the locked-test paths it may write, and the manifest that seals them
+- Does: Resolves the oracle profile, assembles a bundle from that profile's allowlist, requests a mount plan for the oracle identity role, requests one stage attempt, observes completion through GitHub state, and reads the gate verdict for the resulting SHA
+- Does not: See the implementation source, write to `src/`, run the tests to judge them, or decide whether its own output passes
 
 **Collaborators:**
 
-- Context Assembler (builds context from spec, existing interfaces, domain patterns)
-- LLM Gateway (sends interface generation prompt, receives source files)
-- Domain Service Client (validates generated interfaces via domain service's `validate` method)
-- GitHub Client (creates branch, commits interfaces, creates PR, updates labels)
+- Profile Resolver (resolves the oracle profile and its stage contract)
+- Context Bundle Builder (assembles the allowlisted bundle)
+- Mount-Plan Client (writable paths for the oracle identity role)
+- Stage Runner Client (runs the attempt; pushes under the oracle identity)
+- Verdict Reader (reads the gate's conclusion on the oracle SHA)
+- Stage Attestation Writer (records profile, harness version and bundle hash)
 
 **Roles:**
 
-- Generator: Produces interface source files
-- Validator: Ensures interfaces are syntactically and semantically correct per domain
-- Retry coordinator: Feeds domain service errors back to LLM on failure
+- Oracle driver: Produces the locked tests and the manifest that seals them
+- Barrier keeper: Ensures the manifest exists and is sealed before any implementation stage starts
+
+**Key behaviour:**
+
+1. Resolve the oracle profile for `(unit-oracle, discipline, toolchain, tier)`
+2. Assemble a bundle carrying the slice, the contracts and the specification — never implementation source
+3. Obtain a mount plan making the locked-test paths writable and `src/` not
+4. Request one stage attempt; the runner pushes the tests under the oracle identity
+5. Read the gate verdict on the resulting SHA
+6. Confirm the manifest is present and sealed. Implementation may not start until it is
 
 ---
 
-## Work Planner (Planning Node Implementation)
+## Implement Stage Driver (`implement`)
 
-Decomposes the approved spec and interfaces into sub-work-items.
+Drives the stage that writes the implementation for a slice, against tests it cannot change.
 
 **Responsibilities:**
 
-- Knows: Sub-work-item schema, granularity limits, dependency graph rules
-- Does: Invokes LLM to decompose work, validates dependency graph (topological sort, cycle detection), checks granularity limits, verifies interface coverage, creates sub-work-item issues
+- Knows: The stage contract for `implement`, the trust zone it runs in, the paths it may write (`src/` and its own tests), and the attempt and rework limits its contract declares
+- Does: Resolves the implement profile, assembles a bundle from that profile's allowlist, requests a mount plan for the builder identity role, requests one fresh sandbox per attempt, reads gate verdicts, and applies the rework and escalation policy between attempts
+- Does not: Write to the locked-test paths, see holdout content or acceptance source, resolve a dispute by editing a locked test, or decide whether its own output passes
 
 **Collaborators:**
 
-- LLM Gateway (sends planning prompt, receives structured plan)
-- GitHub Client (creates sub-work-item issues with labels and dependencies)
-- Configuration Manager (reads granularity limits)
+- Profile Resolver (resolves the implement profile and its stage contract)
+- Context Bundle Builder (assembles the bundle; enforces the zone barrier)
+- Mount-Plan Client (writable paths for the builder identity role; locked tests read-only)
+- Stage Runner Client (one fresh sandbox per attempt)
+- Verdict Reader (reads the gate's conclusion and structured output)
+- Rework and Escalation Policy (decides retry, rework, escalate or halt)
+- Budget Tracker (checks cost budget before each attempt)
 
 **Roles:**
 
-- Decomposer: Breaks work into discrete sub-work-items
-- Graph validator: Ensures dependency graph is a DAG (no cycles)
-- Coverage checker: Verifies every interface is covered by at least one sub-work-item
-- Escalation trigger: Raises granularity escalation if too many sub-work-items
+- Implementation driver: Produces the implementation for one slice
+- Loop coordinator: Carries the gate's structured feedback into the next attempt
+- Dispute raiser: Where a locked test appears wrong, raises a dispute for a human rather than editing it
+
+**Key behaviour (the rework loop):**
+
+1. Confirm the locked tests and sealed manifest exist for this slice
+2. Resolve the implement profile; assemble a bundle carrying the locked tests as read-only
+3. Obtain a mount plan; request one fresh sandbox for this attempt
+4. Read the gate verdict on the resulting SHA
+5. If the verdict is pending or absent, wait — never assume
+6. If it fails and the output was technically invalid, retry with the same context
+7. If it fails and the output was valid, rework with the gate's structured feedback. Feedback carries failing test identities and messages, never test source; for holdouts, never more than failing requirement IDs
+8. If the same failure class recurs, escalate early rather than spending the remaining budget
+9. If the attempt or rework limit is reached, escalate with a dossier
+10. If it passes, run the stage's alignment checks and advance
 
 ---
 
-## Code Generator (Code Generation Node Implementation)
+## Pull Request Manager
 
-Generates implementation artifacts for a single sub-work-item through an iterative refinement loop.
-
-**Responsibilities:**
-
-- Knows: Test-first iterative refinement loop (establish checks → implement → validate → iterate), retry budget, and implementation-job inputs/outputs
-- Does: Assembles context (spec + interfaces + prior SWI outputs + sub-work-item description), requests an implementation job from the orchestrator, establishes tests or equivalent domain acceptance checks before implementation, invokes the LLM to implement the requested change, runs deterministic tools and domain-specific validation, feeds structured errors back to the LLM, and iterates until pass or budget exhaustion
-
-**Collaborators:**
-
-- Context Assembler (builds context with full SWI history)
-- LLM Gateway (sends code generation prompt, receives source files)
-- Domain Service Client (domain-specific normalise → validate → review_rules → simulate)
-- Implementation Job Runtime Provider (provider-backed ephemeral container execution)
-- Budget Tracker (checks cost budget before each LLM call)
-
-**Roles:**
-
-- Generator: Produces implementation artifacts and tests
-- Feedback loop coordinator: Routes deterministic errors back to LLM with structured context
-- Budget enforcer: Halts when retry or cost budget exceeded
-
-**Key behavior (the refinement loop):**
-
-1. Assemble context package
-2. Invoke LLM to generate artifacts
-3. Run domain service: normalise → validate → review_rules
-4. If deterministic checks fail → feed structured errors to LLM, retry from step 2
-5. If deterministic checks pass → run simulation/tests via domain service `simulate`
-6. If simulation fails → assess if failure is self-explanatory (deterministic heuristic); if yes, feed directly to LLM; if no, invoke LLM to interpret failure, then retry from step 2
-7. If simulation passes → node completes, outputs available for downstream edges
-8. If retry budget exceeded → escalate
-
----
-
-## Review Executor (Review Node Implementation)
-
-Performs multi-dimensional review of generated artifacts.
+Opens and updates the pull requests that carry a run's work, and attaches its non-blocking
+findings.
 
 **Responsibilities:**
 
-- Knows: Four review dimensions (cross-domain constraint validation, quality, architecture compliance, security), severity levels (blocking/warning/informational), aggregation rules, required artefacts declared by loaded Context Packs
-- Does: Runs deterministic cross-domain constraint validation first, verifies all required artefacts declared by loaded Context Packs are present (missing artefacts produce blocking findings), then three independent LLM review passes, aggregates results, determines overall pass/fail, feeds blocking findings back to Code Generator for remediation
+- Knows: Pull request structure (description template, required references) and the branch scheme
+- Does: Opens or updates the pull request for a branch, posts non-blocking findings as comments, and links the pull request to its slice and parent work item
+- Does not: Push commits, author a check run, approve, or merge
 
 **Collaborators:**
 
-- Constraint Validator (deterministic cross-domain constraint checking)
-- LLM Gateway (sends three review prompts, receives structured review results)
-- Audit Recorder (logs review results)
+- GitHub Client (opens and updates pull requests, posts comments)
+- Stage Runner Client (the runner pushed the commits this pull request describes)
+- Audit Recorder (records pull request creation)
 
 **Roles:**
 
-- Constraint checker: Runs deterministic cross-domain constraint validation before LLM reviews (cheapest check first)
-- Artefact checker: Verifies required artefacts from Context Packs are present (blocking if missing)
-- Reviewer: Executes three independent LLM review passes
-- Aggregator: Combines results deterministically (any blocking = fail)
-- Feedback provider: Routes blocking findings back to Code Generator with context
+- Pull request author: Produces well-structured pull requests over branches the runner pushed
+- Comment poster: Attaches findings as non-blocking review comments
+- Linker: Maintains traceability from slice to parent work item to specification pull requests
 
-**Key behavior:**
-
-- Cross-Domain Constraint Validation (deterministic, runs first): Validates generated artifacts against interface registry contracts using domain service's `extract_interfaces` method
-- Code Quality Review (LLM): coding standards, idioms, error handling, naming, documentation
-- Architecture Compliance Review (LLM): matches spec, respects boundaries, no unplanned dependencies, interfaces implemented correctly
-- Security Review (LLM): input validation, auth boundaries, unsafe code, vulnerability patterns, dependency security
-
----
-
-## Integration Manager (Integration Node Implementation)
-
-Creates Pull Requests for completed sub-work-items.
-
-**Responsibilities:**
-
-- Knows: PR structure (description template, required references), commit conventions
-- Does: Creates PR with generated code, posts non-blocking review findings as PR comments, links PR to sub-work-item and parent work item
-
-**Collaborators:**
-
-- GitHub Client (creates PR, posts comments)
-- Working Copy Manager (commits files to branch)
-- Audit Recorder (logs PR creation)
-
-**Roles:**
-
-- PR creator: Produces well-structured Pull Requests
-- Comment poster: Attaches non-blocking findings as review comments
-- Linker: Ensures full traceability (sub-work-item → parent → spec PR → interface PR)
+The commits on the branch were pushed by the stage runner under the stage's identity role.
+CogWorks describes that work; it never pushes it, and it never merges the result.
 
 ---
 
@@ -342,39 +318,43 @@ Thin abstraction over LLM API calls with validation, cost tracking, budget enfor
 
 ---
 
-## Context Assembler
+## Context Bundle Builder
 
-Deterministic service that builds context packages for LLM calls. Contains **zero** LLM logic.
+Deterministic service that builds the context bundle a stage attempt is permitted to see.
+Contains **zero** model logic.
 
 **Responsibilities:**
 
-- Knows: Pyramid summary levels (1-4), context priority order (per vocabulary.md), token budget per model, file relevance rules, scenario separation rules, loaded Context Pack content
-- Does: Identifies relevant files based on affected modules, loads constraint documents (ADRs, standards, architectural rules), incorporates loaded Context Pack knowledge (domain knowledge, safe patterns, anti-patterns) as high-priority context, computes transitive dependencies via domain service dependency graph, selects appropriate summary level per module based on dependency distance, applies priority-based truncation when context exceeds window, enforces scenario holdout (never includes scenarios in code generation context), includes relevant interface registry entries for cross-domain context, reads intermediate artifacts from pipeline working directory when available
+- Knows: The resolved stage contract's input allowlist, the trust zone the stage runs in, the token budget, file relevance rules, and the Context Pack content the harness supplied
+- Does: Collects exactly the inputs the allowlist names, incorporates harness Context Pack knowledge, computes transitive dependencies through the domain service dependency graph for relevance ranking, applies deterministic priority-based truncation when the result exceeds the window, enforces the trust-zone barrier, hashes the bundle, and records the hash
+- Does not: Include an input the allowlist does not name, include the stage contract governing the stage it is building for, or let a model influence what is included
 
 **Collaborators:**
 
-- GitHub Client (reads file contents via API for lightweight access)
-- Domain Service Client (computes dependency graph for dependency-based relevance)
-- Configuration Manager (reads constraint file paths, ADR locations, scenario directory exclusions)
-- Summary Cache (reads cached pyramid summaries)
-- Interface Registry Manager (provides relevant cross-domain interface contracts)
+- Harness Loader (supplies the allowlist, the stage contract and the Context Packs)
+- GitHub Client (reads file contents through the Contents API)
+- Domain Service Client (computes the dependency graph for relevance)
+- Interface Registry Manager (supplies relevant cross-domain contracts)
 
 **Roles:**
 
-- File selector: Determines which files are relevant to a given node/sub-work-item
-- Constraint injector: Loads and includes project rules as hard requirements
-- Pack injector: Includes loaded Context Pack domain knowledge, safe patterns, and anti-patterns
-- Summary selector: Chooses appropriate detail level per module (Level 1/2/3/4 based on dependency distance)
-- Truncator: Applies deterministic priority-based truncation with progressive level demotion to fit context window
-- Holdout enforcer: Ensures scenario specifications are never included in code generation context
+- Allowlist enforcer: An input absent from the allowlist is absent from the bundle, not ranked lower
+- Pack injector: Includes the harness-supplied domain knowledge, safe patterns and anti-patterns
+- Zone barrier: Ensures a build-zone bundle carries no holdout content and no acceptance source
+- Truncator: Applies deterministic priority-based truncation to fit the context window
+- Hasher: Hashes the assembled bundle so what the agent saw is recorded and provable
 
-**Key behavior (pyramid-based assembly):**
+**Key behaviour:**
 
-1. Direct targets (files being modified): Include full source (Level 4)
-2. Direct dependencies: Include Level 3 (full interface detail)
-3. Transitive dependencies: Include Level 2 (paragraph summary)
-4. Broader context (affected area): Include Level 1 (one-line summary)
-5. If budget exceeded: Progressively demote distant modules to lower levels before excluding entirely
+1. Read the resolved stage contract's input allowlist
+2. Collect only the inputs it names, resolving each from the repository, the harness or pipeline state
+3. Rank by relevance, using dependency distance where a dependency graph is available
+4. Apply the trust-zone barrier for the stage's zone, removing anything the zone must not see
+5. Truncate deterministically by priority if the result exceeds the token budget
+6. Hash the bundle and record the hash before the attempt starts
+
+Truncation never removes the allowlist's mandatory inputs. If the mandatory inputs alone exceed
+the budget, that is an escalation, not a silent truncation.
 
 ---
 
@@ -400,7 +380,6 @@ An external process providing domain-specific tooling capabilities. Domain servi
 - Simulator: Executes tests/simulations and returns structured results
 - Interface extractor: Parses artifacts and extracts public interface surface
 - Graph builder: Computes dependency relationships between artifacts
-- Scenario runner: Executes scenario trajectories with given environment setup
 
 **Extension API methods:**
 
@@ -409,9 +388,9 @@ An external process providing domain-specific tooling capabilities. Domain servi
 | `validate(artifacts)` | Check domain rules (compile, DRC, tolerance analysis, etc.) | Code generation refinement, architecture validation |
 | `normalise(artifacts)` | Apply canonical formatting | Code generation (before validate) |
 | `review_rules(artifacts)` | Best practices and style rules | Code generation (after validate passes) |
-| `simulate(filter)` | Run tests/simulations | Test execution, scenario validation |
+| `simulate(filter)` | Run tests/simulations | Domain-specific test execution |
 | `validate_deps()` | Check dependency validity | Architecture validation, planning |
-| `extract_interfaces(artifacts)` | Parse and extract public interface definitions | Context assembly, cross-domain constraint validation, pyramid summaries |
+| `extract_interfaces(artifacts)` | Parse and extract public interface definitions | Context bundle assembly, cross-domain constraint validation |
 | `dependency_graph()` | Compute artifact dependency relationships | Context assembly, planning (topological sort) |
 
 **All outputs are structured data** — artifact, location, severity, category, message — in a common diagnostic format. CogWorks does not interpret results beyond the structured format.
@@ -468,7 +447,7 @@ Loads, validates, and provides access to the cross-domain interface registry.
 
 **Responsibilities:**
 
-- Knows: Interface definition schema, registry location (`.cogworks/interfaces/`), validation rules
+- Knows: Interface definition schema, the registry's location in the repository's specification paths, validation rules
 - Does: Loads all interface definitions from the registry directory, validates schema conformance, checks cross-references between interfaces, detects conflicting constraints, verifies all referenced domains have registered services (or are marked external)
 
 **Collaborators:**
@@ -550,26 +529,245 @@ Handles all GitHub API interaction. The system's sole interface to durable state
 
 ---
 
-## Implementation Job Runtime Provider (Infrastructure Interface)
+## Stage Runner Client (Infrastructure Interface)
 
-Provides the runtime capability requested by the Pipeline Executor for implementation jobs. CogWorks owns orchestration and cleanup decisions; this provider owns runtime-specific container operations.
+The boundary through which CogWorks asks for a stage attempt to be run. Everything that requires
+privilege lives on the other side of it.
 
 **Responsibilities:**
 
-- Knows: The selected container runtime/provider's job and cleanup capabilities
-- Does: Creates and operates the requested ephemeral container and performs provider-specific cleanup when requested by the orchestrator
+- Knows: The stage-attempt request shape — image, context bundle, mount plan, network profile, resource limits, identity role and branch
+- Does: Submits one attempt request per attempt, surfaces rejections, and requests cancellation on terminal paths
+- Does not: Hold a virtualisation or host privilege, hold a push credential, run an agent in this process, reuse a sandbox across attempts, or interpret what the attempt produced
 
 **Collaborators:**
 
-- Pipeline Executor (implementation-job lifecycle requests)
-- Selected container runtime or hosting provider
+- Implement and Oracle Stage Drivers (request attempts)
+- Mount-Plan Client (supplies the plan carried in the request)
+- Context Bundle Builder (supplies the bundle carried in the request)
 
 **Roles:**
 
-- Runtime adapter: Translates the provider-neutral job request to the selected runtime
-- Container lifecycle adapter: Performs runtime-specific cleanup when requested
+- Delegation boundary: The single place where execution leaves CogWorks
+- Privilege boundary: Holds no privilege itself; the stage runner service holds all of it
 
-**Note**: Exactly one ephemeral container is requested per implementation job. This provider does not define domain-specific validation and does not own CogWorks pipeline gates or pipeline state.
+---
+
+## Harness Loader
+
+Resolves the harness at the version the target repository pins, and is the only component that
+reads agent-shaping configuration.
+
+**Responsibilities:**
+
+- Knows: The pin file's location and shape, how to resolve a harness version, and what the harness contains — the stage-type registry, stage graphs, agent profiles, stage contracts, prompt templates, output schemas, Context Packs and constitutional rules
+- Does: Reads the pin, resolves and verifies the harness at that version, and exposes its contents to the components that need them
+- Does not: Write to the harness, resolve a floating reference, or fall back to a default when resolution fails
+
+**Collaborators:**
+
+- GitHub Client (reads the pin from the target repository)
+- Profile Resolver, Stage-Graph Resolver, Context Bundle Builder, Constitutional Rules Loader (all read through this component)
+
+**Roles:**
+
+- Pin resolver: Turns a repository's pin into one specific, verified harness version
+- Single source: The only path by which prompt material, contracts and graphs enter CogWorks
+
+**Key behaviour:**
+
+- An absent, malformed or withdrawn pin is a halt, never a default
+- A resolution that fails verification is a halt
+- A resolved version is stable for the whole run, so a harness change cannot alter behaviour mid-run
+
+---
+
+## Profile Resolver
+
+Resolves which agent profile runs a stage, deterministically.
+
+**Responsibilities:**
+
+- Knows: The resolution key — stage type, discipline, language or toolchain, and tier — and the harness's profile index
+- Does: Resolves the key to exactly one profile and its stage contract, and records the choice
+- Does not: Consult a model, accept model output as an input, or fall back to a default profile
+
+**Collaborators:**
+
+- Harness Loader (supplies the profile index)
+- Tier Deriver (supplies the tier component of the key)
+- Stage Attestation Writer (records the resolved profile and harness version)
+
+**Roles:**
+
+- Deterministic selector: Identical inputs at a given pin resolve to an identical profile
+- Recorder: The resolution is evidence, written into the attestation
+
+No matching profile is a halt. Running a stage under an approximately-right profile would mean
+an agent operating under a contract nobody chose for it.
+
+---
+
+## Stage-Graph Resolver
+
+Resolves which stage graph governs a work item, and validates it before anything executes.
+
+**Responsibilities:**
+
+- Knows: How a graph is selected for a `(tier, discipline)` pair, the stage-type registry, and the graph's structural rules
+- Does: Resolves the graph from the harness, validates every node's stage type against the registry, validates the graph's structure, and records the graph hash
+- Does not: Accept a graph from the target repository, or execute a graph that failed validation
+
+**Collaborators:**
+
+- Harness Loader (supplies the graph and the registry)
+- Tier Deriver (supplies the tier)
+- Pipeline Executor (executes the validated graph)
+
+**Roles:**
+
+- Resolver: Selects the graph the tier and discipline require
+- Validator: Rejects an invalid graph at load, before any stage is dispatched
+
+**Key behaviour:**
+
+- A node declaring a stage type absent from the registry fails validation at load
+- Structural rules still apply to the resolved graph: no orphan nodes, every edge target exists, every cycle has a termination condition, and at least one terminal node is reachable
+- The graph hash is recorded in pipeline state, so drift during a run is detected on resume
+
+---
+
+## Mount-Plan Client
+
+Obtains the mount plan that bounds where a stage attempt may write.
+
+**Responsibilities:**
+
+- Knows: The identity role the stage runs under and the writable paths its contract declares
+- Does: Requests a mount plan for that role and those paths, and passes the plan into the attempt request
+- Does not: Decide the boundary itself, widen a plan, or act as the only enforcement point
+
+**Collaborators:**
+
+- Profile Resolver (supplies the contract's writable paths and identity role)
+- Stage Runner Client (carries the plan into the attempt request)
+
+**Roles:**
+
+- Boundary requester: Asks a separate service where this role may write
+- Defence in depth: CogWorks is never the only thing standing between an agent and a path it should not touch
+
+---
+
+## Verdict Reader
+
+Reads gate verdicts. This is CogWorks' only source of pass or fail.
+
+**Responsibilities:**
+
+- Knows: The gate service's identity, how to read check runs for a commit, and how to interpret their structured output
+- Does: Reads the check runs on an attempt's SHA, discards any not authored by the gate service, and derives a verdict state with its structured feedback
+- Does not: Compute a verdict, author a check run, treat its own checks as a verdict, or act on a check run from an unexpected author
+
+**Collaborators:**
+
+- Check-Run Reader (the abstraction over the Checks API)
+- Rework and Escalation Policy (consumes the verdict and its feedback)
+
+**Roles:**
+
+- Trust anchor: The gate service's identity is the only thing CogWorks trusts for pass or fail
+- Interpreter: Turns check runs into a verdict state the state machine can act on
+
+**Key behaviour:**
+
+- A check run authored by any other identity is ignored entirely, not weighted
+- A pending or absent verdict means wait, never assume
+- A verdict bound to a SHA other than the attempt's is treated as absent
+- Holdout feedback is limited to failing requirement identities
+
+---
+
+## Rework and Escalation Policy
+
+Decides what happens after a failed attempt.
+
+**Responsibilities:**
+
+- Knows: The failure classes, the attempt and rework counters, and the limits the stage contract declares
+- Does: Chooses retry, rework, escalate or halt, and composes the structured feedback a rework carries
+- Does not: Exceed a contract's limits, place test source or holdout content in feedback, or retry an unrecoverable condition
+
+**Collaborators:**
+
+- Verdict Reader (supplies the verdict and its structured output)
+- Failure-Class Detector (reports a repeating failure class)
+- Context Bundle Builder (receives the feedback for the next attempt's bundle)
+- GitHub Client (creates the escalation dossier issue)
+
+**Roles:**
+
+- Loop controller: Bounds how long a stage may keep trying
+- Dossier author: Hands a human the attempt history, failure classes and bundle hashes rather than a bare failure
+
+**Key behaviour:**
+
+1. Technically invalid output — did not compile, did not parse, failed schema validation — is a **retry** with the same context
+2. Technically valid output that fails a gate or an alignment check is a **rework** carrying structured feedback
+3. A repeating failure class is an **early escalation**, before the budget is spent
+4. Reaching the contract's attempt or rework limit is an **escalation** with a dossier
+5. An unverifiable pin, a missing profile, a malformed risk map or a missing stage graph is a **halt**, not a retry
+
+---
+
+## Tier Deriver
+
+Derives the criticality tier that selects stages, thresholds and human gates.
+
+**Responsibilities:**
+
+- Knows: The risk map's path-glob-to-tier mapping, the affected paths, and any previously recorded tier
+- Does: Computes the maximum tier over the affected paths and compares it with the recorded tier
+- Does not: Read a tier from a label, lower a recorded tier, or default when the map is absent
+
+**Collaborators:**
+
+- Risk-Map Loader (supplies the mapping)
+- Profile Resolver and Stage-Graph Resolver (consume the derived tier)
+
+**Roles:**
+
+- Deriver: Establishes criticality from the paths the work touches
+- Ratchet: Raise-only, so stringency can never be reduced by re-deriving
+
+An absent or malformed risk map is a halt. Defaulting to the lowest tier would silently reduce
+the stringency applied to work nobody has assessed.
+
+---
+
+## Stage Attestation Writer
+
+Records what ran, under what, and over what inputs.
+
+**Responsibilities:**
+
+- Knows: The attestation shape — stage type, resolved profile, harness version, bundle hashes, identity role, verdicts read, and attempt outcome
+- Does: Assembles the attestation, has it signed, and transports it as a hidden comment on the work item
+- Does not: Hold private key material, or treat an attestation as workflow state
+
+**Collaborators:**
+
+- Attestation Provider (signs the attestation)
+- Credential Provider (supplies the signing capability; key material never reaches business logic)
+- GitHub Client (transports the signed attestation as a hidden comment)
+
+**Roles:**
+
+- Recorder: Makes each stage's inputs and choices provable after the fact
+- Chain extender: Carries the chain of custody forward for the next service to verify
+
+Attestations are evidence, not state. A run's position is always reconstructable from GitHub
+without reading a single attestation.
 
 ---
 
@@ -580,7 +778,7 @@ Loads and provides typed access to repository configuration.
 **Responsibilities:**
 
 - Knows: Configuration schema, default values for all settings
-- Does: Loads configuration from `.cogworks/config.toml` in the target repository, validates against schema, provides typed access to settings. Loads pipeline configuration from `.cogworks/pipeline.toml` (delegating to Pipeline Configuration Manager for graph validation)
+- Does: Loads CogWorks' own process configuration — the endpoints it talks to, its label mappings and its concurrency limits — validates it against schema, and provides typed access to it. Stage graphs, stage contracts and all agent-shaping configuration come from the harness, not from here
 
 **Collaborators:**
 
@@ -616,41 +814,6 @@ Tracks LLM token consumption and enforces cost limits.
 
 ---
 
-## Scenario Validator (Scenario Validation Node Implementation)
-
-Executes scenario validation after deterministic checks and tests pass, before the review gate.
-
-**Responsibilities:**
-
-- Knows: Scenario specifications (loaded from holdout location), satisfaction threshold, trajectory count per scenario, twin provisioning requirements
-- Does: Loads applicable scenarios for the current sub-work-item, provisions required Digital Twins, executes each scenario multiple times (trajectories), evaluates acceptance criteria (deterministic assertions, LLM-as-judge, or statistical checks), computes satisfaction scores, feeds failures back to Code Generator for remediation
-
-**Collaborators:**
-
-- Configuration Manager (reads scenario directory, satisfaction threshold, judge model)
-- Domain Service Client (executes scenario trajectories via domain service's `simulate` method)
-- LLM Gateway (for LLM-as-judge evaluation of acceptance criteria)
-- Twin Provisioner (starts/stops Digital Twin instances)
-- Audit Recorder (logs scenario results)
-
-**Roles:**
-
-- Scenario selector: Determines which scenarios apply to the current sub-work-item based on interface coverage
-- Twin orchestrator: Provisions and manages Digital Twin instances for scenario execution
-- Trajectory executor: Runs each scenario multiple times with fresh state
-- Judge coordinator: Evaluates acceptance criteria using deterministic assertions, LLM-as-judge, or statistical checks as appropriate
-- Scorer: Computes per-scenario and overall satisfaction scores
-- Feedback provider: Feeds failing scenarios and observed behaviors back to Code Generator
-
-**Key behavior:**
-
-- Only runs for sub-work-items with applicable scenarios (others skip this node)
-- Each trajectory runs in isolation (fresh twin state)
-- Satisfaction score must meet threshold (default 0.95) to proceed
-- Any explicit failure criterion violation fails the sub-work-item immediately
-
----
-
 ## Audit Recorder
 
 Records all pipeline activity for traceability and debugging.
@@ -658,7 +821,7 @@ Records all pipeline activity for traceability and debugging.
 **Responsibilities:**
 
 - Knows: Audit event schema, formatting conventions, constitutional event types
-- Does: Records LLM calls (model, input hash, output, tokens, latency), validation results, state transitions, cost data, scenario validation results (satisfaction scores, trajectory outcomes), constitutional layer events (INJECTION_DETECTED, SCOPE_UNDERSPECIFIED, SCOPE_AMBIGUOUS, PROTECTED_PATH_VIOLATION), Context Pack loading events (which packs loaded, trigger matches); writes audit trail to GitHub
+- Does: Records model calls (model, input hash, output, tokens, latency), resolved profiles and harness versions, context bundle hashes, verdicts read and their authoring identity, validation results, state transitions, cost data, constitutional layer events (SCOPE_UNDERSPECIFIED, SCOPE_AMBIGUOUS, PROTECTED_PATH_VIOLATION), and Context Pack loading events (which packs loaded, trigger matches); writes the audit trail to GitHub
 
 **Collaborators:**
 
@@ -684,7 +847,7 @@ Records stable structured pipeline lifecycle fields through the existing `tracin
 
 **Collaborators:**
 
-- Pipeline Executor and node implementations (create spans and invoke instrumentation hooks)
+- Pipeline Executor and stage drivers (create spans and invoke instrumentation hooks)
 - CLI composition root (configures the tracing subscriber and optional OTLP exporter)
 
 **Roles:**
@@ -706,7 +869,7 @@ Loads domain knowledge packs based on work item classification. Contains zero LL
 
 **Responsibilities:**
 
-- Knows: Context Pack directory structure, trigger file schema, well-known pack path (default: `.cogworks/context-packs/`), trigger matching rules
+- Knows: Context Pack structure within the harness discipline pack, trigger file schema, trigger matching rules
 - Does: Scans available packs, evaluates each pack's trigger definition against the work item's classification labels, component tags, and safety classification, loads matching packs (domain knowledge, safe patterns, anti-patterns, required artefacts), reports loaded packs to audit trail
 
 **Collaborators:**
@@ -737,7 +900,7 @@ Loads and validates the constitutional rules file. Contains zero LLM logic.
 
 **Responsibilities:**
 
-- Knows: Constitutional rules file path (default: `.cogworks/constitutional-rules.md`), file format expectations, minimum required rule set
+- Knows: Where the constitutional rules live within the harness, file format expectations, minimum required rule set
 - Does: Reads constitutional rules from the well-known path, validates that the file exists and contains the required core rules, validates that the file comes from a reviewed/merged branch (not an unreviewed branch), produces the rules payload to be injected into the LLM system prompt
 
 **Collaborators:**
@@ -857,146 +1020,3 @@ Verifies that a pipeline node's output matches the semantic intent of its upstre
 - For safety-classified work items: stricter thresholds (0.95 vs 0.90), LLM alignment check cannot be disabled, traceability matrix requires human sign-off
 
 ---
-
-## Tool System Components
-
-### Tool Registry
-
-**Responsibilities:**
-
-- Knows: All registered tool definitions (built-in, adapter-generated, skill-derived), each tool's name, parameter schema, scope parameter declarations, and implementation
-- Does: Resolves tool names to implementations for invocation, validates tool existence before execution, manages tool lifecycle (registration, deregistration), provides tool listing and search capabilities
-
-**Collaborators:**
-
-- Tool Profile Manager (provides subset selection criteria for node-specific tool lists)
-- Adapter Generator (registers adapter-generated tools)
-- Skill Executor (registers skill-derived tools as `skill.list`, `skill.run`, `skill.inspect`)
-- Audit Recorder (records tool registration events)
-
-**Roles:**
-
-- Catalog: Maintains the authoritative list of all available tools
-- Resolver: Maps tool names to callable implementations
-- Validator: Rejects invocations of nonexistent tools
-
-**Key behavior:**
-
-- Tools from three sources: built-in (filesystem, git, domain service, shell, network), adapter-generated (from OpenAPI/EAB specs), and skill-derived (from crystallised skills)
-- Tool names are globally unique; registration of a duplicate name is rejected
-- Tool schemas are validated at registration time, not at invocation time
-
----
-
-### Tool Profile Manager
-
-**Responsibilities:**
-
-- Knows: Tool profile definitions from `.cogworks/pipeline.toml`, per-node profile assignments, per-node tool overrides, template variables pending resolution
-- Does: Resolves a node's effective tool list by combining the base profile with any per-node overrides, resolves template variable placeholders (e.g., `{{affected_modules}}`) from pipeline state at node activation time, provides the filtered tool list to the LLM Gateway for inclusion in LLM calls
-
-**Collaborators:**
-
-- Tool Registry (queries available tools to validate profile contents against registry)
-- Pipeline Configuration Loader (reads profile definitions from `pipeline.toml`)
-- LLM Gateway (receives the resolved tool list for a specific node invocation)
-- Pipeline State (provides runtime values for template variable resolution)
-
-**Roles:**
-
-- Resolver: Computes effective tool list for a given node at a given point in the pipeline
-- Validator: Ensures profiles reference only tools that exist in the registry; warns on unknown tool names
-- Template resolver: Substitutes `{{variable}}` placeholders in scope parameters with values from pipeline state
-
-**Key behavior:**
-
-- Default profiles are provided for all 7 core pipeline nodes when no explicit configuration exists
-- Profile resolution is deterministic: same configuration + same pipeline state = same effective tool list
-- Template variables that cannot be resolved produce a clear error and prevent node activation (do not silently substitute empty values)
-- Profile resolution result is recorded in the audit trail for reproducibility
-
----
-
-### Tool Scope Enforcer
-
-**Responsibilities:**
-
-- Knows: The calling node's resolved scope parameters for a specific tool (allowed paths, branch patterns, permitted services, etc.)
-- Does: Validates every tool invocation against the calling node's scope parameters before executing the tool, rejects out-of-scope operations with structured error messages, records scope violations in the audit trail
-
-**Collaborators:**
-
-- Tool Profile Manager (provides the resolved scope parameters for the calling node's tool)
-- Tool Registry (provides the tool implementation to be invoked after scope validation passes)
-- Audit Recorder (records scope violations as `SCOPE_VIOLATION` events)
-- OS-Level Sandbox (third layer of defence; constrains the process environment even if tool-level enforcement fails)
-
-**Roles:**
-
-- Gate: Prevents tool execution when scope parameters are violated (second layer of defence in depth, after orchestrator-level filtering)
-- Reporter: Provides clear, actionable error messages to the LLM explaining why a tool call was rejected
-- Monitor: Tracks scope violation counts per node execution; excessive violations (threshold default: 5) trigger a warning
-
-**Key behavior:**
-
-- Defence in depth: the scope enforcer operates independently of orchestrator-level tool filtering. Even if a tool appears in the node's profile, scope parameters constrain how it may be used.
-- Scope enforcement is synchronous — validation completes before the tool executes
-- Protected path enforcement at the tool level: `fs.write`, `fs.create` refuse operations targeting protected paths regardless of profile configuration
-- Scope violations are counted per node execution; exceeding the threshold (default: 5) triggers an audit warning and MAY halt the node
-
----
-
-### Skill Executor
-
-**Responsibilities:**
-
-- Knows: Registered skill definitions (TOML manifest + script), skill lifecycle states, skill parameter schemas, skill execution history (success/failure rates)
-- Does: Validates skill parameters against the manifest schema, executes skill scripts with parameter substitution, validates every tool call within a skill against the calling node's tool profile (skills do not bypass scope enforcement), records skill execution results in the audit trail
-
-**Collaborators:**
-
-- Tool Scope Enforcer (validates each tool call within the skill against the calling node's profile)
-- Tool Registry (skill tools `skill.list`, `skill.run`, `skill.inspect` are registered here)
-- Audit Recorder (records skill execution events: invocation, parameters, result, duration)
-- Configuration Manager (reads skill lifecycle state, activation/deprecation status)
-
-**Roles:**
-
-- Executor: Runs parameterised scripts that replay proven tool invocation patterns
-- Gate: Validates skill parameters before execution; rejects invalid parameter types or missing required parameters
-- Monitor: Tracks per-skill success/failure rates; auto-deprecates skills falling below success threshold (configurable, default: 90% over last 20 runs)
-
-**Key behavior:**
-
-- Skills are deterministic: the same parameters produce the same sequence of tool invocations
-- Skills CANNOT bypass scope enforcement — each tool call within a skill is validated against the calling node's tool profile
-- Skill lifecycle follows: Proposed → Reviewed → Active → Deprecated → Retired
-- Skills are exposed to LLMs as `skill.list`, `skill.run`, `skill.inspect` tools
-- In progressive discovery mode, skills rank above raw tools in search results
-
----
-
-### Adapter Generator
-
-**Responsibilities:**
-
-- Knows: Supported API specification formats (OpenAPI 3.0/3.1 JSON/YAML, EAB JSON Schema), adapter output format (TOML tool definitions), namespace conventions
-- Does: Parses API specifications, generates per-operation tool definitions with parameter schemas derived from the spec, creates adapter index files, detects specification drift (signature changes, removed endpoints)
-
-**Collaborators:**
-
-- Tool Registry (registers generated adapter tools)
-- CI/CD Pipeline (drift detection runs as a CI check; regeneration is a CI-triggered action)
-
-**Roles:**
-
-- Generator: Transforms API specs into CogWorks tool definitions
-- Drift detector: Compares generated adapters against their source specs; flags mismatches
-
-**Key behavior:**
-
-- Adapters supersede MCP servers for most external integrations (see ADR-0005)
-- Generated adapters are stored in `.cogworks/adapters/<name>/` and version-controlled as derived artifacts
-- Source spec is the source of truth; adapters can be regenerated at any time
-- CI check verifies no drift between source specs and generated adapters
-- MCP integration is retained only as a fallback for bidirectional/streaming protocols that generated adapters cannot represent
