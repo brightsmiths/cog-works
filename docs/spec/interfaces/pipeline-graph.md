@@ -52,15 +52,6 @@ Returns `None` for empty strings.
 
 ---
 
-### `NaturalLanguageCondition`
-
-A non-empty string describing a condition in natural language, evaluated by an
-LLM against the upstream node's output.
-
-**Constructor**: `NaturalLanguageCondition::new(value: impl Into<String>) -> Option<NaturalLanguageCondition>`
-
----
-
 ### `TimeoutSeconds`
 
 Timeout expressed as whole seconds. Wraps `u64` for serde compatibility (
@@ -73,15 +64,28 @@ Timeout expressed as whole seconds. Wraps `u64` for serde compatibility (
 
 ## Graph Structure Types
 
-### `NodeType`
+### `StageTypeId`
 
-| Variant | Meaning |
-|---------|---------|
-| `Llm` | Node calls an LLM; output is a structured JSON value matched to an output schema |
-| `Deterministic` | Node executes a deterministic function; no LLM call |
-| `Spawning` | Node decomposes the current work item into child sub-work-items |
+A node declares exactly one stage type, as a free-text identifier drawn from the
+pinned harness's stage-type registry.
 
----
+```rust
+pub struct StageTypeId(String);
+```
+
+There is no enum of stage types, and no stage-type name is compiled into
+CogWorks. The set of valid stage types is **data**, resolved from the harness, so
+a discipline can add a stage type without changing this crate.
+
+`NodeId` and `StageTypeId` remain separate concepts. A `NodeId` names an instance
+with a position in the graph; a `StageTypeId` names the kind of work that selects
+the node's agent profile. Several nodes in one graph may share a stage type — a
+graph with three `implement` nodes, one per slice, has three `NodeId` values and
+one `StageTypeId`.
+
+**Validation**: every node's `StageTypeId` is checked against the harness registry
+when the graph is loaded, before any dispatch is attempted. A node declaring a
+stage type the registry does not define fails graph validation.
 
 ### `NodeGate`
 
@@ -98,7 +102,6 @@ Timeout expressed as whole seconds. Wraps `u64` for serde compatibility (
 |---------|---------|
 | `None` | No extra validation beyond the node's built-in output schema check |
 | `DomainService` | Output is sent to the appropriate domain service for validation |
-| `Scenario` | Scenario execution runs against the output |
 
 ---
 
@@ -110,26 +113,30 @@ Controls how outgoing edges from a node are selected after the node completes.
 |---------|-----------|
 | `AllMatching` | Every edge whose condition is `true` fires (fan-out) |
 | `FirstMatching` | First edge (declaration order) whose condition is `true` fires |
-| `Explicit` | Only the edges listed in `PipelineGraph::explicit_edge_lists[node_id]` fire; the list is fixed at configuration load time |
+| `Explicit` | Only the edges listed in `PipelineGraph::explicit_edge_lists[node_id]` fire; the list is fixed when the graph is loaded |
 
 Default: `FirstMatching` (nodes absent from `PipelineGraph::evaluation_modes`).
 
 **`Explicit` mode is static, not dynamic.** The set of edges to fire is declared
-in the pipeline configuration (in `PipelineGraph::explicit_edge_lists`) and does
-not change at runtime based on node output. This is aligned with REQ-EDGE-002.
+in the resolved graph (in `PipelineGraph::explicit_edge_lists`) and does not
+change at runtime based on node output. This is aligned with REQ-EDGE-002.
 `validate_pipeline_graph` must reject any node whose `evaluation_modes` entry is
 `Explicit` but which is absent from `explicit_edge_lists`.
+
+In every mode, each edge's condition is evaluated deterministically. The mode
+decides *how many* satisfied edges fire; it never decides *whether* a condition
+is satisfied, and no mode admits a model into that decision.
 
 ---
 
 ### `NodeDefinition`
 
-The static declaration of a node in a pipeline configuration.
+The static declaration of a node in a resolved stage graph.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `id` | `NodeId` | yes | Unique within the graph |
-| `node_type` | `NodeType` | yes | Execution category |
+| `stage_type` | `StageTypeId` | yes | The kind of work this node does; validated against the harness stage-type registry at load |
 | `declared_inputs` | `Vec<String>` | yes | Input artifact slot names |
 | `declared_outputs` | `Vec<String>` | yes | Output artifact slot names |
 | `timeout` | `Option<TimeoutSeconds>` | no | Node-level wall-clock timeout |
@@ -145,15 +152,25 @@ duplicate names within the same node.
 
 ### `EdgeConditionKind`
 
-The condition type for a directed edge. Determines when the edge fires.
+```rust
+pub enum EdgeConditionKind {
+    /// Always taken.
+    Always,
+    /// A deterministic expression over pipeline state and gate verdicts.
+    Expression(Expression),
+    /// A boolean combination of other conditions.
+    Composite(CompositeCondition),
+}
+```
 
-| Variant | Payload | Description |
-|---------|---------|-------------|
-| `Deterministic` | `Expression` | Pure expression evaluated against `PipelineState` |
-| `LlmEvaluated` | `NaturalLanguageCondition` | LLM decides true/false against node output |
-| `Composite` | `CompositeCondition` | Boolean combination of inner conditions |
+There is no `LlmEvaluated` variant. Routing, gating, context packaging, retries
+and escalation are code, so which edge is taken never depends on model output. A
+model cannot participate in routing even by configuration.
 
----
+**Fail closed.** A condition that cannot be evaluated — an unresolvable state
+reference, or a verdict that is absent when the condition requires one —
+evaluates to `false`. An edge is taken only when its condition is affirmatively
+satisfied.
 
 ### `CompositeCondition`
 
@@ -239,40 +256,42 @@ The complete pipeline graph as loaded and validated from configuration.
 | `edges` | `Vec<EdgeDefinition>` | All edge declarations |
 | `evaluation_modes` | `HashMap<NodeId, EvaluationMode>` | Per-node overrides; absent nodes use `FirstMatching` |
 | `explicit_edge_lists` | `HashMap<NodeId, Vec<EdgeId>>` | Explicit edge lists for nodes using `EvaluationMode::Explicit`; absent from map when not needed |
-| `settings` | `PipelineSettings` | Pipeline-level defaults |
-| `tool_profiles` | `PipelineToolProfileConfig` | Tool-profile overrides scoped to this pipeline |
+| `settings` | `PipelineSettings` | Graph-level defaults |
 
 **Invariant**: Only produced by `validate_pipeline_graph`. Never construct
 directly in production code; always validate first.
 
-**Note**: `tool_profiles` lives on `PipelineGraph` (not on `PipelineConfiguration`) so
-that two pipelines within the same configuration file that happen to share a
-node name do not collide on override entries.
+**No tool-profile field.** An agent's tool allowlist is part of its profile in the
+harness, and the boundary that enforces it is the sandbox. A graph cannot widen
+what an agent may call.
 
 **Deserialisation boundary**: `#[serde(deny_unknown_fields)]` is applied.
 Always deserialise → validate → use; a deserialised value is not validated.
 
 ---
 
-### `PipelineConfiguration`
+### Graph sourcing
 
-The complete contents of `.cogworks/pipeline.toml`.
+There is no `PipelineConfiguration` type and no repository-local pipeline
+configuration file. A `PipelineGraph` is **resolved from the pinned harness** for
+the run's `(tier, discipline)` pair.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `pipelines` | `HashMap<PipelineName, PipelineGraph>` | All named graphs; each carries its own `tool_profiles` |
+The harness is versioned, pinned, reviewed and canary-rolled. A configuration file
+in the repository being worked on is none of those things, and is writable by the
+agents working there — so a repository could otherwise widen a stage's
+permissions or route around a stage its tier requires. CogWorks' own repository is
+one of the repositories it operates on, which makes this concrete rather than
+theoretical.
 
-**Loading sequence**: deserialise → call `validate_pipeline_graph` on every
-graph → use. `#[serde(deny_unknown_fields)]` is applied.
+There is likewise no tool-profile configuration here. An agent's tool allowlist is
+part of its profile in the harness, and the boundary that enforces it is the
+sandbox, not this crate.
 
----
+A repository's only input to graph selection is indirect and human-owned: the
+`risk-map.yaml` that determines its tier, and the `.factory/pin.yaml` that
+determines the harness version.
 
-### `PipelineToolProfileConfig`
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `default_profile` | `ProfileName` | Applied to all nodes without an override |
-| `node_overrides` | `HashMap<NodeId, ProfileName>` | Per-node tool profile (scoped to the owning pipeline) |
+See `docs/adr/ADR-0006-a-node-is-a-stage-type-profiles-and-graphs-from-the-harness.md`.
 
 ---
 
@@ -543,7 +562,7 @@ branches, human gates, or LLM edge evaluation).
 
 ```rust
 // Load and validate a pipeline graph (illustrative — no real I/O here)
-let raw_graph: PipelineGraph = /* loaded by PipelineConfigurationLoader */;
+let raw_graph: PipelineGraph = /* resolved from the pinned harness for (tier, discipline) */;
 validate_pipeline_graph(&raw_graph)?;
 
 // Determine what to run next

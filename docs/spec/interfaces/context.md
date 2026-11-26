@@ -14,18 +14,21 @@
 
 This document specifies two closely related subsystems:
 
-1. **Context Assembly** — selecting and assembling the right knowledge into a
-   `ContextPackage` that fits within a node's token budget. This includes:
-   - Context priority ranking
-   - Context Pack selection based on classification
-   - Pyramid summary selection (coarsest level that fits at each priority tier)
-   - Scenario holdout enforcement (prevents leakage into code generation context)
+1. **Context Bundle Assembly** — admitting exactly the inputs a stage's contract
+   allows, and fitting them within the stage's token budget. This includes:
+   - Resolving the input allowlist from the resolved stage contract
+   - Context Pack selection from the pinned harness
+   - Context priority ranking and deterministic truncation
+   - Trust-zone barrier enforcement, as defence in depth behind the allowlist
+   - Hashing the result so what the agent saw is recorded and provable
 
-2. **Pipeline Label Parsing** — mapping configured GitHub label strings (for example, the default `"cogworks:run"` readiness mapping)
-   to typed `PipelineLabel` values and back. Labels drive the pipeline state machine.
+2. **Pipeline Label Parsing** — mapping configured GitHub label strings to typed
+   `PipelineLabel` values and back. Label names are configuration; this module
+   handles the mapping, never a hardcoded name.
 
-The context assembly functions are the primary bridge between classification results,
-knowledge summaries (via `SummaryCache`), and the LLM input for each node.
+Assembly is **deterministic and takes no model input**. What an agent is shown
+decides what it produces, so that decision is made by code from a recorded
+allowlist, not by a model and not by whatever happened to be nearby.
 
 ---
 
@@ -34,10 +37,10 @@ knowledge summaries (via `SummaryCache`), and the LLM input for each node.
 | This module uses | From |
 | ----------------- | ------ |
 | `ArtifactPath`, `ContextPackId` | `crates/pipeline/src/identifiers.rs` |
-| `SatisfactionScore`, `TokenCount` | `crates/pipeline/src/types.rs` |
-| `SummaryCache` (trait), `SummaryLevel`, `PyramidSummary` | `crates/pipeline/src/knowledge.rs` |
+| `TokenCount` | `crates/pipeline/src/types.rs` |
 | `InterfaceDefinition` | `crates/pipeline/src/domain_services.rs` |
-| `NodeType` | `crates/pipeline/src/graph.rs` |
+| `StageTypeId` | `crates/pipeline/src/graph.rs` |
+| `StageContract`, `TrustZone`, `BundleHash` | `crates/pipeline/src/harness.rs` |
 
 ---
 
@@ -121,7 +124,6 @@ A single unit of knowledge assembled for a node's context window.
 ```rust
 pub struct ContextItem {
     pub content: String,
-    pub summary_level: SummaryLevel,
     pub priority: ContextPriority,
     pub token_count: TokenCount,
     pub source_path: Option<ArtifactPath>,
@@ -129,45 +131,53 @@ pub struct ContextItem {
 ```
 
 - `content` — the verbatim text to be delivered to the LLM at this position.
-- `summary_level` — the pyramid level (`OneLine` through `Source`) at which this
-  entry was included. `None` for items with no corresponding pyramid summary
-  (e.g. interface definitions or pack guidance text).
+- `allowlist_entry` — the input allowlist entry that admitted this item. Every
+  item has one: an item with no admitting entry is a defect, not a default.
 - `priority` — determines drop order when the token budget is tight.
 - `token_count` — pre-computed count used for budget arithmetic. Must match
   `content.len()` in tokens at the LLM's tokenisation.
 - `source_path` — the artifact this item was derived from; `None` for
   synthesised items such as merged pack guidance.
 
-### ContextPackage
+### ContextBundle
 
-The complete assembled context for a single LLM call.
+The complete, allowlisted set of inputs one stage attempt is permitted to see.
 
-```rust
-pub struct ContextPackage {
-    pub items: Vec<ContextItem>,
-    pub total_token_count: TokenCount,
-    pub truncation_applied: bool,
-    pub assembly_errors: Vec<String>,
-}
-```
+| Field | Type | Description |
+|-------|------|-------------|
+| `items` | `Vec<ContextItem>` | The admitted inputs, in assembled order |
+| `allowlist` | `Vec<String>` | The stage contract's input allowlist, recorded so what *could* have been admitted is provable, not just what was |
+| `bundle_hash` | `BundleHash` | SHA-256 over the canonical serialisation of `items` |
+| `trust_zone` | `TrustZone` | The zone this bundle was built for; determines which barriers applied |
+| `total_tokens` | `u32` | Estimated token count of `items` |
+| `truncated` | `Vec<String>` | Non-mandatory inputs dropped to fit the budget, named for the audit trail |
 
-- `items` — ordered from highest to lowest priority. Items at the same priority
-  level are ordered by `source_path` (alphabetical) for reproducibility.
-- `total_token_count` — sum of `item.token_count` for all items in the package.
-  Must be ≤ the budget passed to `assemble_context`.
-- `truncation_applied` — `true` if one or more items were dropped to fit the budget,
-  or if a single required artifact exceeds the budget (budget overflow). Does **not**
-  indicate cache fetch errors — see `assembly_errors`.
-- `assembly_errors` — descriptions of artifacts skipped because `SummaryCache` returned
-  an error. An empty vec means the context is complete. A non-empty vec signals
-  incomplete data; callers should surface these errors for observability but may
-  still proceed.
+**Allowlist, not denylist.** An input the allowlist does not name is **absent**
+from `items` — not ranked lower, not truncated away, absent. A denylist fails
+open: anything nobody thought to exclude is included. An allowlist fails closed.
+
+This is also what makes the trust-zone barrier real. A build-zone bundle contains
+no holdout content because its allowlist does not name holdouts, not because
+something remembered to strip them.
+
+**The stage contract is never an item.** The contract names the allowlist, the
+writable paths, the limits and the identity role. Placing it in the bundle it
+governs would let the agent reason about its own constraints.
+
+**Hashed before use.** `bundle_hash` is computed over a canonical serialisation
+and recorded before the attempt is requested. An attempt whose bundle was not
+hashed is not requested. The hash goes into the stage attestation, so an attempt
+is reproducible: the same profile at the same pin over the same bundle.
+
+**Canonical serialisation** is required for the hash to be meaningful: items in
+assembled order, object keys sorted, no insignificant whitespace. Two assemblies
+of identical content must produce an identical hash.
 
 ---
 
 ## Part 3 — Context Pack Types
 
-Context Packs are domain-specific knowledge bundles stored in `.cogworks/context-packs/`.
+Context Packs are domain-specific knowledge bundles stored in `the harness discipline pack at `.
 They are selected at runtime based on the classification result and merged into a single
 knowledge payload for the node.
 
@@ -207,23 +217,21 @@ pub struct ContextPack {
     pub safe_patterns: Vec<String>,
     pub anti_patterns: Vec<String>,
     pub required_artifacts: Vec<ArtifactPath>,
-    pub scenario_threshold_override: Option<SatisfactionScore>,
 }
 ```
 
 **Fields**:
 
-- `id` — matches the Context Pack directory name in `.cogworks/context-packs/`.
+- `id` — the pack's identifier within the harness discipline pack.
 - `trigger` — the conditions under which this pack is selected.
 - `domain_knowledge` — verbatim text injected into the `ContextPackKnowledge`
   priority tier.
 - `safe_patterns` — examples of correct code or design patterns for this domain.
   Merged with most-restrictive-wins semantics by `merge_pack_guidance`.
 - `anti_patterns` — examples of patterns to avoid. Union-merged across all packs.
-- `required_artifacts` — artifacts that must be included (at any summary level)
-  regardless of priority truncation.
-- `scenario_threshold_override` — per-pack scenario satisfaction threshold;
-  the strictest across all matched packs is applied. `None` uses the pipeline default.
+- `required_artifacts` — artifacts that must be included regardless of priority
+  truncation. Where these alone exceed the budget, assembly reports a structured
+  error rather than dropping one silently.
 
 ### MergedGuidance
 
@@ -251,14 +259,13 @@ The output of pack selection and guidance merging for one pipeline run.
 pub struct LoadedContextPacks {
     pub matched_packs: Vec<ContextPack>,
     pub merged_guidance: MergedGuidance,
-    pub strictest_threshold: SatisfactionScore,
 }
 ```
 
 - `matched_packs` — all packs selected for this run (may be empty).
-- `merged_guidance` — pre-merged guidance ready for injection into the context.
-- `strictest_threshold` — the lowest `scenario_threshold_override` across all matched
-  packs. If no pack overrides the threshold, this equals the pipeline-level default.
+- `merged_guidance` — pre-merged guidance ready for injection into the bundle.
+  Where two packs disagree, the more restrictive rule applies: a pack may tighten
+  guidance for its domain and may never relax a global threshold.
 
 ---
 
@@ -266,14 +273,14 @@ pub struct LoadedContextPacks {
 
 ### ContextAssemblyRequest
 
-All the parameters needed to assemble a `ContextPackage` for one node invocation.
+All the parameters needed to assemble a `ContextBundle` for one node invocation.
 
 ```rust
 pub struct ContextAssemblyRequest {
     pub node_type: NodeType,
     pub sub_work_item_description: String,
     pub affected_modules: Vec<ArtifactPath>,
-    pub scenario_holdout_dirs: Vec<PathBuf>,
+    pub zone_barrier_paths: Vec<PathBuf>,
     pub pipeline_working_dir: PathBuf,
 }
 ```
@@ -285,10 +292,10 @@ pub struct ContextAssemblyRequest {
   summaries at all.
 - `sub_work_item_description` — the natural-language description of the sub-task.
   Included verbatim as user context.
-- `affected_modules` — repo-relative paths the node is expected to interact with.
-  Used to fetch per-module summaries from `SummaryCache`.
-- `scenario_holdout_dirs` — repo-relative directories containing scenario files.
-  Items derived from these paths are removed by `enforce_scenario_holdout` before
+- `affected_modules` — repo-relative paths the stage is expected to interact with.
+  Used for relevance ranking, and to read the artifacts the allowlist admits.
+- `zone_barrier_paths` — repo-relative paths the stage's trust zone must not see.
+  Items derived from these paths are removed by `enforce_trust_zone` before
   context assembly. Uses `ArtifactPath` (not `PathBuf`) to stay platform-neutral.
 - `pipeline_working_dir` — root of the pipeline's working directory checkout.
   Used to resolve relative paths when fetching summaries.
@@ -338,34 +345,35 @@ Returns an empty `MergedGuidance` for an empty `packs` slice.
 
 ---
 
-### fn assemble_context
+### fn assemble_bundle
 
 ```rust
-pub async fn assemble_context(
+pub async fn assemble_bundle(
     req: &ContextAssemblyRequest,
-    summaries: &dyn SummaryCache,
     packs: &LoadedContextPacks,
     interface_entries: &[InterfaceDefinition],
     token_budget: TokenCount,
-) -> ContextPackage
+) -> ContextBundle
 ```
 
-Assembles a `ContextPackage` by:
+Assembles a `ContextBundle` by:
 
-1. Converting every `LoadedContextPacks.merged_guidance.required_artifacts` plus
-   `req.affected_modules` into `ContextItem` values. For each artifact, the finest
-   available summary level is selected by querying `SummaryCache` (trying `Source`
-   first, falling back to `FullInterface`, `Paragraph`, `OneLine`). Budget-fitting
-   is handled later by `apply_priority_truncation`, not here.
+1. Resolving the stage contract's input allowlist into candidate `ContextItem`
+   values, drawing from `LoadedContextPacks.merged_guidance.required_artifacts`,
+   `req.affected_modules`, the repository and the harness. An input the allowlist
+   does not name produces no candidate. Budget-fitting is handled later by
+   `apply_priority_truncation`, not here.
 2. Adding interface definitions as `CurrentInterfaceDefinition`-priority items
    (up to one item per `InterfaceDefinition` entry).
 3. Adding merged pack guidance text as a single `ContextPackKnowledge` item.
-4. Calling `enforce_scenario_holdout` to strip items derived from holdout directories.
+4. Calling `enforce_trust_zone` as defence in depth, stripping anything the
+   stage's zone must not see that the allowlist nonetheless admitted.
 5. Calling `apply_priority_truncation` to trim to `token_budget`.
+6. Hashing the result and recording `bundle_hash`.
 
-**Async** — calls `SummaryCache::get_summary` for each artifact.
+**Async** — reads admitted artifacts through the repository and harness loaders.
 
-**Side effects**: none beyond the `SummaryCache` reads. Never writes.
+**Side effects**: reads only. Never writes.
 
 **Error policy**: if `get_summary` returns an error for an artifact, that artifact
 is skipped (not truncated) and the assembly continues. The resulting package
@@ -377,12 +385,12 @@ will have `truncation_applied = true` to signal that some data was unavailable.
 
 ```rust
 pub fn apply_priority_truncation(
-    items: HoldoutFilteredItems,
+    items: ZoneFilteredItems,
     budget: TokenCount,
-) -> ContextPackage
+) -> ContextBundle
 ```
 
-Accepts a [`HoldoutFilteredItems`] value produced by `enforce_scenario_holdout`.
+Accepts a [`ZoneFilteredItems`] value produced by `enforce_trust_zone`.
 The distinct type makes the call order a compile-time constraint: passing a raw
 `Vec<ContextItem>` is a type error.
 
@@ -398,48 +406,47 @@ never silently dropped.
 
 ---
 
-### fn enforce_scenario_holdout
+### fn enforce_trust_zone
 
 ```rust
-pub fn enforce_scenario_holdout(
+pub fn enforce_trust_zone(
     items: Vec<ContextItem>,
-    holdout_dirs: &[ArtifactPath],
-) -> HoldoutFilteredItems
+    zone: TrustZone,
+) -> ZoneFilteredItems
 ```
 
-Removes any `ContextItem` whose `source_path` is rooted under one of the holdout
-directories. This is a **hard constraint** (documented in `docs/spec/constraints.md`
-§Module Boundaries): scenario specifications must never be present in code generation
-context.
+Removes from a candidate item set anything the stage's trust zone must not see.
 
-Items with `source_path == None` are never removed.
+This is defence in depth, not the primary mechanism. The primary mechanism is the
+allowlist: a build-zone contract does not name holdouts, so they never become
+candidates. This function is the second line, catching the case where an
+allowlist entry resolves more broadly than its author intended.
 
-Returns a [`HoldoutFilteredItems`] wrapper. Pass it directly to
-`apply_priority_truncation`. Call `into_inner()` only when working outside the
-normal `assemble_context` flow.
+**Barriers by zone**:
 
-**Infallible. Pure.**
+| Zone | Contains | Must not see |
+|------|----------|--------------|
+| Design | `specify`, `architect`, `contract`, `plan` | implementation source |
+| Oracle | `unit-oracle`, `acceptance-oracle` | implementation source |
+| Build | `implement`, `refactor`, `debt-fix` | holdout content, acceptance source |
+| Review | `review-semantic`, `review-security` | — (read-only, sees the change under review) |
 
----
+The oracle barrier matters as much as the build barrier and is easier to forget.
+An oracle that can see the implementation writes tests describing what was built
+rather than what was asked for, which is a quieter failure than a build stage
+reading a holdout but defeats the oracle just as completely.
 
-### HoldoutFilteredItems
+### ZoneFilteredItems
 
-```rust
-pub struct HoldoutFilteredItems(Vec<ContextItem>);
+| Field | Type | Description |
+|-------|------|-------------|
+| `retained` | `Vec<ContextItem>` | Items admitted for this zone |
+| `removed` | `Vec<(String, TrustZone)>` | Item identifiers removed, with the zone barrier that removed each |
 
-impl HoldoutFilteredItems {
-    pub fn into_inner(self) -> Vec<ContextItem>;
-}
-```
-
-A newtype wrapper over `Vec<ContextItem>` that witnesses that
-`enforce_scenario_holdout` has been applied. `apply_priority_truncation` requires
-this type rather than a raw `Vec<ContextItem>`, so swapping the call order is
-caught at compile time.
-
-`into_inner` is provided for callers that need the raw items outside the
-standard flow (e.g., tests). Normal production code passes the value directly
-to `apply_priority_truncation` without unwrapping.
+`removed` is **non-empty only when the allowlist let something through that the
+zone forbids**, which means an allowlist needs correcting. A non-empty `removed`
+is therefore recorded as a warning in the audit trail, not silently discarded —
+the filter worked, but it should not have had to.
 
 ---
 
@@ -521,9 +528,9 @@ Returns the canonical GitHub label string for a pipeline label as a `&'static st
 | ---------- | ------------------- |
 | `select_context_packs` | Infallible |
 | `merge_pack_guidance` | Infallible |
-| `assemble_context` | Async; `SummaryCache` errors cause affected artifacts to be skipped, not propagated |
+| `assemble_bundle` | Async; a read failure on an optional artifact skips it with a recorded warning, a read failure on a mandatory one is an error |
 | `apply_priority_truncation` | Infallible |
-| `enforce_scenario_holdout` | Infallible |
+| `enforce_trust_zone` | Infallible |
 | `parse_label` | Returns `None` for unrecognised labels |
 | `generate_label` | Infallible |
 
@@ -533,13 +540,13 @@ Returns the canonical GitHub label string for a pipeline label as a `&'static st
 
 - `apply_priority_truncation` must use a deterministic sort so the assembled context
   is reproducible; same inputs → same output.
-- The `assemble_context` error-swallowing policy (skip on cache error, set
+- The `assemble_bundle` error-swallowing policy (skip on cache error, set
   `truncation_applied = true`) must be recorded in the tracing span for observability.
-- `enforce_scenario_holdout` is applied **before** `apply_priority_truncation` to
+- `enforce_trust_zone` is applied **before** `apply_priority_truncation` to
   ensure holdout items never consume budget space.
-- Context Packs live in `.cogworks/context-packs/<pack-id>/pack.toml`.
+- Context Packs live in `the harness discipline pack at <pack-id>/pack.toml`.
   Loading them is the responsibility of an infrastructure loader (wired in `cli`);
   this module only consumes already-loaded `ContextPack` values.
-- `PathBuf` from `std::path` is intentionally used for `scenario_holdout_dirs` and
+- `PathBuf` from `std::path` is intentionally used for `zone_barrier_paths` and
   `pipeline_working_dir` — these are local filesystem paths in the working checkout,
   not repo-relative artifact paths.

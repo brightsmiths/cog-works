@@ -95,8 +95,6 @@ remain outside this interface contract.
 | `CodeRepository::list_directory` | *(SDK gap — Contents API)* | Returns `SdkCapabilityMissing` |
 | `CodeRepository::file_exists` | *(SDK gap — Contents API HEAD)* | Returns `SdkCapabilityMissing` |
 | `CodeRepository::read_tree` | *(SDK gap — Trees API recursive)* | Returns `SdkCapabilityMissing` |
-| `ProjectBoard::sync_item_status` | `sdk.projects().update_item(project_id, item_id, status)` | Non-blocking; errors are logged, not propagated |
-| `ProjectBoard::sync_custom_field` | `sdk.projects().update_field_value(...)` | Non-blocking |
 | `AuditStore::record_event` | `sdk.issues().create_comment(...)` (Markdown `<details>`) | Batched, flushed on timer |
 | `AuditStore::write_summary` | `sdk.issues().create_comment(...)` (Markdown section) | |
 
@@ -161,73 +159,84 @@ batch limit is 10 events.
 
 ```
 crates/llm/src/
-  lib.rs          AnthropicConfig, AnthropicProvider, LlmProvider impl
+  lib.rs          ModelGatewayConfig, ModelGatewayProvider, LlmProvider impl
 ```
 
-### AnthropicProvider
+### ModelGatewayProvider
 
 ```rust
-pub struct AnthropicProvider {
-    config: AnthropicConfig,
+pub struct ModelGatewayProvider {
+    config: ModelGatewayConfig,
     client: reqwest::Client,
+}
+
+pub struct ModelGatewayConfig {
+    /// The deployment's model gateway endpoint.
+    pub endpoint: String,
+    /// Logical model name, resolved by the gateway to a concrete provider model.
+    pub model: String,
+    pub max_retries: u32,
+    pub request_timeout_secs: u64,
 }
 ```
 
-The `reqwest::Client` is initialised once at construction and reused across
-calls (connection pooling). The client is built with `rustls-tls`; no
-native TLS dependency.
+The `reqwest::Client` is initialised once at construction and reused across calls
+(connection pooling), built with `rustls-tls`; no native TLS dependency.
+
+**No API key field, and no provider name.** The gateway holds the provider
+credentials and decides which concrete model a logical name resolves to. This
+crate cannot reach a model provider directly even if misconfigured, because it
+has nothing to authenticate with. See `docs/spec/constraints.md` §Security.
+
+**No rate-limit state.** The gateway holds the credentials and sees all factory
+traffic, so it is the only component positioned to enforce provider rate limits. A
+gateway response indicating throttling is surfaced as a retriable error; this
+crate tracks no window and no backoff state of its own.
+
+**Scope**: CogWorks' own deterministic helper calls. An agent turn runs inside a
+stage attempt and reaches the gateway through the stage runner, not through this
+crate.
 
 ### LlmProvider::complete — Request Flow
 
 ```
 1.  Build RequestBody:
-      POST https://api.anthropic.com/v1/messages
+      POST {config.endpoint}
       Headers:
-        anthropic-version: 2023-06-01
-        x-api-key: <provider-resolved credential>          ← NEVER logged or included in model content
-        content-type: application/json
-      Body (JSON):
-        { "model": model.model_id,
-          "max_tokens": model.max_tokens,
-          "system": system_prompt,
-          "messages": [ { "role": "user", "content": "..." }, ... ] }
+        Content-Type: application/json
+        X-CogWorks-Run: {run_id}        (for gateway-side attribution)
+      Body:
+        { "model": config.model,
+          "system": <assembled system prompt>,
+          "messages": [...],
+          "max_tokens": ... }
 
-2.  Execute via self.client.post(...).json(&body).send().await.
+2.  Send with `config.request_timeout_secs` timeout.
 
-3.  Extract rate-limit headers from response:
-        x-ratelimit-requests-remaining  → u32
-        x-ratelimit-requests-reset      → RFC 3339 timestamp → Instant
+3.  Map the response:
+      2xx              → parse content + token usage
+      429              → RateLimited { retry_after }  (retriable)
+      5xx              → GatewayUnavailable            (retriable)
+      4xx (other)      → InvalidRequest                (non-retriable)
 
-4.  On HTTP 200: parse response body → StructuredResponse.
-    On HTTP 429: return Err(LlmError::RateLimited { retry_after }).
-    On HTTP 4xx: return Err(LlmError::ProviderError { status, body }).
-    On HTTP 5xx: return Err(LlmError::ProviderError { status, body }).
-    On network error: return Err(LlmError::Timeout).
+4.  Retry retriable classes up to `config.max_retries` with exponential
+    backoff and jitter.
 
-5.  Schema validation: validate the completion JSON against OutputSchema.
-    On failure: return Err(LlmError::InvalidSchema { reason }).
+5.  Return the structured response plus its token usage for budget accounting.
 ```
 
-**Security**: The provider obtains credential material through the credential-
-provider interface backed by the Vault library. This document does not prescribe
-the provider's API or credential lifecycle. Credential material is used only
-for outbound authentication and MUST NOT be included in prompts, context,
-structured events, audit records, logs, or error messages.
+**Redaction**: no request or response body is logged at any level. Prompts carry
+work-item content, and responses carry generated artifacts; neither belongs in a
+log. Spans record token counts, latency and outcome class only.
 
 ### Multi-Provider Extension Point
 
-Adding a second provider (e.g. OpenAI `gpt-4o`) is additive:
+Provider selection is the gateway's concern, not CogWorks'. A deployment that
+wants a different model provider configures its gateway; nothing in CogWorks
+changes, and no provider name appears anywhere in this codebase.
 
-```rust
-// In crates/llm/src/lib.rs  (new struct, no changes to pipeline)
-pub struct OpenAiProvider { ... }
-
-#[async_trait]
-impl LlmProvider for OpenAiProvider { ... }
-```
-
-`cli` selects the active provider from `LlmConfig.provider` and constructs
-the appropriate concrete type.
+`LlmProvider` remains a trait so the provider can be substituted in tests with a
+double, not so CogWorks can carry several provider implementations.
 
 ---
 
@@ -237,7 +246,7 @@ the appropriate concrete type.
 
 ```
 crates/extension-api/src/
-  lib.rs            ExtensionApiClient + DomainServiceClient/TwinProvisioner impls
+  lib.rs            ExtensionApiClient + DomainServiceClient impl
                     TransportKind, ServiceTransportConfig, envelope types
   unix_socket.rs    UnixSocketTransport (internal transport implementation)
   http.rs           HttpTransport (internal transport implementation)
@@ -312,15 +321,15 @@ attempts. `TransportError::ResponseParseError` is not retried.
 | `validate` | `"validate"` | `{ "artifact_paths": [...] }` |
 | `normalise` | `"normalise"` | `{ "artifact_paths": [...] }` |
 | `review_rules` | `"review_rules"` | `{ "artifact_paths": [...] }` |
-| `simulate` | `"simulate"` | `{ "spec": {...}, "scenarios": [...] }` |
+| `simulate` | `"simulate"` | `{ "filter": {...} }` |
 | `validate_deps` | `"validate_deps"` | `{ "artifact_paths": [...] }` |
 | `extract_interfaces` | `"extract_interfaces"` | `{ "artifact_paths": [...] }` |
 | `dependency_graph` | `"dependency_graph"` | `{ "artifact_paths": [...] }` |
 | `health_check` | `"health_check"` | `{}` |
 
-`TwinProvisioner` methods use the same envelope format with operations
-`"start_twin"`, `"stop_twin"`, `"configure_failure_injection"`,
-`"reset_twin_state"`.
+All domain-service operations use this one envelope format. A domain service
+exposes only the operations its handshake declares, and CogWorks routes to it on
+that basis rather than on static configuration.
 
 ### UnixSocketTransport (`unix_socket.rs`)
 
@@ -364,11 +373,19 @@ pub(crate) struct HttpTransport {
 body is the JSON-serialised `RequestEnvelope`. Response body is the
 JSON-deserialised `ResponseEnvelope`.
 
-**Authentication**: TBD. The HTTP transport is intended for remote domain
-services. Authentication mechanism (mutual TLS, bearer token, or HMAC header)
-is to be decided in a future ADR. Until then, the transport sends unauthenticated
-requests. Do not deploy the HTTP transport on a network boundary without
-adding authentication.
+**Authentication**: the Unix domain socket transport is the default, and file
+system permissions on the socket provide its access control. The HTTP transport
+MUST only be used where the network path between CogWorks and the domain service
+lies inside the deployment's trust boundary.
+
+Its design MUST NOT preclude adding an authentication mechanism — bearer token or
+mutual TLS — without a breaking change. The mechanism is selected when a domain
+service genuinely needs to run across a network boundary, and recorded as its own
+decision at that point.
+
+The factory's deny-by-default egress model pushes toward the socket case anyway: a
+sandbox reaches only the model gateway and a curated dependency proxy, so a domain
+service on a remote network boundary is the exception rather than the norm.
 
 ---
 
@@ -383,41 +400,15 @@ crates/listener/src/
   queue.rs      QueueEventSource
 ```
 
-### GitHubWebhookEventSource (`webhook.rs`)
+### Event ingress is not in this crate
 
-Implements `EventSource` using `github-bot-sdk`'s webhook responder.
+CogWorks does not receive GitHub webhooks. Webhook ingress, HMAC verification and
+normalisation belong to the factory's webhook ingress service, which routes
+normalised events onto durable queues. There is one place in the factory where an
+inbound signature is checked, and it is not here.
 
-**HMAC validation**: Every incoming HTTP POST is verified before parsing.
-The `X-Hub-Signature-256` header is compared to `HMAC-SHA256(config.secret,
-body)` using a **constant-time comparison** (`subtle::ConstantTimeEq` or
-equivalent). Requests that fail verification return `EventSourceError::AuthError`
-and are **never** parsed. The raw body is discarded.
-
-**Security**: The webhook credential is resolved through the credential-provider
-interface; it is not a field in `WebhookConfig`. The Vault library owns its
-authentication and key lifecycle. The listener receives the credential only
-for request authentication and MUST NOT log or expose it. Any transient
-credential wrapper MUST redact its `Debug` representation.
-
-**Event normalization**: After authentication, the adapter parses provider
-events and maps configured work-item readiness into the normalized pipeline
-event contract. Exact webhook event/action mappings and readiness criteria are
-provider-specific and are not fixed by this specification. Unsupported events
-may be ignored by the adapter.
-
-**Internal channel**: The webhook server runs in a background task that sends
-parsed events to an `mpsc` channel. `next_event` reads from the receiver side
-with the specified timeout.
-
-**smee.io for local development**: When `config.bind_address` is
-`127.0.0.1:<port>`, GitHub cannot reach the service directly. Use smee.io as a
-proxy:
-
-```bash
-smee --url https://smee.io/<channel-id> --port <port>
-```
-
-No code changes are required; the webhook server is unaware of the proxy.
+This crate therefore contains no HTTP server, no HMAC verification and no
+development proxy. It contains a queue consumer.
 
 ### QueueEventSource (`queue.rs`)
 
@@ -470,12 +461,10 @@ crates/cli/src/
 
 ```rust
 pub enum TriggerMode {
-    /// Phase 1 CLI: synthesise a single GitHubEvent from --issue-url and
-    /// call run_step once, then exit.
-    SingleShot { issue_url: String },
-    /// Service mode: bind a webhook HTTP server and loop on incoming events.
-    Webhook(pipeline::WebhookConfig),
-    /// Service mode: consume from a cloud queue and loop on incoming messages.
+    /// L1: synthesise a single event from --issue and call run_step once,
+    /// then exit.
+    SingleShot { issue: u64 },
+    /// L2: consume the factory's event queue and loop on incoming messages.
     Queue(pipeline::QueueEventConfig),
 }
 ```
@@ -485,19 +474,39 @@ pub enum TriggerMode {
 ```rust
 pub struct CogWorksConfig {
     pub trigger_mode:          TriggerMode,
-    pub working_dir:           std::path::PathBuf,
-    pub pipeline_name:         Option<pipeline::PipelineName>,
-    pub approved_branch:       pipeline::BranchName,
+    pub repository:            pipeline::RepositoryId,
+    /// Operate against a harness version other than the one the repository pins.
+    pub pin_override:          Option<pipeline::HarnessVersion>,
     pub otlp_endpoint:         String,
-    pub anthropic_base_url:    String,
+    /// The deployment's model gateway endpoint. Holds no credential.
+    pub model_gateway_url:     String,
+    /// Logical model name the gateway resolves to a concrete provider model.
     pub llm_model_id:          String,
+    pub stage_runner_url:      String,
+    pub mount_plan_url:        String,
+    /// Identity of the gate service whose check runs are the only ones trusted.
+    pub gate_app_id:           u64,
+    pub harness_source:        String,
+    pub domain_services:       Vec<DomainServiceRegistration>,
+    pub labels:                LabelMappings,
+    pub max_concurrent_runs:   u32,
 }
 ```
 
-**Security**: Credentials are resolved by the Vault library through the
-credential-provider interface. Raw key material is not a `CogWorksConfig`
-field and must never appear in prompts, context, tracing events, audit records,
-logs, generated artifacts, or error messages.
+This struct describes **the host CogWorks runs on**, not the repository it is
+working on. There is no working directory (attempts run in sandboxes CogWorks
+does not own), no pipeline name (graphs resolve per tier and discipline from the
+harness), and no approved branch for constitutional rules (rules resolve from the
+pin, so a repository cannot supply the rules governing its own runs).
+
+**Security**: credentials are resolved through the credential-provider interface.
+Raw key material is not a `CogWorksConfig` field and must never appear in a
+context bundle, a prompt, a tracing event, an audit record, a log, a generated
+artifact, or an error message.
+
+There is **no model API key field and no push-capable token field**, in this
+struct or anywhere else in the process. The model gateway holds model
+credentials; the stage runner's identity roles hold push credentials.
 
 ### Observability Wiring
 
@@ -558,27 +567,41 @@ fn run_service(executor, config, event_source) -> !  // loops forever
 1. Parse CogWorksConfig from env / CLI flags / config file.
 2. init_observability(config.otlp_endpoint).
 3. Resolve infrastructure credentials through the credential-provider interface.
-4. Construct GithubClient and AnthropicProvider with provider-resolved credentials.
-5. Construct ExtensionApiClients from .cogworks/services.toml (one per registered service):
+     Assert the resolved GitHub credential carries no contents:write and no
+     checks:write. A credential wider than the process needs is a configuration
+     error, and failing here is cheaper than discovering it from an audit log.
+4. Construct GithubClient and ModelGatewayProvider.
+     The gateway provider takes an endpoint and no credential.
+5. Construct ExtensionApiClients from config.domain_services (one per service):
        clients: HashMap<DomainServiceName, Arc<dyn DomainServiceClient>>
 6. Construct service registry and select primary:
        domain_svc = clients[primary_service_name].clone()
-7. Construct in-process impls for knowledge/config traits (TOML readers):
-       config_loader, tool_profile_store, interface_registry, summary_cache
-8. Assemble PipelineExecutor:
+7. Construct the factory-facing adapters:
+       harness      = PinnedHarnessLoader::new(config.harness_source)
+       stage_runner = StageRunnerClient::new(config.stage_runner_url)
+       check_runs   = GithubCheckRunReader::new(github.clone(), config.gate_app_id)
+       mount_plans  = MountPlanClient::new(config.mount_plan_url)
+       risk_map     = GithubRiskMapLoader::new(github.clone())
+       attestations = AttestationProvider::new(credentials.signing_handle())
+8. Construct in-process impls for the remaining traits:
+       interface_registry
+9. Assemble PipelineExecutor:
        executor = PipelineExecutor::new(
            github.clone(),       // IssueTracker
            github.clone(),       // PullRequestManager
-           github.clone(),       // CodeRepository
+           github.clone(),       // CodeRepository      [read-only]
            domain_svc,           // DomainServiceClient
-           provider,             // LlmProvider
+           provider,             // LlmProvider         [helper calls only]
            github.clone(),       // AuditStore
-           summary_cache,
            interface_registry,
-           config_loader,
-           tool_profile_store,
+           harness,              // HarnessLoader
+           stage_runner,         // StageRunner
+           check_runs,           // CheckRunReader
+           mount_plans,          // MountPlanProvider
+           risk_map,             // RiskMapLoader
+           attestations,         // AttestationProvider
        )
-9. Select trigger mode and enter trigger loop.
+10. Select trigger mode and enter trigger loop.
 ```
 
 ---
@@ -599,10 +622,15 @@ are registered at construction time via `register_template`. The
 `required_vars` map holds the declared required variable names per template
 (populated from a template manifest file at startup).
 
-**Template location**: Templates are expected in `.cogworks/templates/` in the
-repository working directory. Each template is a Handlebars file (`.hbs`
-extension). The manifest `.cogworks/templates/manifest.toml` lists required
-variables per template name.
+**Template location**: templates are resolved from the pinned harness through
+`HarnessLoader`, not from the target repository. Each is a Handlebars file, and
+the harness's template manifest declares the required variables per template
+name.
+
+**Scope**: these templates render CogWorks' own deterministic helper prompts —
+alignment verification, classification, failure interpretation. An agent turn's
+prompt is assembled inside the sandbox from the resolved profile, so this engine
+never renders it. Registering a template for an agent stage would be a defect.
 
 The `HandlebarsTemplateEngine` is an internal implementation detail of the
 `nodes` crate. The `cli` composition root creates an instance and injects it
@@ -621,49 +649,80 @@ be a correctness requirement.
 
 ## Section 7 — CLI-Wired Adapters (`cli` crate, implements `pipeline` traits)
 
-### SummaryCache — `GithubCommentSummaryCache`
+### HarnessLoader — `PinnedHarnessLoader`
 
-Concrete adapter that implements `pipeline::SummaryCache`. Wired in `cli`.
+Concrete adapter that implements `pipeline::HarnessLoader`. Wired in `cli`.
 
-**Storage**: Pyramid summaries are stored as GitHub issue comments on the
-work-item issue using a structured prefix:
+**Responsibility**: read `.factory/pin.yaml` from the target repository, resolve
+the harness at that version, verify the resolution, and parse its contents — the
+stage-type registry, stage graphs, agent profiles, stage contracts, Context
+Packs, prompt templates, output schemas and constitutional rules.
 
-```
-COGWORKS_SUMMARY: {"artifact_path":"<path>","level":"<L1|L2|L3|L4>","git_ref":"<SHA>","content":"..."}
-```
+**Resolution is content-addressed** where the configured source supports it, so a
+resolved version cannot change underneath a run.
 
-**Struct fields** (private):
+**Read-only.** The adapter exposes no write path. CogWorks never writes to the
+harness, and a harness source configured with write credentials is a
+misconfiguration.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `issues` | `Arc<dyn IssueTracker>` | For reading and writing summary comments |
-| `work_item_id` | `WorkItemId` | The issue used as the backing store |
+**Caching**: a resolved harness is cached for the duration of a run, keyed by the
+resolved version. This is what makes the version stable across the steps of one
+run rather than merely likely to be.
 
-**Cache key**: `(ArtifactPath, SummaryLevel)`.
+**Failure modes**, all of which halt rather than fall back:
 
-**Cache invalidation**: Summaries are not invalidated within a single pipeline
-run. Stale summaries from previous runs are identified by checking whether the
-summary's `git_ref` (stored in the comment JSON) matches the current HEAD SHA.
-If mismatched, the adapter fetches and re-stores the summary.
+| Condition | Mapped to |
+|-----------|-----------|
+| Pin file absent or malformed | `HarnessError::PinUnreadable` |
+| Pin names a version that does not resolve | `HarnessError::VersionNotFound` |
+| Resolved content fails verification | `HarnessError::VerificationFailed` |
+| Harness source unreachable | `HarnessError::SourceUnavailable` (retriable) |
 
-**Construction** (in `cli`):
+There is deliberately no default harness and no built-in fallback registry. A run
+that cannot establish what governs it does not run.
 
-```rust
-let summary_cache = Arc::new(GithubCommentSummaryCache::new(
-    Arc::clone(&github_client),
-    work_item_id,
-));
-```
+### CheckRunReader — `GithubCheckRunReader`
 
----
+Concrete adapter that implements `pipeline::CheckRunReader`. Wired in `cli`.
+
+**Responsibility**: list check runs for a commit SHA through the GitHub Checks
+API, exposing each run's authoring App identity, conclusion and structured
+output.
+
+**Author filtering happens here, not in business logic.** The adapter is
+constructed with the configured gate service App identity and discards every
+check run whose `app_id` does not match before returning. Business logic
+therefore cannot act on a check run from an unexpected author even by mistake.
+
+**No write path.** The adapter exposes no method to create or update a check run,
+and the credential it is constructed with carries `checks:read` only.
+
+**In-progress runs** are returned with `conclusion: None`. That is a distinct
+state from any conclusion and callers must not collapse it into a failure.
+
+### RiskMapLoader — `GithubRiskMapLoader`
+
+Concrete adapter that implements `pipeline::RiskMapLoader`. Wired in `cli`.
+
+**Responsibility**: read `risk-map.yaml` from the target repository through the
+Contents API and parse its path-glob-to-tier entries.
+
+**Read-only.** The risk map is human-owned; CogWorks reads it and never writes it.
+The `architect` stage may propose a patch to it as part of its output, which a
+human reviews and merges.
+
+An absent or malformed map is reported as an error, never as an empty map. An
+empty map would derive the lowest tier for everything, silently applying the least
+rigour to work nobody has assessed.
 
 ### InterfaceRegistryLoader — `TomlInterfaceRegistryLoader`
 
 Concrete adapter that implements `pipeline::InterfaceRegistryLoader`. Wired in `cli`.
 
-**Storage**: Interface definitions are stored as TOML files under a directory
-declared in `.cogworks/config.toml` (`[interfaces] registry_dir`). The default
-path is `.cogworks/interfaces/`.
+**Storage**: Interface definitions are stored as TOML files under a directory in
+the target repository's specification paths, declared in CogWorks' own process
+configuration. The registry is human-authored: CogWorks reads it, and may propose
+additions for human review, but never writes it autonomously.
 
 **File format**: Each file in the registry directory is a TOML document
 representing a single `InterfaceDefinition`. The file name (minus extension) is
@@ -703,26 +762,58 @@ let registry_loader = Arc::new(TomlInterfaceRegistryLoader::new(registry_dir));
 - [ ] Composition root wiring order follows §cli above
 - [ ] `HandlebarsTemplateEngine` in `nodes`, not in a separate crate
 
-### Implementation Job Runtime Provider
+### Stage Runner
 
-The Pipeline Executor requests one ephemeral container per implementation job
-through an infrastructure provider interface and requests cleanup after
-success, failure, or cancellation. The provider supplies runtime-specific
-operations. This interface specification intentionally does not define method
-signatures, request fields, or a Docker/Kubernetes/cloud mapping.
+The Pipeline Executor requests one stage attempt per attempt through this
+provider, passing the image, context bundle, mount plan, network profile,
+resource limits, identity role and branch. It requests cancellation on terminal
+paths.
+
+**One fresh sandbox per attempt.** A retry is a new attempt and therefore a new
+request. No sandbox is reused across attempts.
+
+The provider owns sandbox creation, the virtualisation privilege it requires, the
+hosts it runs on, and pushing the attempt's commits under the given identity
+role. CogWorks holds none of those. This specification intentionally does not
+define the provider's method signatures, request wire format, or any mapping onto
+a specific isolation technology.
+
+### Mount-Plan Provider
+
+Translates a stage's identity role and the writable paths its contract declares
+into a mount plan the sandbox enforces. CogWorks passes the plan into the attempt
+request and is never the only enforcement point for a write boundary.
+
+A plan that cannot be produced for a role, or that would need to be wider than the
+role may ever write, halts the stage.
 
 ### Credential Provider
 
 Infrastructure clients obtain credentials through an interface backed by the
-Vault library. The Vault library owns authentication and key lifecycle; the
-CogWorks contract assumes the provider resolves credentials as required. This
-document does not define Vault APIs, authentication flows, or rotation policy.
+deployment's secret store, abstracted over any Vault or KMS so the deployment
+stays cloud-neutral. The provider owns authentication and key lifecycle; this
+document does not define its APIs, authentication flows, or rotation policy.
+
+Raw key material is never returned to business logic, and never appears in a
+context bundle, a prompt, an audit record, a log, or a generated artifact.
+
+**Three credentials this provider must never be configured to resolve for this
+process**: one that can push commits to a target repository, a model provider API
+key, and one that can create or update a check run. Each is held by the component
+that owns the corresponding responsibility — the stage runner's identity roles,
+the model gateway, and the gate service.
 
 ### Attestation Provider
 
-The attestation provider verifies required upstream attestations against the
-content and trust policy supplied by the pipeline, and signs CogWorks action
-attestations. Signing capability is resolved through the credential provider.
-It returns verification outcomes or signed attestation content, never private
-key material. Signed content is published through `IssueTracker::post_comment`;
-the provider protocol and signature format are implementation choices.
+Verifies required upstream attestations against the content and trust policy
+supplied by the pipeline, and signs CogWorks' own stage attestations. Signing
+capability is resolved through the credential provider.
+
+It returns verification outcomes or signed attestation content, never private key
+material. Signed content is published through `IssueTracker::post_comment`; the
+provider protocol and signature format are implementation choices, aligned with
+the factory's shared signing library so every service produces the same shape.
+
+Verification **fails closed**: a required attestation that is missing, unsigned,
+signed by an unexpected identity, or mismatched against the content it describes
+stops work rather than being treated as absent.

@@ -3,11 +3,11 @@
 **Architectural Layer**: Domain trait definitions (in `pipeline`) + Infrastructure stubs
 **Module Paths**:
 
-- `crates/pipeline/src/domain_services.rs` — `DomainServiceClient`, `InterfaceRegistryLoader`, `ScenarioExecutor`, `TwinProvisioner` + data types
-- `crates/pipeline/src/knowledge.rs` — `SummaryCache`, `PipelineConfigurationLoader`, `ToolProfileStore`, `AdapterSpecLoader` + data types
+- `crates/pipeline/src/domain_services.rs` — `DomainServiceClient`, `InterfaceRegistryLoader` + data types
+- `crates/pipeline/src/harness.rs` — `HarnessLoader`, `RiskMapLoader` + data types
 - `crates/pipeline/src/tools.rs` — `LlmProvider` + LLM call types
 - `crates/extension-api/src/lib.rs` — `ExtensionApiClient` implementing `DomainServiceClient`
-- `crates/llm/src/lib.rs` — `AnthropicProvider` implementing `LlmProvider`
+- `crates/llm/src/lib.rs` — `ModelGatewayProvider` implementing `LlmProvider`
 
 **Specification Version**: 1.0
 
@@ -23,13 +23,11 @@ the orchestration business logic depends on.
 pipeline (trait definitions)
     DomainServiceClient ←──── ExtensionApiClient  (extension-api)
     InterfaceRegistryLoader ← (config adapter; wired in cli)
-    ScenarioExecutor ←──────── (pipeline-internal impl or infra crate; wired in cli)
-    TwinProvisioner ←────────── ExtensionApiClient  (extension-api)
-    SummaryCache ←────────────── (GitHub comment cache; wired in cli)
-    PipelineConfigurationLoader ← (TOML reader; wired in cli)
-    ToolProfileStore ←─────────── (TOML reader; wired in cli)
+    HarnessLoader ←──────────── PinnedHarnessLoader  (wired in cli)
+    RiskMapLoader ←──────────── GithubRiskMapLoader  (wired in cli)
+    InterfaceRegistryLoader ←─── TomlInterfaceRegistryLoader  (wired in cli)
     AdapterSpecLoader ←──────────── (JSON file reader; wired in cli)
-    LlmProvider ←────────────────── AnthropicProvider  (llm)
+    LlmProvider ←────────────────── ModelGatewayProvider  (llm)
 ```
 
 **Architectural rules** (from `docs/spec/constraints.md`):
@@ -46,7 +44,7 @@ pipeline (trait definitions)
 | This module uses | From spec |
 |-----------------|-----------|
 | `ArtifactPath`, `DomainServiceName`, `InterfaceId` | `shared-types.md` |
-| `NodeId`, `PipelineName`, `ProfileName`, `SkillName`, `ToolName` | `shared-types.md` |
+| `NodeId`, `StageTypeId`, `ProfileId`, `HarnessVersion`, `DisciplineId` | `shared-types.md` |
 | `CommitSha`, `TokenCount`, `SatisfactionScore`, `ApiVersion` | `shared-types.md` |
 | `Diagnostic`, `DiagnosticSeverity` | `shared-types.md` |
 | `RetryPolicy` | `shared-types.md` |
@@ -81,16 +79,19 @@ pub struct NormaliseResult {
 
 ### SimulationResults
 
-Result of running scenarios against a digital twin.
+Result of running a domain service's tests or simulations.
 
 ```rust
 pub struct SimulationResults {
-    pub scenarios_executed: u32,
-    pub scenarios_passed: u32,
+    pub executed: u32,
+    pub passed: u32,
     pub diagnostics: Diagnostics,
     pub detail: serde_json::Value,  // domain-specific; treat as opaque
 }
 ```
+
+These results inform a stage attempt. They are not a gate verdict: whether a
+change passes is computed by the gate service from a commit SHA.
 
 ### DependencyResult
 
@@ -165,68 +166,6 @@ pub struct ValidationResult {
 }
 ```
 
-### Scenario / TrajectoryResult / AcceptanceCriteria / SatisfactionDetermination
-
-Used by `ScenarioExecutor`.
-
-```rust
-pub struct Scenario {
-    pub id: String,
-    pub description: String,
-    pub input_artifacts: Vec<ArtifactPath>,
-    pub hold_out_artifacts: Vec<ArtifactPath>,
-    pub acceptance_criteria: AcceptanceCriteria,
-}
-
-pub struct TrajectoryResult {
-    pub scenario_id: String,
-    pub passed: bool,
-    pub satisfaction_score: SatisfactionScore,
-    /// When `true` this trajectory was expected to fail (explicit-failure scenario).
-    /// A failed trajectory with `expected_failure: true` does not reduce overall
-    /// satisfaction — it is counted as passing for scoring purposes.
-    pub expected_failure: bool,
-    pub diagnostics: Diagnostics,
-}
-
-pub struct AcceptanceCriteria {
-    pub min_satisfaction_score: SatisfactionScore,
-    pub required_behaviors: Vec<String>,
-    pub prohibited_behaviors: Vec<String>,
-}
-
-pub enum SatisfactionDetermination {
-    Satisfied { score: SatisfactionScore },
-    NotSatisfied { score: SatisfactionScore, failing_criteria: Vec<String> },
-}
-```
-
-### TwinHandle / TwinSpec / FailureProfile / FailureInjection
-
-Used by `TwinProvisioner`.
-
-```rust
-pub struct TwinHandle {
-    pub id: String,
-    pub service: DomainServiceName,
-}
-
-pub struct TwinSpec {
-    pub service: DomainServiceName,
-    pub config: serde_json::Value,  // domain-specific; treat as opaque
-}
-
-pub struct FailureProfile {
-    pub inject_failures: Vec<FailureInjection>,
-}
-
-pub struct FailureInjection {
-    pub operation: String,
-    pub failure_rate: f32,  // [0.0, 1.0]
-    pub error_message: String,
-}
-```
-
 ### HandshakeResult
 
 Capability metadata returned after the initial Extension API handshake.
@@ -247,8 +186,6 @@ pub struct HandshakeResult {
 |------|---------|
 | `DomainServiceError` | `ConnectionFailed`, `RequestFailed`, `ProtocolError`, `HandshakeFailed`, `ServiceUnavailable` |
 | `RegistryError` | `LoadFailed`, `SchemaInvalid`, `NotFound` |
-| `ScenarioError` | `LoadFailed`, `ExecutionFailed` |
-| `TwinError` | `StartFailed`, `StopFailed`, `ConfigurationFailed`, `NotRunning` |
 
 All infrastructure error types implement `retry_policy() -> RetryPolicy`.
 
@@ -261,7 +198,7 @@ pub trait DomainServiceClient: Send + Sync {
     async fn validate(&self, artifacts: &[ArtifactPath]) -> Result<ValidationResult, DomainServiceError>;
     async fn normalise(&self, artifacts: &[ArtifactPath]) -> Result<NormaliseResult, DomainServiceError>;
     async fn review_rules(&self, artifacts: &[ArtifactPath]) -> Result<Diagnostics, DomainServiceError>;
-    async fn simulate(&self, spec: &TwinSpec, scenarios: &[Scenario]) -> Result<SimulationResults, DomainServiceError>;
+    async fn simulate(&self, filter: &SimulationFilter) -> Result<SimulationResults, DomainServiceError>;
     async fn validate_deps(&self, artifacts: &[ArtifactPath]) -> Result<DependencyResult, DomainServiceError>;
     async fn extract_interfaces(&self, artifacts: &[ArtifactPath]) -> Result<InterfaceMap, DomainServiceError>;
     async fn dependency_graph(&self, artifacts: &[ArtifactPath]) -> Result<DependencyGraph, DomainServiceError>;
@@ -288,69 +225,6 @@ pub trait InterfaceRegistryLoader: Send + Sync {
 **Constraint**: CogWorks MUST NOT create or modify interface definitions autonomously.
 This trait is read-only.
 
-### ScenarioExecutor Trait
-
-```rust
-#[async_trait]
-pub trait ScenarioExecutor: Send + Sync {
-    async fn load_scenarios(&self, scenario_dir: &Path) -> Result<Vec<Scenario>, ScenarioError>;
-    async fn execute_trajectory(
-        &self,
-        scenario: &Scenario,
-        generated_artifacts: &[(ArtifactPath, String)],
-    ) -> Result<TrajectoryResult, ScenarioError>;
-    fn evaluate_acceptance(
-        &self,
-        results: &[TrajectoryResult],
-        criteria: &AcceptanceCriteria,
-    ) -> SatisfactionDetermination;
-}
-```
-
-**Context holdout**: Callers (the context assembler) MUST withhold
-`scenario.hold_out_artifacts` from code generation context.
-
-### TwinProvisioner Trait
-
-```rust
-#[async_trait]
-pub trait TwinProvisioner: Send + Sync {
-    async fn start_twin(&self, spec: &TwinSpec) -> Result<TwinHandle, TwinError>;
-    async fn stop_twin(&self, handle: &TwinHandle) -> Result<(), TwinError>;
-    async fn configure_failure_injection(&self, handle: &TwinHandle, profile: &FailureProfile) -> Result<(), TwinError>;
-    async fn reset_twin_state(&self, handle: &TwinHandle) -> Result<(), TwinError>;
-}
-```
-
----
-
-## Part 2 — Knowledge & Configuration Traits (`pipeline/src/knowledge.rs`)
-
-### SummaryLevel
-
-```rust
-pub enum SummaryLevel {
-    OneLine = 0,
-    Paragraph = 1,
-    FullInterface = 2,
-    Source = 3,
-}
-```
-
-Ordinal values allow comparison: a higher value means more detail.
-
-### PyramidSummary
-
-```rust
-pub struct PyramidSummary {
-    pub path: ArtifactPath,
-    pub level: SummaryLevel,
-    pub content: String,
-    pub commit_sha: CommitSha,
-    pub token_count: TokenCount,
-}
-```
-
 ### ScopeParameters
 
 ```rust
@@ -364,30 +238,6 @@ pub struct ScopeParameters {
 
 **Security**: `prohibited_artifact_patterns` takes precedence over
 `allowed_artifact_patterns` when both match the same path.
-
-### ToolProfile
-
-```rust
-pub struct ToolProfile {
-    pub name: ProfileName,
-    pub node_id: Option<NodeId>,
-    pub allowed_tools: Vec<ToolName>,
-    pub allowed_skills: Vec<SkillName>,
-    pub scope_parameters: ScopeParameters,
-}
-```
-
-### ToolOverrides
-
-Layered on top of a base `ToolProfile` for node-specific customisation.
-
-```rust
-pub struct ToolOverrides {
-    pub additional_tools: Vec<ToolName>,
-    pub removed_tools: Vec<ToolName>,
-    pub scope_overrides: Option<ScopeParameters>,
-}
-```
 
 ### SpecInfo / OperationSpec / ApiSpec
 
@@ -419,65 +269,75 @@ pub struct ApiSpec {
 |------|---------|
 | `CacheError` | `Unavailable`, `SerialisationError` |
 | `ConfigError` | `NotFound`, `ParseError`, `InvalidConfiguration` |
-| `ProfileError` | `LoadFailed`, `NotFound` |
-| `SpecError` | `LoadFailed`, `NotFound` |
 
-### SummaryCache Trait
+### HarnessLoader Trait
 
 ```rust
 #[async_trait]
-pub trait SummaryCache: Send + Sync {
-    async fn get_summary(&self, path: &ArtifactPath, level: SummaryLevel) -> Result<Option<PyramidSummary>, CacheError>;
-    async fn is_stale(&self, path: &ArtifactPath, current_sha: &CommitSha) -> Result<bool, CacheError>;
-    async fn invalidate(&self, path: &ArtifactPath) -> Result<(), CacheError>;
+pub trait HarnessLoader: Send + Sync {
+    async fn read_pin(&self, repository: &RepositoryId) -> Result<HarnessPin, HarnessError>;
+    async fn resolve(&self, pin: &HarnessPin) -> Result<ResolvedHarness, HarnessError>;
+
+    fn stage_registry(&self, harness: &ResolvedHarness) -> &StageTypeRegistry;
+    fn stage_graph(&self, harness: &ResolvedHarness, tier: Tier, discipline: &DisciplineId)
+        -> Result<PipelineGraph, HarnessError>;
+    fn resolve_profile(
+        &self,
+        harness: &ResolvedHarness,
+        stage_type: &StageTypeId,
+        discipline: &DisciplineId,
+        toolchain: &str,
+        tier: Tier,
+    ) -> Result<(ProfileRef, StageContract), HarnessError>;
+    fn context_packs(&self, harness: &ResolvedHarness, triggers: &ContextPackTrigger)
+        -> Vec<ContextPack>;
+    fn constitutional_rules(&self, harness: &ResolvedHarness)
+        -> Result<ConstitutionalRules, HarnessError>;
 }
 ```
 
-**Staleness**: `is_stale` compares `current_sha` against the SHA stored in the
-cached `PyramidSummary`. A missing entry is always treated as stale.
+**The only source of agent-shaping configuration.** Stage graphs, stage
+contracts, agent profiles, prompt templates, output schemas, Context Packs and
+constitutional rules all come through here.
 
-### PipelineConfigurationLoader Trait
+**Read-only.** There is no write method, and adding one would breach
+`docs/spec/constraints.md` §Module Boundaries.
+
+**Deterministic resolution.** `resolve_profile` is a pure function of its
+arguments at a given resolved harness. No model participates, and no model output
+is an argument.
+
+**No fallback.** Every failure mode halts the run:
+
+| Error | Condition |
+|-------|-----------|
+| `PinUnreadable` | Pin file absent or malformed |
+| `VersionNotFound` | Pin names a version that does not resolve |
+| `VerificationFailed` | Resolved content does not match what the pin names |
+| `SourceUnavailable` | Harness source unreachable (retriable) |
+| `NoGraphForTier` | No stage graph for the `(tier, discipline)` pair |
+| `NoProfileForKey` | No profile for the resolution key |
+
+There is deliberately no `get_default_graph` and no `get_default_profile`. A run
+that cannot establish what governs it does not run, because running a stage under
+an approximately-right profile means an agent operating under a contract nobody
+chose for it.
+
+### RiskMapLoader Trait
 
 ```rust
 #[async_trait]
-pub trait PipelineConfigurationLoader: Send + Sync {
-    async fn load_pipeline_config(&self, working_dir: &Path) -> Result<PipelineConfiguration, ConfigError>;
-    fn get_named_pipeline<'a>(&self, config: &'a PipelineConfiguration, name: &PipelineName) -> Option<&'a PipelineGraph>;
-    fn get_default_pipeline(&self, config: &PipelineConfiguration) -> PipelineGraph;
+pub trait RiskMapLoader: Send + Sync {
+    async fn load_risk_map(&self, repository: &RepositoryId, git_ref: &str)
+        -> Result<RiskMap, RiskMapError>;
 }
 ```
 
-**Fallback**: `ConfigError::NotFound` is expected for repos with no
-`.cogworks/pipeline.toml`. Callers should call `get_default_pipeline` in that case.
+**Read-only.** The risk map is human-owned.
 
-**Validation**: Implementations MUST call `validate_pipeline_graph` after parsing.
-An invalid graph produces `ConfigError::InvalidConfiguration`.
-
-### ToolProfileStore Trait
-
-```rust
-#[async_trait]
-pub trait ToolProfileStore: Send + Sync {
-    async fn load_profiles(&self) -> Result<Vec<ToolProfile>, ProfileError>;
-    async fn get_node_profile(&self, node_id: &NodeId) -> Result<ToolProfile, ProfileError>;
-    async fn get_node_overrides(&self, node_id: &NodeId) -> Result<Option<ToolOverrides>, ProfileError>;
-    async fn get_default_profiles(&self) -> Result<Vec<ToolProfile>, ProfileError>;
-}
-```
-
-### AdapterSpecLoader Trait
-
-```rust
-#[async_trait]
-pub trait AdapterSpecLoader: Send + Sync {
-    async fn load_spec(&self, service_name: &DomainServiceName) -> Result<ApiSpec, SpecError>;
-    async fn list_specs(&self) -> Result<Vec<SpecInfo>, SpecError>;
-}
-```
-
----
-
-## Part 3 — LLM Provider Trait (`pipeline/src/tools.rs`)
+An absent or malformed map produces an error, never an empty map. An empty map
+would derive the lowest tier for everything, silently applying the least rigour to
+work nobody has assessed.
 
 ### ChatRole / ChatMessage
 
@@ -607,7 +467,9 @@ pub struct ExtensionApiClient {
 
 `ExtensionApiClient` implements `pipeline::DomainServiceClient`.
 
-**Transport selection**: configured per domain service in `.cogworks/services.toml`.
+**Transport selection**: configured per domain service in CogWorks' own process
+configuration, which describes the host it runs on rather than the repository it
+is working on.
 Default is `UnixSocket`; `Http` is configurable.
 
 **Protocol envelope format**:
@@ -622,22 +484,28 @@ Default is `UnixSocket`; `Http` is configurable.
 
 Response adds `"status": "ok" | "error"` and optionally `"error": { ... }`.
 
-### `llm/src/lib.rs` — AnthropicProvider
+### `llm/src/lib.rs` — ModelGatewayProvider
 
 ```rust
-pub struct AnthropicConfig {
-    api_key: String,   // NEVER logged; Debug impl redacts this field
-    pub base_url: String,
+pub struct ModelGatewayConfig {
+    pub endpoint: String,
+    pub model: String,
 }
 
-pub struct AnthropicProvider {
-    config: AnthropicConfig,
+pub struct ModelGatewayProvider {
+    config: ModelGatewayConfig,
     client: reqwest::Client,
 }
 ```
 
-`AnthropicProvider` implements `pipeline::LlmProvider`.
-All method bodies are `todo!()`.
+`ModelGatewayProvider` implements `pipeline::LlmProvider`.
+
+**No credential field.** The gateway holds the provider keys. This type cannot
+reach a model provider directly even if misconfigured, because it has nothing to
+authenticate with.
+
+**No provider name.** Which concrete model a logical name resolves to is the
+gateway's decision, so no provider appears in this codebase.
 
 **Rate-limit headers**: `x-ratelimit-requests-remaining` and
 `x-ratelimit-requests-reset` are read from each response to produce
@@ -648,12 +516,8 @@ All method bodies are `todo!()`.
 ## Implementation Notes
 
 - All method bodies in infrastructure stubs are `todo!()`.
-- `ScopeParameters` is also consumed by `validate_tool_scope`;
-  it is defined here in `knowledge.rs` and re-exported from `pipeline`.
-- `ToolProfile` and the profile store are consumed by the `nodes` crate
-  for per-node capability gating.
-- `PyramidSummary.token_count` is used by the context assembler to account
-  for tokens before choosing the finest summary level that fits the budget.
+- `StageContract` is consumed by the `nodes` crate to bound a stage attempt. It
+  is never placed in the context bundle of the stage it governs.
 - The `Diagnostics.has_blocking()` helper avoids callers needing to import and
   match on `DiagnosticSeverity` directly.
 
@@ -662,9 +526,135 @@ All method bodies are `todo!()`.
 ## Related Documents
 
 - `docs/spec/interfaces/shared-types.md` — shared type primitives
-- `docs/spec/interfaces/pipeline-graph.md` — graph model referenced by `PipelineConfigurationLoader`
+- `docs/spec/interfaces/pipeline-graph.md` — graph model resolved by `HarnessLoader`
 - `docs/spec/interfaces/github-traits.md` — GitHub traits
-- `docs/spec/interfaces/security.md` — will reference `ScopeParameters`, `ToolProfile`
-- `docs/spec/interfaces/context.md` — will reference `SummaryCache`, `PyramidSummary`, `SummaryLevel`
+- `docs/spec/interfaces/security.md` — trust zones, identity roles, constitutional rules
+- `docs/spec/interfaces/context.md` — `ContextBundle` assembly and Context Packs
 - `docs/spec/interfaces/pipeline-execution.md` — will reference `DomainServiceClient`
 - `docs/spec/interfaces/infrastructure.md` — full infrastructure implementation contracts
+
+---
+
+## Module: `domain_services` — Routing
+
+These types and functions are added to `crates/pipeline/src/domain_services.rs`.
+
+### ServiceCapabilities
+
+The cached capabilities of a registered domain service, populated after a
+successful handshake.
+
+**Fields**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `domain` | `DomainServiceName` | The service's own name |
+| `artifact_types` | `Vec<String>` | Artifact type identifiers the service can process |
+| `interface_types` | `Vec<String>` | Interface type identifiers the service can extract or validate |
+| `supported_methods` | `Vec<String>` | Capability identifiers (e.g. `"validate"`, `"simulate"`) |
+
+Derived from the [`HandshakeResult`] at startup. Cached in
+`DomainServiceRegistration` to avoid repeated handshakes.
+
+### DomainServiceRegistration
+
+A single registered domain service entry.
+
+**Fields**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `service_name` | `DomainServiceName` | Unique registration key |
+| `transport_config` | `serde_json::Value` | Opaque transport configuration (socket path or HTTP URL); parsed by `extension-api` |
+| `capabilities` | `Option<ServiceCapabilities>` | `None` before handshake, `Some` after |
+
+### ServiceRegistry
+
+The complete set of registered domain services for this pipeline run.
+
+**Fields**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `registrations` | `Vec<DomainServiceRegistration>` | All registered services |
+
+### RoutingError
+
+Errors returned by routing functions.
+
+```rust
+pub enum RoutingError {
+    NoServiceFound { artifact_paths: Vec<ArtifactPath> },
+    Ambiguous { artifact_paths: Vec<ArtifactPath>, candidates: Vec<DomainServiceName> },
+    HandshakePending { service: DomainServiceName },
+}
+```
+
+| Variant | Meaning |
+|---------|---------|
+| `NoServiceFound` | No registered service can handle the given artifact paths |
+| `Ambiguous` | Multiple services claim to handle the same artifact paths with equal specificity |
+| `HandshakePending` | The best-matching service has not yet completed its handshake |
+
+### `fn select_service_for_artifacts`
+
+```rust
+pub fn select_service_for_artifacts(
+    registry: &ServiceRegistry,
+    artifact_paths: &[ArtifactPath],
+) -> Result<DomainServiceName, RoutingError>
+```
+
+**Purpose**: Selects the single domain service that should process a given set
+of artifact paths.
+
+**Behaviour**:
+
+1. Filters to services whose `capabilities` are `Some` (handshake complete).
+2. For each candidate, scores it by the number of `artifact_types` that match
+   the file extensions of `artifact_paths`.
+3. If exactly one service has the highest score: returns its name.
+4. If multiple services tie at the highest score: returns
+   `Err(RoutingError::Ambiguous)`.
+5. If no service matches: returns `Err(RoutingError::NoServiceFound)`.
+6. `RoutingError::HandshakePending` is never returned by this function: step 1
+   filters out `capabilities == None` candidates before scoring (step 2), so a
+   service that hasn't completed its handshake can never be "the best match."
+   If the only services whose `artifact_types` would otherwise match have not
+   completed their handshake, the result is `NoServiceFound`, not
+   `HandshakePending`. The variant remains defined on `RoutingError` for other
+   potential call sites.
+
+### `fn resolve_primary_and_secondary`
+
+```rust
+pub fn resolve_primary_and_secondary(
+    registry: &ServiceRegistry,
+    artifact_paths: &[ArtifactPath],
+    interface_type_identifiers: &[String],
+) -> Result<(DomainServiceName, Vec<DomainServiceName>), RoutingError>
+```
+
+**Purpose**: Resolves the primary domain service (for validation and normalisation)
+and any secondary services (for interface extraction and dependency checks) for
+a sub-work-item's artifact and interface set.
+
+**Behaviour**:
+
+1. Calls [`select_service_for_artifacts`] with `artifact_paths` to find the primary service.
+2. Finds all other services whose `interface_types` intersect with
+   `interface_type_identifiers` (for cross-domain validation).
+3. Returns `(primary, secondaries)` where `secondaries` excludes the primary.
+
+---
+
+---
+
+### Artifact Type Matching
+
+Service routing matches `artifact_paths` against `artifact_types` by comparing
+the file extension of each path against each artifact type identifier. The
+convention is `domain/extension` (e.g. `"rust/rs"` matches `.rs` files,
+`"kicad/kicad_sch"` matches `.kicad_sch` files). This convention is owned by
+the domain service; CogWorks treats type identifiers as opaque strings for
+matching.
