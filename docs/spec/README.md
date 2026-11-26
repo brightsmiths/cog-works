@@ -70,4 +70,3 @@ CogWorks provides advanced validation, context management, and extensibility cap
 8. **Cross-domain interface registry** — human-authored, version-controlled interface contracts enable deterministic cross-domain constraint validation
 9. **Context Packs for domain knowledge** — structured, versioned domain knowledge loaded deterministically at Architecture node based on classification
 10. **Constitutional security layer** — non-overridable rules loaded before any LLM call; injection detection halts pipeline; scope enforcement prevents unauthorized capabilities
-11. **Tool profiles with defence in depth** — per-node tool scoping with three independent enforcement layers; generated adapters preferred over MCP servers (see ADR-0005)

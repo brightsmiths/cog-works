@@ -90,7 +90,7 @@ This project uses Beads (bd) for AI-friendly task tracking.
 
 ### Integration with ADRs
 
-- Link ADRs in task descriptions: "See ADR-0005 for context"
+- Link ADRs in task descriptions: "See ADR-NNNN for context"
 - Create tasks for implementing ADR decisions
 - Reference task IDs in ADR implementation notes
 

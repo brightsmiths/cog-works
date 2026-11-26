@@ -441,12 +441,10 @@ pub async fn execute(
 ) -> NodeExecutionResult
 ```
 
-`rules` is the real, operator-reviewed constitutional rules loaded once per
-pipeline step (`executor/steps.rs::load_constitutional_rules`) and forwarded
-through `NodeRunner::run_node` (Security Reviewer finding H1, task #59
-follow-up — see `docs/adr/ADR-0009-thread-constitutional-rules-into-node-execute.md`).
-Every `assemble_constitutional_prompt` call this node makes uses this
-caller-supplied value, not a node-internal constant.
+`rules` is the operator-reviewed constitutional rules loaded once per pipeline
+step (`executor/steps.rs::load_constitutional_rules`) and forwarded through
+`NodeRunner::run_node`. Every `assemble_constitutional_prompt` call this node
+makes uses this caller-supplied value, not a node-internal constant.
 
 **Responsibilities**:
 

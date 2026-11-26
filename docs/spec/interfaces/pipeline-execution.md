@@ -591,9 +591,7 @@ for either).
 
 `node_id` is **not** sourced from the Code Generation node. `aggregate_review_results`
 has no `NodeId` parameter and constructs the complete `EscalationReason` itself, so it
-currently sets `node_id` to a fixed placeholder, `"review-gate"`. See
-ADR-0007 for the deferred decision on how the real Code Generation `NodeId` should be
-threaded through once the `nodes` crate wires the Review node's orchestration.
+sets `node_id` to a fixed placeholder, `"review-gate"`.
 
 ---
 
