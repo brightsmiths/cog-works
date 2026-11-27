@@ -6,28 +6,50 @@ This document covers deployment, monitoring, cost management, and operational ru
 
 ## Deployment Model
 
-### CogWorks Binary, Job Runtime, and Domain Services
+### CogWorks Binary and Its Dependencies
 
-CogWorks ships as a Rust binary. For each implementation job, its orchestrator requests one ephemeral container through the configured infrastructure runtime provider and requests cleanup when the job terminates. The provider may use Docker, Kubernetes, or a cloud runtime; CogWorks does not bind the contract to a specific provider. Domain-specific validation remains delegated to separately managed domain services through the Extension API. CLI-first operation describes how CogWorks is invoked; it does not remove the implementation-job container boundary.
+CogWorks ships as a small, stateless Rust binary. It holds no privilege: no virtualisation, no
+host access, no push credential, no model API key.
+
+It does **not** run sandboxes, so it does not need KVM-capable hosts, a container runtime, or a
+cluster. Those belong to the stage runner service, which is deployed and scaled separately. This
+process makes API calls and writes to GitHub.
 
 **Required runtime dependencies:**
 
-- GitHub API and LLM provider access through the credential-provider interface
-- At least one registered domain service (running and reachable via configured transport)
-- An implementation-job container runtime provider
-- Network access (GitHub API, LLM API)
+- GitHub API access through the credential-provider interface, scoped to issues, pull requests
+  and labels write, with contents and checks **read only**
+- The harness source, reachable and resolvable at the version each target repository pins
+- A model gateway endpoint (CogWorks holds no provider key)
+- The stage runner service, for running stage attempts
+- The gate service's check runs, read through the GitHub Checks API
+- The write-scope service, for mount plans
+- At least one registered domain service for toolchain-specific work (L4)
+- Network access to the above
 
-**Domain service dependencies (owned by each domain service):**
+**Owned by the stage runner, not by CogWorks:**
 
-- Working copy management (git clone, checkout, etc.)
-- Domain-specific toolchains (e.g., Rust toolchain for Rust domain service, KiCad for KiCad domain service)
+- Sandbox creation and the virtualisation capability it requires
+- KVM-capable hosts and their capacity planning
+- Push credentials for each identity role
+- Working copies inside a sandbox
+
+**Owned by each domain service:**
+
+- Working copy management (git clone, checkout)
+- Domain-specific toolchains
 - Domain-specific fixtures and test infrastructure
 
-**Other infrastructure not required:**
+**Not required:**
 
 - No database
-- No message queue
+- No message queue (L1); a queue consumer is added at L2
 - No cache server
+- No container runtime in this deployment
+
+**Cloud-neutral.** Nothing in CogWorks depends on a specific cloud. Secrets resolve through the
+credential provider over any Vault or KMS; the queue consumer uses a provider-neutral runtime;
+telemetry exports over OTLP. On-premises and cloud deployments differ only in configuration.
 
 ### Environment Variables
 
@@ -36,15 +58,41 @@ CogWorks ships as a Rust binary. For each implementation job, its orchestrator r
 | `COGWORKS_LOG_LEVEL` | No | Log verbosity (default: `info`) |
 | `COGWORKS_LOG_FORMAT` | No | Log format: `json` (default) or `text` (for local dev) |
 | `COGWORKS_TEMP_DIR` | No | Base directory for temporary files (default: system temp) |
-| `COGWORKS_DOMAIN_SERVICES_CONFIG` | No | Path to domain service registration config (default: `.cogworks/services.toml`) |
+| `COGWORKS_MODEL_GATEWAY_URL` | Yes | The deployment's model gateway endpoint |
+| `COGWORKS_MODEL_ID` | Yes | Logical model name the gateway resolves to a concrete provider model |
+| `COGWORKS_HARNESS_SOURCE` | Yes | Where the harness is resolved from |
+| `COGWORKS_STAGE_RUNNER_URL` | Yes | The stage runner service endpoint |
+| `COGWORKS_MOUNT_PLAN_URL` | Yes | The write-scope service endpoint |
+| `COGWORKS_GATE_APP_ID` | Yes | Numeric identity of the gate service App whose check runs are trusted |
+| `COGWORKS_OTLP_ENDPOINT` | No | OTLP collector endpoint for traces and metrics |
+| `COGWORKS_MAX_CONCURRENT_RUNS` | No | Concurrency limit for this process (default: 1) |
+| `COGWORKS_PIN_OVERRIDE` | No | Operate against a harness version other than the one a repository pins. For controlled rollout and diagnosis |
 
-Credentials are resolved by the Vault library through the credential-provider interface. Credential authentication, rotation, and other lifecycle details are provider-owned and are not configured through a CogWorks-specific key field in this specification.
+**Three variables that must not exist**, in any deployment:
 
-Domain service configuration is specified in a registration file (default `.cogworks/services.toml`) rather than environment variables, to support multiple services with varying transports. The config contains only connection information — capabilities, artifact types, interface types, and domain are discovered dynamically via the handshake protocol:
+- a model provider API key — the gateway holds those
+- a push-capable GitHub token — the stage runner's identity roles hold those
+- a webhook HMAC secret — the factory's ingress service holds that
+
+A deployment that sets one of these has a misconfiguration, not a convenience. The composition
+root asserts at startup that the resolved GitHub credential carries neither `contents:write` nor
+`checks:write`, so the error surfaces immediately rather than in an audit months later.
+
+Credentials are resolved through the credential-provider interface. Authentication and rotation
+are provider-owned.
+
+**`COGWORKS_GATE_APP_ID` is load-bearing.** It is the single trust anchor for pass and fail: a
+check run from any other author is discarded. Setting it wrong means either no verdict is ever
+seen, or — worse — the wrong author's verdicts are trusted. It belongs under the same change
+control as a credential.
+
+### Domain Service Registration
+
+Domain services are declared in CogWorks' own process configuration, which describes the host
+this process runs on rather than any repository it works on. The configuration carries only
+connection information; capabilities are discovered via handshake:
 
 ```toml
-# .cogworks/services.toml
-
 [[services]]
 name = "rust"
 transport = "unix"
@@ -55,7 +103,6 @@ path = "/tmp/cogworks-rust.sock"
 name = "kicad"
 transport = "http"
 url = "http://localhost:9100"
-# health_check_timeout_ms = 10000  # optional
 ```
 
 On startup, CogWorks performs a handshake with each registered service to discover:
@@ -64,35 +111,44 @@ On startup, CogWorks performs a handshake with each registered service to discov
 - `capabilities` (which Extension API methods the service supports)
 - `artifact_types` (which file extensions the service handles)
 - `interface_types` (which cross-domain interface types the service can validate)
-- `api_version` (for compatibility gating — services with an incompatible API version are rejected at startup and reported as unavailable)
+- `api_version` (incompatible services are rejected at startup and reported as unavailable)
+
+Discovering rather than declaring means the configuration cannot drift from what a service
+actually implements.
 
 ### CLI Interface
 
 ```
-cogworks run --issue <number>               # Process a single work item (one step)
-cogworks run-all --repo <owner/repo>        # Process work items reported ready by the configured event/work-item adapter
-cogworks run-all --repo <owner/repo> --milestone "v2.0"  # Process only work items in a specific milestone
-cogworks status --issue <number>            # Display current pipeline state (read-only)
-cogworks cost-report --issue <number>       # Display cost report for a pipeline
-cogworks health                             # Check health of all registered domain services
-cogworks health <service-name>              # Check health of a specific domain service
+cogworks run --issue <number>        # Process a single work item (one step)        [L1]
+cogworks status --issue <number>     # Display current pipeline state (read-only)   [L1]
+cogworks cost-report --issue <number> # Display cost report for a run                [L1]
+cogworks health                      # Check reachability of every dependency       [L1]
+cogworks serve                       # Consume the event queue and loop             [L2]
 ```
 
-### Future: Poll Mode
+`cogworks run --issue <n>` executes **one step** and exits. Where a stage attempt or its verdict
+is still in flight, it reports a waiting state and exits cleanly — it does not block. Driving a
+work item to completion means invoking it repeatedly, which is what `serve` does.
+
+`cogworks health` checks the harness source, the model gateway, the stage runner, the write-scope
+service, the GitHub API and every registered domain service. Since CogWorks cannot run a stage
+without the first five, a health command that only covered domain services would report healthy
+on a process that cannot do anything.
+
+**There is no `run-all`.** Choosing which work item to take next, and in what order, belongs to a
+separate ordering service. A `--milestone` filter would be a priority decision, and
+`REQ-BOUND-008` forbids CogWorks making one. Concurrency within this process is a configuration
+limit, not an ordering decision.
+
+### Serve mode (L2)
 
 ```
-cogworks poll <repo> --interval 60   # Check every 60 seconds for work items
+cogworks serve    # Consume normalised events from the factory's event queue
 ```
 
-Wraps `process-all` in a timer loop. Same core logic.
-
-### Future: Webhook Mode
-
-```
-cogworks serve --port 8080    # Listen for GitHub App webhook events
-```
-
-Wraps `process` in an HTTP handler. Each webhook event triggers one step function invocation.
+Wraps the same step function in a loop driven by queue events. CogWorks does **not** bind an HTTP
+server and does not receive GitHub webhooks: ingress, HMAC verification and normalisation belong
+to the factory's ingress service. Serve mode exposes health and readiness endpoints only.
 
 ---
 
@@ -141,46 +197,36 @@ Every pipeline run produces an audit trail posted as comments on the parent work
 ### Budget Configuration
 
 ```toml
-# .cogworks/config.toml
+# CogWorks' own process configuration. This describes the host CogWorks runs on,
+# not any repository it works on. Nothing here shapes an agent: stage graphs,
+# stage contracts, profiles, prompt templates, output schemas, Context Packs and
+# constitutional rules all resolve from the pinned harness.
 
 [budgets]
-pipeline_max_tokens = 500000        # Total tokens per pipeline
-pipeline_max_cost_dollars = 10.00   # Total cost per pipeline
-sub_work_item_max_retries = 5       # Retries per sub-work-item
-review_max_remediation_cycles = 3   # Review→fix cycles per sub-work-item
+run_max_tokens = 500000             # Total tokens per run
+run_max_cost_dollars = 10.00        # Total cost per run
 
-[context_packs]
-# Path to context packs directory (default: .cogworks/context-packs/)
-directory = ".cogworks/context-packs/"
+# Attempt and rework limits are NOT here. They come from the resolved stage
+# contract, per stage type and tier, so a repository cannot widen them.
 
-[constitutional]
-# Path to constitutional rules file (default: .cogworks/constitutional-rules.md)
-rules_file = ".cogworks/constitutional-rules.md"
-# Protected path patterns: CogWorks NEVER generates files matching these patterns
-# These defaults cannot be removed, only extended
-protected_paths_extra = []  # Additional patterns beyond the built-in defaults
+[concurrency]
+max_concurrent_runs = 1             # Runs in flight in this process
 
 [labels]
-# Configurable workflow label names (defaults shown)
-# Pipeline-internal labels (cogworks:processing, cogworks:node:*, etc.) are NOT configurable
-# trigger = "cogworks:run" # default adapter mapping; readiness signal is provider-configurable
-# awaiting_review = "cogworks:awaiting-review"
-# safety_critical = "cogworks:safety-critical"
-# hold = "cogworks:hold"
-# cancel = "cogworks:cancel" # default adapter mapping; cancellation signal is provider-configurable
-# sub_work_item = "cogworks:sub-work-item"
+# Label names are configuration. Business logic never depends on a particular
+# string, and a work item's tier is NEVER read from a label.
+# trigger         = "..."   # human-only; a run starts on no other signal
+# awaiting_review = "..."
+# hold            = "..."
+# cancel          = "..."
+# slice           = "..."
 
-[llm_rate_limit]
-# Maximum time (in minutes) to wait when rate limited before halting the step (default: 30)
-# halt_threshold_minutes = 30
-
-# Optional: GitHub Projects V2 integration for human oversight dashboards
-# [github_project]
-# project_id = 12345
-# [github_project.field_mappings]
-# status = "Pipeline Stage"
-# safety_classification = "Safety"
-# disposition = "Outcome"
+[protected_paths]
+# CogWorks never generates files matching these patterns, and no mount plan
+# makes one writable. The built-in defaults — the pin, the risk map, locked
+# tests and their manifest, gate configuration, the Extension API schemas —
+# cannot be removed, only extended.
+extra = []
 ```
 
 ### Cost Tracking
@@ -265,7 +311,7 @@ The following categories are examples of external operational analysis. They are
 
 | Metric | Emitted Data Points | External Aggregation |
 |--------|---------------------|---------------------|
-| Satisfaction score distribution | Per-scenario satisfaction score per run | Distribution, mean, trend |
+| Gate pass rate on first attempt | Whether a stage passed its gate on attempt one | Rate per stage type, trend |
 | Review finding density | Count and severity of review findings per run | Mean per pipeline, trend |
 | Remediation success rate | Whether remediation resolved finding per cycle | Success rate over period |
 | Cross-domain violation rate | Cross-domain constraint violations per run | Count per run, trend |
@@ -300,20 +346,20 @@ Measure → Detect → Diagnose → Improve → Verify
 1. **Measure**: CogWorks exports the tracing fields defined by its observability interface; external systems derive supported measurements.
 2. **Detect**: External monitoring detects threshold crossings or trend changes (configured in Grafana alerts, Prometheus alertmanager, etc.).
 3. **Diagnose**: Use the diagnostic tables below to trace symptom → likely cause → improvement action.
-4. **Improve**: Implement the improvement (Context Pack update, scenario addition, pipeline configuration change, domain service fix).
+4. **Improve**: Implement the improvement in the harness (Context Pack update, profile or prompt change, stage graph change) or in the domain service, then move the repository's pin to adopt it.
 5. **Verify**: Monitor the externally derived measurements supported by exported fields for the next N pipeline runs to confirm improvement.
 
 #### Common Diagnostic Patterns
 
 | Symptom | Likely Cause | Improvement Action |
 |---------|-------------|-------------------|
-| First-pass success rate declining | Context drift (codebase evolves, Context Packs stale) | Update Context Packs with current patterns |
-| Retry count increasing for specific node types | Domain service regression or new code patterns | Investigate domain service logs, add scenarios for new patterns |
-| Cycle time increasing without retry increase | LLM latency regression or larger work items | Check LLM provider status, review work item decomposition |
-| Satisfaction scores declining for specific scenarios | Scenarios becoming outdated or overly strict | Review and update scenario definitions, adjust thresholds |
-| Cost per pipeline increasing steadily | Context growth (more files, more interfaces) | Review pyramid summary levels, consider context window optimization |
-| High remediation failure rate | Systemic code quality issues not covered by scenarios | Add new scenarios or Context Pack guidance, investigate domain service feedback quality |
-| Safety finding escapes detected post-merge | Insufficient scenario coverage for safety-critical paths | Add safety-focused scenarios, review constitutional rules, consider lowering human gate threshold |
+| First-pass success rate declining | Context drift (codebase evolves, Context Packs stale at the pinned version) | Update the packs in the harness and move the pin |
+| Retry count increasing for a stage type | Domain service regression, or an output schema the profile no longer satisfies | Investigate domain service logs and the stage's output schema |
+| Cycle time increasing without retry increase | Model latency regression, sandbox start-up cost, or larger slices | Check gateway and stage runner latency, review slice decomposition |
+| Gate first-pass rate declining for a stage type | Profile or prompt regression at the pinned harness version | Compare against the previous harness version; roll the pin back to confirm before changing thresholds |
+| Cost per run increasing steadily | Bundle growth, or more rework attempts per stage | Review the stage contract's input allowlist and the rework counts in the audit trail |
+| High rework failure rate | Gate feedback too coarse to act on, or a systemic gap in the contracts | Review the gate's structured output, then the contract the stage was given |
+| Finding escapes detected post-merge | Gate coverage gap at that tier, or a tier derived lower than the work warranted | Review the gate configuration for the tier, then `risk-map.yaml` — an under-rated path is the quieter of the two causes |
 
 ### Improvement Backlog
 
@@ -327,6 +373,170 @@ The CLI configures the OpenTelemetry OTLP exporter endpoint. The collector and d
 
 ## Operational Runbook
 
+### Harness Cannot Be Resolved
+
+**Symptom**: Every run on a repository halts immediately with a harness error, before any stage
+executes.
+
+**Diagnosis**:
+
+1. Read the error. It distinguishes four cases, and the operator action differs for each:
+   - **Pin unreadable** — `.factory/pin.yaml` is absent or does not parse
+   - **Version not found** — the pin names a harness version that does not resolve
+   - **Verification failed** — the resolved content does not match what the pin names
+   - **Source unavailable** — the harness source is unreachable
+2. For the first three, inspect the pin and the harness version it names. For the fourth, check
+   network reachability and the harness source's own status.
+
+**Resolution**:
+
+1. **Pin unreadable**: fix or create the pin by pull request. It is a protected path, so this is a
+   human-approved change.
+2. **Version not found**: the pin names a withdrawn or mistyped version. Move it to a version that
+   exists.
+3. **Verification failed**: do **not** work around this. It means the content at that version is
+   not what the pin asserts, which is either corruption or tampering. Investigate before moving
+   the pin anywhere.
+4. **Source unavailable**: transient. Runs resume without intervention once reachability returns.
+
+**Do not** look for a way to proceed without the harness. There is deliberately none: a run that
+cannot establish what governs it must not run.
+
+---
+
+### No Stage Graph or Profile for a Repository
+
+**Symptom**: A run halts naming a tier and discipline, or a full resolution key of
+`(stage type, discipline, toolchain, tier)`.
+
+**Diagnosis**:
+
+1. Confirm the derived tier. It comes from `risk-map.yaml` over the affected paths, raise-only — a
+   repository recently raised to a higher tier is the common cause.
+2. Check whether the resolved harness version covers that `(tier, discipline)` pair, and that
+   discipline pack covers the detected toolchain.
+
+**Resolution**:
+
+1. Add the missing graph or profile to the harness discipline pack, release a version, and move
+   the repository's pin.
+2. **Do not** lower the tier in `risk-map.yaml` to reach a graph that exists. That reduces the
+   rigour applied to the work in order to make a tooling gap go away, and the tier is raise-only
+   precisely to make this hard to do accidentally.
+
+---
+
+### Run Waiting on a Verdict
+
+**Symptom**: A run reports a waiting state across several invocations. Nothing fails; nothing
+advances.
+
+**Diagnosis**:
+
+1. Identify what it is waiting on from the waiting reason: an attempt in flight, or a verdict not
+   yet published.
+2. If waiting on a verdict, check whether a gate check run exists for the attempt's commit SHA.
+3. If a check run exists and looks successful but the run still waits, **check its authoring App
+   identity against `COGWORKS_GATE_APP_ID`**. A check run from any other author is discarded
+   entirely, which is correct behaviour that looks like a hang.
+4. Check the gate service's own health.
+
+**Resolution**:
+
+1. Gate service down or backed up: wait. Runs resume automatically; nothing is lost, because
+   position is reconstructed from GitHub.
+2. Check run from an unexpected author: either `COGWORKS_GATE_APP_ID` is wrong, or something other
+   than the gate service is publishing check runs on factory repositories. The second is a
+   security concern, not a configuration one — investigate before changing the setting.
+3. **Never** work around a missing verdict by treating the stage as passed. There is no mechanism
+   to do so, and adding one would remove the only independent check in the system.
+
+---
+
+### Stage Attempt Never Completes
+
+**Symptom**: An attempt was accepted by the stage runner, but no completion is observable in
+GitHub state.
+
+**Diagnosis**:
+
+1. Check the stage runner's status and whether the attempt is still running there.
+2. Check whether the expected branch exists and carries commits.
+3. Check the stage contract's wall-clock limit against how long the attempt has been in flight.
+
+**Resolution**:
+
+1. After the contract's wall-clock limit, the attempt is treated as failed and the rework and
+   escalation policy applies. A retry requests a **new** sandbox; nothing is recovered from the
+   lost one.
+2. If attempts routinely time out for one stage type, the contract's limit is probably wrong for
+   the work. Fix it in the harness rather than raising a global timeout.
+
+---
+
+### Oracle Dispute Raised
+
+**Symptom**: An `implement` stage has recorded a dispute instead of completing, naming a locked
+test and its reasoning.
+
+**Diagnosis**:
+
+1. Read the dispute. The agent is asserting the locked test is wrong — testing behaviour the
+   specification does not require, or asserting something impossible.
+2. Compare the test against the slice and the contracts. This is a judgement a human has to make;
+   it is why the path exists.
+
+**Resolution**:
+
+1. **If the test is wrong**: fix it through the oracle stage or a human pull request to the locked
+   test paths. Then re-run the slice.
+2. **If the test is right**: reject the dispute with a comment. The implementation needs to
+   satisfy it.
+3. **Never** resolve a dispute by letting the build stage edit the locked test. There is no
+   mechanism for it, and an escape hatch that permits a justified edit is indistinguishable from
+   one that permits deleting an inconvenient test.
+
+---
+
+### Graph Drift Escalation on Resume
+
+**Symptom**: A run escalates with a graph-drift reason. No stage executes.
+
+**Diagnosis**:
+
+1. The resolved graph's hash differs from the one recorded when the run started. Either the
+   repository's pin moved mid-run, or the harness content at that pin changed.
+2. Check the pin's recent history and the harness version's content.
+
+**Resolution**:
+
+1. **Pin moved deliberately**: restart the run so it begins coherently under the new graph. Per-stage
+   state from the old graph has no defined meaning against a new one, which is why it escalates
+   rather than resuming.
+2. **Pin did not move**: the content at a fixed version changed, which should be impossible where
+   resolution is content-addressed. Treat as THREAT-015 and investigate before restarting.
+
+---
+
+### Credential Wider Than Required
+
+**Symptom**: The process fails at startup asserting that the resolved GitHub credential carries
+`contents:write` or `checks:write`.
+
+**Diagnosis**: The credential has been granted push or check-run capability. This is a
+misconfiguration, not a convenience: the architecture depends on CogWorks being unable to push
+code or author a verdict.
+
+**Resolution**:
+
+1. Narrow the credential to issues, pull requests and labels write, with contents and checks read
+   only.
+2. **Do not** disable the assertion. It exists because a credential that is too wide is invisible
+   in normal operation — everything works, and the blast radius of a compromise is silently much
+   larger. Failing at startup is the only point at which this is cheap to notice.
+
+---
+
 ### Domain Service Unavailable
 
 **Symptom**: Pipeline fails with "domain service unreachable" or health check failure during pre-flight.
@@ -335,7 +545,7 @@ The CLI configures the OpenTelemetry OTLP exporter endpoint. The collector and d
 
 1. Run `cogworks health <service-name>` to check the specific domain service.
 2. Verify the domain service process is running (`ps`, `systemctl status`, etc.).
-3. Check the configured socket path or URL in `.cogworks/services.toml`.
+3. Check the configured socket path or URL in CogWorks' process configuration.
 4. Check domain service logs for crash or startup failure.
 
 **Resolution**:
@@ -372,14 +582,14 @@ The CLI configures the OpenTelemetry OTLP exporter endpoint. The collector and d
 **Diagnosis**:
 
 1. Check the error message — it will identify the specific TOML file and issue (schema error, conflict, unknown domain).
-2. Review the `.cogworks/interfaces/` directory.
+2. Review the interface registry directory in the repository's specification paths.
 3. Validate TOML syntax with a standalone TOML validator.
 
 **Resolution**:
 
 1. If schema error: fix the TOML file to match the interface definition schema.
 2. If parameter conflict: resolve conflicting definitions across files for the same interface parameter.
-3. If unknown domain: either register the missing domain service in `.cogworks/services.toml` or remove the interface definition referencing it.
+3. If unknown domain: either register the missing domain service in CogWorks' process configuration or remove the interface definition referencing it.
 4. Re-invoke: `cogworks run --issue <number>`.
 
 ---
@@ -417,9 +627,9 @@ The CLI configures the OpenTelemetry OTLP exporter endpoint. The collector and d
 | Retry budget exceeded | Review the error summary. Modify the sub-work-item description or interfaces to be clearer. Re-trigger. |
 | Cost budget exceeded | Increase budget in config if the work is legitimate. Consider breaking into smaller work items. |
 | Scope threshold exceeded | Review the scope estimate. Confirm or reject by commenting and removing the failed label. |
-| Configuration error | Fix `.cogworks/config.toml` and re-trigger. |
+| Configuration error | Fix CogWorks' process configuration and restart. |
 | GitHub API error | Check token permissions and rate limits. Re-trigger. |
-| LLM API error | Check API key and provider status. Re-trigger. |
+| Model gateway error | Check gateway reachability and status. Re-trigger. There is no API key here to check. |
 
 ---
 
@@ -453,7 +663,7 @@ The CLI configures the OpenTelemetry OTLP exporter endpoint. The collector and d
 
 ---
 
-### LLM API Rate Limit Exhaustion
+### Model Gateway Throttling
 
 **Symptom**: CogWorks logs show LLM rate limit throttling warnings, or the CLI exits with a rate-limit halt code. The `cogworks_llm_rate_limit_throttle_seconds` metric shows high values.
 
@@ -465,16 +675,14 @@ The CLI configures the OpenTelemetry OTLP exporter endpoint. The collector and d
 
 **Resolution**:
 
-1. Wait for the provider's rate limit window to reset.
-2. If recurring, reduce `max_concurrent_llm_calls` in `.cogworks/pipeline.toml` to lower the request rate:
-   ```toml
-   # .cogworks/pipeline.toml
-   [pipeline]
-   max_concurrent_llm_calls = 1  # default: 3
-   ```
-3. If the provider supports higher rate limits on a paid tier, consider upgrading.
-4. If multiple CogWorks instances share the same API key, consider using separate keys or staggering pipeline runs.
-5. Review the `llm_rate_limit.halt_threshold_minutes` setting — increase if the wait is acceptable, or decrease if faster failure is preferred.
+1. Wait. A throttling response from the gateway is retriable, and the run resumes on a later
+   invocation without intervention.
+2. If recurring, reduce `max_concurrent_runs` in this process's configuration to lower the
+   request rate.
+3. **Escalate to the gateway operator.** The gateway holds the provider credentials and sees all
+   factory traffic, so it is the only place where quota can be raised or allocation between
+   services adjusted. CogWorks cannot fix a factory-wide quota problem by tuning itself, and
+   per-process throttling here would be blind to the other processes sharing the same quota.
 
 ---
 
@@ -512,61 +720,6 @@ The CLI configures the OpenTelemetry OTLP exporter endpoint. The collector and d
 2. If context is large: review what's being included. Consider more targeted context assembly.
 3. If the work item is inherently complex: break it into smaller work items.
 4. Consider using a cheaper model for high-retry nodes (code generation iterations).
-
----
-
-### Scenario Validation Failures
-
-**Symptom**: Sub-work-item fails scenario validation with satisfaction score below threshold.
-
-**Diagnosis**:
-
-1. Check the scenario validation results in the audit trail.
-2. Identify which scenarios failed and which trajectories did not satisfy acceptance criteria.
-3. Review the observed behaviors for failing trajectories.
-
-**Resolution**:
-
-1. If the same scenario fails consistently: the generated code has a genuine issue. Remediation will feed the failures back to the code generator.
-2. If failures are sporadic (different trajectories fail on each run): non-deterministic behavior. Investigate the source (race condition, timing dependency, external state).
-3. If all trajectories for all scenarios fail: likely an environment or Digital Twin issue, not a code issue. Check twin status and environment configuration.
-
----
-
-### Digital Twin Issues
-
-**Symptom**: Scenario validation fails with "twin failed to start" or similar error.
-
-**Diagnosis**:
-
-1. Check the twin provisioner logs.
-2. Verify the twin binary exists at the configured path.
-3. Check for port conflicts (twin may require specific ports).
-4. Attempt to start the twin manually to see detailed error output.
-
-**Resolution**:
-
-1. If twin binary is missing: file a work item to build the twin using the twin specification.
-2. If port conflict: identify and stop the conflicting process, or configure the twin to use a different port range.
-3. If twin crashes on startup: review twin logs, fix the twin code, and rebuild.
-
----
-
-### Pyramid Summary Cache Issues
-
-**Symptom**: Warnings about stale summaries in logs, or unexpectedly large context allocations.
-
-**Diagnosis**:
-
-1. Check summary cache directory (`.cogworks/summaries/` by default).
-2. Compare file modification times between source modules and cached summaries.
-3. Check summary regeneration configuration (`regenerate_on` setting).
-
-**Resolution**:
-
-1. If many summaries are stale: trigger a batch regeneration (if `regenerate_on` is manual, run the summary generation job).
-2. If summaries are missing entirely: summaries are optional. Context assembly will fall back to including full files or excluding them. Not an error, but reduces context efficiency.
-3. If regeneration is taking too long: summaries are cached to avoid this. Check if the summary generation job is configured correctly and using an appropriate (cheap, fast) model.
 
 ---
 
@@ -616,149 +769,21 @@ The CLI configures the OpenTelemetry OTLP exporter endpoint. The collector and d
 **Diagnosis**:
 
 1. Check the audit trail for pack loading events — it will list which packs were evaluated and why each did or did not match.
-2. Check that `.cogworks/context-packs/` exists and contains the expected pack directory.
-3. Check the pack's `trigger.toml` for the affected component tags or classification labels.
-4. Verify the work item's classification output matches the expected tags/labels.
+2. Check the resolved harness version, and that it contains the expected pack. A pack added to
+   the harness reaches a repository only when its pin moves.
+3. Check the pack's trigger definition against the stage's tier, discipline, stage type and
+   detected toolchain.
+4. Check the stage contract's input allowlist. A pack that matched its trigger is still absent
+   from the bundle if the allowlist does not admit Context Packs — and this is the more common
+   cause, because it looks identical from the agent's output.
 
 **Resolution**:
 
-1. If the pack directory is missing: create it with the required pack structure.
-2. If the trigger definition is wrong: update `trigger.toml` to match the correct classification output.
-3. If the work item is being misclassified: check the classification node output and the safety-critical module registry.
-4. After updating pack content, no CogWorks action needed — packs are loaded automatically on next pipeline run.
+1. If the pack is missing from the resolved harness: add it in the harness, release a version,
+   and move the repository's pin.
+2. If the trigger definition is wrong: fix it in the harness and move the pin.
+3. If the allowlist does not admit packs: fix the stage contract in the harness.
+4. If the tier is wrong: check `risk-map.yaml`, which is where tier comes from. A label will not
+   change it.
 
 ---
-
-### Required Artefact Missing (Context Pack Enforcement)
-
-**Symptom**: Review node fails with blocking finding referencing a Context Pack and a missing artefact.
-
-**Diagnosis**:
-
-1. Read the blocking finding — it identifies the pack name and the specific required artefact.
-2. Check the output artifacts to understand what was generated and what the pack expected.
-3. Common causes: the work item is in a domain with strict documentation requirements (embedded safety, ISO 9001) and the LLM didn't generate the required documentation section.
-
-**Resolution**:
-
-1. The blocking finding is fed back to the Code Generator automatically (standard remediation loop).
-2. If the LLM cannot produce the required artefact within the retry budget: escalate. The missing artefact likely requires domain expert input.
-3. If the required artefact declaration in the pack is incorrect: update the pack's `required-artefacts.toml` via a PR.
-
-### Maintaining Scenarios
-
-**Operation**: Adding or updating scenario specifications.
-
-**Process**:
-
-1. Scenario specifications are version-controlled in `.cogworks/scenarios/` (or configured directory).
-2. Scenarios are authored and maintained by humans, not generated by CogWorks.
-3. Each scenario file declares which modules/interfaces it covers.
-4. After adding/updating scenarios, no CogWorks action is needed—scenarios are loaded automatically on next pipeline run for applicable sub-work-items.
-
-**Best practices**:
-
-- Keep scenarios focused (one behavior per scenario).
-- Use deterministic assertions where possible (cheaper, faster, more reliable than LLM-as-judge).
-- Document explicit failure criteria for safety-critical conditions (e.g., "motor never exceeds safe angle").
-- Review scenario coverage periodically—ensure all critical interfaces are covered.
-
----
-
-### Maintaining Digital Twins
-
-**Operation**: Building, updating, or deprecating Digital Twins.
-
-**Process**:
-
-1. Twins are built and maintained via the standard CogWorks pipeline (file a work item with the twin specification).
-2. Each twin includes a conformance test suite that validates behavior against the specification.
-3. Periodically (recommended: weekly or on upstream service releases), run conformance tests against the real service to detect drift.
-4. When drift is detected, file a work item to update the twin.
-
-**Best practices**:
-
-- Prioritize twins for high-volume or high-failure-risk dependencies (e.g., hardware simulators, rate-limited APIs).
-- Document twin fidelity requirements clearly (which behaviors must match exactly, which can be simplified).
-- Twins should be fast (support 100+ concurrent scenarios).
-- Include failure injection profiles for common degraded-mode scenarios (timeout, malformed response, rate limit).
-
----
-
-### Managing Tool Adapters
-
-**Operation**: Generating, updating, and verifying adapter tool definitions from API specifications.
-
-**Commands**:
-
-- `cogworks adapter generate <spec-path> [--output-dir <dir>] [--namespace <name>]` — Generate tool definitions from an API specification (OpenAPI or EAB).
-- `cogworks adapter drift <adapter-dir>` — Compare generated adapters against their source spec and report differences.
-- `cogworks adapter regenerate <adapter-dir>` — Regenerate adapters from the stored source spec reference.
-- `cogworks adapter list` — List all registered adapter sets with their source spec paths and last-generated timestamps.
-
-**Process**:
-
-1. Obtain the API specification (OpenAPI 3.0/3.1 JSON/YAML, or EAB JSON Schema).
-2. Run `cogworks adapter generate` to produce tool definitions in `.cogworks/adapters/<name>/`.
-3. Review the generated definitions and commit them to version control.
-4. Add the generated tools to appropriate tool profiles in `.cogworks/pipeline.toml`.
-5. Set up CI to run `cogworks adapter drift` to detect specification changes.
-
-**Best practices**:
-
-- Run drift detection in CI on every PR that touches API specification files.
-- Regenerate adapters when the source specification changes, rather than manually editing generated files.
-- Use meaningful namespace prefixes (e.g., `inventree.stock`, `ci.github`) to keep tool names organized.
-- Review generated scope parameter defaults before deploying.
-
----
-
-### Managing Skills
-
-**Operation**: Reviewing, activating, deprecating, and monitoring crystallised skills.
-
-**Commands**:
-
-- `cogworks skill list [--lifecycle <state>]` — List skills, optionally filtered by lifecycle state.
-- `cogworks skill inspect <skill-name>` — Show skill details: manifest, script, parameters, lifecycle state, success rate.
-- `cogworks skill propose <audit-run-id>` — Extract candidate skills from a completed pipeline run's audit trail.
-- `cogworks skill activate <skill-name>` — Transition a Reviewed skill to Active.
-- `cogworks skill deprecate <skill-name> [--alternative <alt-name>]` — Mark a skill as deprecated.
-- `cogworks skill retire <skill-name>` — Remove a skill from active use.
-- `cogworks skill stats` — Show per-skill success/failure rates and invocation counts.
-
-**Process**:
-
-1. After successful pipeline runs, periodically run `cogworks skill propose` to identify repeating tool invocation patterns.
-2. Review proposed skills: inspect the script, verify scope requirements, check parameter schemas.
-3. Commit reviewed skills to `.cogworks/skills/` and run `cogworks skill activate`.
-4. Monitor skill performance with `cogworks skill stats`.
-5. Deprecate skills with declining success rates; retire skills that are no longer relevant.
-
-**Best practices**:
-
-- Review proposed skills carefully — they are extracted from audit data and should be validated for correctness.
-- Set the success rate threshold appropriately for your domain (default: 90% over last 20 runs).
-- Document skill purpose and expected use cases in the manifest description.
-- When deprecating, always specify an alternative when one exists.
-
----
-
-### Monitoring Tool Usage
-
-**Operation**: Reviewing tool invocation patterns, scope violations, and skill performance across pipeline runs.
-
-**Key metrics to monitor**:
-
-- **Tool call volume**: Per-tool invocation counts across runs. Excessive calls to a single tool may indicate poor prompt instructions or unnecessary work.
-- **Scope violation rate**: High violation rates indicate profile misconfiguration, overly broad LLM instructions, or potential prompt injection attempts.
-- **Skill vs. raw tool ratio**: Higher skill usage indicates successful crystallisation of proven patterns. Low skill usage despite available skills may indicate poor skill discovery or relevance.
-- **Progressive discovery hit rate**: When progressive discovery is active, track how often LLMs use `tools.search` vs. `tools.schema` vs. direct `tools.call`. This indicates whether the compact index provides sufficient information.
-
-**Alerting recommendations**:
-
-| Metric | Warning Threshold | Critical Threshold |
-|--------|-------------------|-------------------|
-| Scope violations per pipeline run | > 5 | > 15 |
-| Skill success rate (any single skill) | < 90% | < 75% |
-| Tool calls per node execution | > 50 | > 100 |

@@ -31,9 +31,10 @@ These wrap `u64` and are `Copy`.
 | Type | Wraps | Represents |
 |------|-------|-----------|
 | `WorkItemId` | `u64` | GitHub Issue number — the unit of work for CogWorks |
-| `SubWorkItemId` | `u64` | GitHub Issue number for a sub-task created by Planning node |
+| `SubWorkItemId` | `u64` | GitHub Issue number for a slice sub-issue created from an approved plan |
 | `MilestoneId` | `u64` | GitHub Milestone number (CogWorks inherits; never creates) |
-| `PullRequestId` | `u64` | GitHub Pull Request number produced by Integration node |
+| `PullRequestId` | `u64` | GitHub Pull Request number CogWorks opened or updated |
+| `CheckRunId` | `u64` | GitHub check run carrying a gate verdict (read-only to CogWorks) |
 
 **Constructor**: `T::new(value: u64) -> T`
 **Accessor**: `T::as_u64(self) -> u64`
@@ -56,22 +57,38 @@ These wrap `String` and are `Clone` (not `Copy`). Construction rejects empty str
 
 | Type | Format | Represents |
 |------|--------|-----------|
-| `NodeId` | Free text | Node name within a pipeline configuration |
-| `EdgeId` | Free text | Edge name within a pipeline configuration |
-| `PipelineName` | Free text | Named pipeline in `.cogworks/pipeline.toml` |
-| `BranchName` | Git branch name | Git branch (e.g. `"feature/my-issue-42"`) |
+| `NodeId` | Free text | Node name within a resolved stage graph |
+| `EdgeId` | Free text | Edge name within a resolved stage graph |
+| `StageTypeId` | Free text | Stage type a node declares, drawn from the harness registry (e.g. `"implement"`) |
+| `ProfileId` | Free text | Agent profile resolved for a stage from the harness |
+| `HarnessVersion` | Free text | Harness version resolved from `.factory/pin.yaml` |
+| `DisciplineId` | Free text | Discipline pack selected for the work (e.g. `"software"`) |
+| `SliceId` | Free text | Slice within an approved `plan.yaml` |
+| `IdentityRole` | Free text | Role a stage attempt's commits are pushed under (e.g. `"oracle"`, `"builder"`) |
+| `BundleHash` | 64-char hex | SHA-256 of an assembled context bundle |
+| `BranchName` | Git branch name | Git branch (e.g. `"cogworks/42/slice-3"`) |
 | `CommitSha` | 40-char hex | Git commit SHA |
 | `RepositoryId` | `"owner/repo"` | GitHub repository |
-| `DomainServiceName` | Free text | Service key in `.cogworks/services.toml` |
-| `ArtifactPath` | Repo-relative path | File produced or consumed by a pipeline node |
+| `DomainServiceName` | Free text | Domain service key in CogWorks' process configuration |
+| `ArtifactPath` | Repo-relative path | File produced or consumed by a stage |
 | `InterfaceId` | Free text | Interface contract in the human-authored registry |
-| `ContextPackId` | Directory name | Context Pack in `.cogworks/context-packs/` |
-| `SkillName` | Free text | Deterministic reusable tool-call sequence |
-| `ToolName` | Free text | Tool exposed to LLM nodes |
-| `ProfileName` | Free text | Tool profile controlling node tool access |
+| `ContextPackId` | Directory name | Context Pack supplied by the harness |
 
 **Constructor**: `T::new(value: impl Into<String>) -> Option<T>` — returns `None` on empty input.
 **Accessor**: `T::as_str(&self) -> &str`
+
+`NodeId` and `StageTypeId` are deliberately separate. A `NodeId` names an instance
+with a position in the graph; a `StageTypeId` names the kind of work that node does
+and is the key by which its agent profile is resolved (REQ-PROFSEL-001). Several
+nodes in one graph may share a stage type — a graph with three `implement` nodes,
+one per slice, has three distinct `NodeId` values and one `StageTypeId`.
+
+### Tier
+
+`Tier` is an enumeration, not a string newtype: `T0`, `T1`, `T2`, `T3`. It is ordered,
+so the tier of a piece of work is the maximum over the tiers of the paths it touches
+(REQ-TIER-001), and a derived tier can be compared to enforce raise-only semantics
+(REQ-TIER-002).
 
 ---
 
@@ -119,16 +136,6 @@ pub fn is_exceeded_by(self, accumulated: TokenCost) -> bool
 See `docs/spec/constraints.md` §Pipeline Graph.
 
 ### Score Types
-
-#### `SatisfactionScore`
-
-Wraps `f64` in `[0.0, 1.0]`. Scenario satisfaction score computed from trajectory
-results.
-
-```rust
-pub fn new(value: f64) -> Option<SatisfactionScore>   // None if out of range
-pub fn as_f64(self) -> f64
-```
 
 #### `AlignmentScore`
 
@@ -290,6 +297,5 @@ let mut accumulated = TokenCost::zero();
 - `TokenCost` and `CostBudget` use `f64`. The precision is adequate for USD amounts
   at LLM token granularity (sub-cent per call). Do not use these for financial
   reporting; they are operational cost tracking only.
-- `SatisfactionScore` and `AlignmentScore` constructors return `Option` rather than
-  `Result` because the range check is a pure invariant validation, not a recoverable
-  failure mode.
+- `AlignmentScore`'s constructor returns `Option` rather than `Result` because the
+  range check is a pure invariant validation, not a recoverable failure mode.

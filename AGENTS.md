@@ -4,13 +4,18 @@ This file provides guidance and context for AI coding assistants working on this
 
 ## Project Overview
 
-CogWorks is an AI-assisted software development pipeline that automates the cycle from GitHub work item to Pull Request. Given an issue labelled `cogworks:run`, it classifies the task, generates a specification, designs interfaces, plans sub-tasks, iterates code generation with domain service feedback, validates against scenarios, and runs a multi-pass review gate — all without human intervention except at explicitly gated checkpoints.
+CogWorks is a deterministic foreman: a stateless step function that reads GitHub state, decides the next action, executes one step, writes the result back, and exits. It runs a graph of agent stages, resolving each stage's agent profile from a pinned harness, building the exact inputs that stage may see, and delegating the attempt to a separate service that runs it in a fresh sandbox.
 
 Key traits:
-- **Domain-service architecture**: CogWorks itself contains no language- or toolchain-specific logic. All build, simulation, lint, test, and interface-extraction operations are delegated to independently deployed domain services over the Extension API.
-- **Safety-first gates**: Work items touching safety-critical modules always require human approval before any PR can be merged.
-- **Audit trail**: Every LLM call, state transition, and domain service interaction is recorded for post-hoc review.
-- **Cross-domain awareness**: A human-maintained interface registry is validated before every run to detect cross-domain constraint violations early.
+- **Stage types, not built-in roles**: CogWorks contains no agent personas, prompt text or discipline-specific logic. A node declares a stage type; its profile, stage contract and the stage graph itself resolve from the harness version the target repository pins.
+- **It does not run agents, decide pass/fail, or push commits**: agent turns happen in sandboxes owned by the stage runner; verdicts are computed by the gate service and read from its check runs; commits are pushed by the stage runner under the stage's identity role. These are boundaries, not gaps — see `docs/spec/architecture.md` §Boundary Rules.
+- **Oracle separation**: the tests that judge an implementation are written by a different stage, under a different identity, in a different sandbox, and sealed before implementation starts.
+- **Domain-service architecture**: all build, simulation, lint, test and interface-extraction operations are delegated to independently deployed domain services over the Extension API.
+- **Tier-driven gates**: a work item's tier is derived from path globs in a human-owned `risk-map.yaml`, raise-only, and selects the stages, thresholds and human gates that apply. A tier is never read from a label.
+- **Audit trail and attestations**: every model call, state transition and domain service interaction is recorded, and each stage attempt produces a signed attestation naming the profile, harness version and context bundle hash.
+- **Cross-domain awareness**: a human-maintained interface registry is validated to detect cross-domain constraint violations early.
+
+CogWorks is one service in a larger system; the system-level architecture lives in the [`brightsmiths/handbook`](https://github.com/brightsmiths/handbook) repository under `docs/`.
 
 See [docs/spec/overview.md](docs/spec/overview.md) for the full system context and [docs/spec/README.md](docs/spec/README.md) for the spec index.
 
@@ -90,7 +95,7 @@ This project uses Beads (bd) for AI-friendly task tracking.
 
 ### Integration with ADRs
 
-- Link ADRs in task descriptions: "See ADR-0005 for context"
+- Link ADRs in task descriptions: "See ADR-NNNN for context"
 - Create tasks for implementing ADR decisions
 - Reference task IDs in ADR implementation notes
 

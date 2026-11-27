@@ -11,19 +11,19 @@ This document defines the clean architecture boundaries — what is business log
 │                        Business Logic                                   │
 │  (Pure domain concepts — no I/O, no external dependencies)              │
 │                                                                         │
-│  Pipeline state machine    │  Classification rules                      │
-│  Pipeline graph (DAG+cycles)│  Review aggregation                       │
-│  Graph execution engine    │  Context priority & truncation             │
-│  Budget enforcement        │  Scope threshold evaluation                │
-│  Node gate logic           │  Retry budget tracking                     │
-│  Edge condition evaluation │  Cross-domain constraint validation        │
-│  Label parsing/generation  │  Computed constraint evaluation            │
-│  Interface registry valid. │  Scenario satisfaction                     │
+│  Pipeline state machine    │  Stage-type registry                       │
+│  Stage graph (DAG+cycles)  │  Profile selection                         │
+│  Graph execution engine    │  Stage-graph resolution                    │
+│  Edge condition evaluation │  Context bundle assembly                   │
+│  Node gate logic           │  Verdict interpretation                    │
+│  Budget enforcement        │  Rework & escalation policy                │
+│  Retry budget tracking     │  Failure-class detection                   │
+│  Scope threshold evaluation│  Tier derivation                           │
+│  Label parsing/generation  │  Cross-domain constraint validation        │
+│  Interface registry valid. │  Computed constraint evaluation            │
 │  Context Pack selection    │  Constitutional rules enforcement          │
 │  Injection detection       │  Scope enforcement                         │
-│  Required artefact check   │  Protected path validation                 │
-│  Tool scope enforcement    │  Tool profile resolution                   │
-│  Skill execution           │  Progressive discovery index               │
+│  Protected path validation │  Alignment verification                    │
 └─────────────────────┬───────────────────────────────────────────────────┘
                       │ depends on (abstractions only)
                       ▼
@@ -32,15 +32,13 @@ This document defines the clean architecture boundaries — what is business log
 │  (Traits/interfaces — define what external systems provide)             │
 │                                                                         │
 │  LLM Provider              │  Issue Tracker                             │
-│  Code Repository           │  Pull Request Manager                      │
+│  Code Repository (read)    │  Pull Request Manager                      │
 │  Domain Service Client     │  Attestation Provider                      │
-│  Template Engine           │  Implementation Job Runtime Provider       │
-│  Credential Provider       │                                            │
-│  Interface Registry Loader │  Audit Store                               │
-│  Scenario Executor         │  Twin Provisioner                          │
-│  Summary Cache             │  Pipeline Configuration Loader             │
-│  Tool Profile Store        │  Adapter Spec Loader                       │
-│  Project Board (optional)  │                                            │
+│  Template Engine           │  Credential Provider                       │
+│  Harness Loader            │  Stage Runner                              │
+│  Check-Run Reader          │  Mount-Plan Provider                       │
+│  Risk-Map Loader           │  Interface Registry Loader                 │
+│  Audit Store               │                                            │
 └─────────────────────┬───────────────────────────────────────────────────┘
                       │ implemented by
                       ▼
@@ -48,19 +46,21 @@ This document defines the clean architecture boundaries — what is business log
 │                   Infrastructure Implementations                        │
 │  (Concrete adapters — the only code that touches external systems)      │
 │                                                                         │
-│  Anthropic Messages API    │  GitHub REST/GraphQL/Projects API          │
-│  Vault credential adapter  │  Attestation signer/verifier adapter      │
-│  Container runtime adapter │                                            │
+│  Model-gateway client      │  GitHub REST/GraphQL API                   │
+│  Vault credential adapter  │  Attestation signer/verifier adapter       │
+│  Stage-runner client        │  GitHub check-runs adapter                │
+│  Harness loader adapter    │  Risk-map loader adapter                   │
 │  Extension API Client      │  Handlebars template engine                │
 │  (Unix socket / HTTP)      │  GitHub issue comments (audit)             │
-│  (Future: gRPC transport)  │  (Future: OpenAI, GitLab, etc.)            │
-│  TOML Profile Loader       │  OpenAPI/EAB Adapter Generator             │
+│  OpenTelemetry exporter    │  (Future: GitLab, other forges)            │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 Note: Domain services (Rust, KiCad, FreeCAD, etc.) are **external processes**, not part of CogWorks. They communicate through the Extension API and are not shown in the layered view above. CogWorks' Extension API Client is an infrastructure implementation that handles the transport layer.
 
-CogWorks remains domain-agnostic across software and other engineering work. The orchestrator owns implementation-job lifecycle decisions and requests one ephemeral container per implementation job through the runtime abstraction. Runtime creation and hosting are provider-specific infrastructure; domain-specific tests and validation remain behind the Domain Service Client.
+CogWorks remains domain-agnostic across software and other engineering work. It decides which stage runs next and requests one fresh sandbox per stage attempt through the Stage Runner abstraction. Sandbox creation, hosting and the virtualisation privilege it requires belong to the stage runner service, not to CogWorks; domain-specific toolchain work remains behind the Domain Service Client.
+
+Three capabilities deliberately sit outside every layer of this diagram, because CogWorks does not implement them at all: executing an agent, deciding whether an artifact passes, and pushing commits. They belong to the stage runner, the gate service and the stage runner's identity roles respectively. CogWorks reads the results of all three from GitHub.
 
 ---
 
@@ -100,13 +100,118 @@ Coordinates the execution of pipeline graph nodes, evaluates edge conditions, an
   - Handles partial failure: other nodes continue unless failed node is marked `abort_siblings_on_failure`
   - Writes pipeline state to GitHub at each node boundary (crash-recovery point)
 
-### Implementation Job Orchestration
+### Stage Attempt Orchestration
 
-The orchestrator requests and tracks one ephemeral container for each implementation job. It owns the job lifecycle, including requesting cleanup after success, failure, or cancellation. The runtime provider creates and operates the container; business logic does not depend on Docker, Kubernetes, or a cloud runtime. Domain-specific tests and validation remain behind the Domain Service Client.
+CogWorks requests one fresh sandbox for each stage attempt and tracks that attempt to a terminal
+outcome. A retry is a new attempt and therefore a new sandbox; no sandbox is reused across
+attempts. The request carries the image, the context bundle, the mount plan, the network profile,
+the resource limits and the identity role, all drawn from the resolved stage contract. The stage
+runner creates and operates the sandbox; business logic depends on no container runtime,
+orchestrator or cloud API. CogWorks holds no virtualisation privilege.
+
+Completion is observed through GitHub state — the expected branch carries the attempt's commits
+and its output record is present — so an attempt's outcome survives a restart of CogWorks.
+
+### Stage-Type Registry
+
+Resolves the set of stage types a graph may reference, from the pinned harness.
+
+- **Input**: The resolved harness at the pinned version
+- **Output**: The stage-type registry for that harness version
+- **Rules**:
+  - Every node in a resolved stage graph declares exactly one stage type
+  - A stage type absent from the registry fails graph validation at load, before any dispatch
+  - The registry is data, drawn from the harness; no stage-type name is compiled into CogWorks
+
+### Profile Selection
+
+Resolves the agent profile that will run a stage attempt.
+
+- **Input**: Stage type, discipline, language or toolchain, tier, and the pinned harness
+- **Output**: A profile reference and its stage contract
+- **Rules**:
+  - Selection is deterministic: identical inputs resolve to an identical profile at a given pin
+  - No model participates in selection, and no model output is an input to it
+  - The resolved profile and the harness version are recorded in the stage attestation
+  - No matching profile is a halt, never a fallback to a default profile
+
+### Stage-Graph Resolution
+
+Resolves which stage graph governs a work item.
+
+- **Input**: Derived tier, discipline, and the pinned harness
+- **Output**: The resolved stage graph and its hash
+- **Rules**:
+  - The graph is drawn from the harness for the `(tier, discipline)` pair
+  - No repository-local file may add a stage type, remove a stage the tier requires, or change a gate
+  - The resolved graph's hash is recorded in pipeline state, so drift during a run is detectable
+
+### Context Bundle Assembly
+
+Builds the inputs a stage attempt is permitted to see.
+
+- **Input**: The profile's input allowlist, pipeline state, work item content, specification paths, and the Context Packs the harness supplies
+- **Output**: A context bundle and its hash
+- **Rules**:
+  - An input absent from the allowlist is absent from the bundle, not merely ranked lower
+  - The bundle is hashed and the hash recorded before the attempt starts
+  - A stage contract is never placed in the bundle of the stage it governs
+  - Trust-zone barriers are enforced during assembly: an implementation stage's bundle contains no holdout content and no acceptance source
+
+### Verdict Interpretation
+
+Derives the pass or fail state of a commit from the gate service's check runs.
+
+- **Input**: Check runs on a commit SHA, and the identity that authored each
+- **Output**: A verdict state (passing, failing, pending, absent) with structured failure feedback
+- **Rules**:
+  - Only check runs authored by the gate service's identity are considered; any other author is ignored entirely
+  - CogWorks computes no verdict of its own and authors no check run
+  - A pending or absent verdict means wait, never assume
+  - A verdict bound to a SHA other than the attempt's is treated as absent
+  - Holdout feedback is limited to failing requirement IDs; holdout content never reaches a build stage
+
+### Rework and Escalation Policy
+
+Decides whether a failed attempt is retried, reworked, or escalated.
+
+- **Input**: The failure's class, the attempt and rework counters, the stage contract's limits
+- **Output**: One of retry, rework, escalate, or halt
+- **Rules**:
+  - A technically invalid output (did not compile, did not parse, schema mismatch) is a **retry** with the same context
+  - A technically valid but misaligned or gate-failing output is a **rework**, carrying structured feedback
+  - Exhausting the stage contract's attempt or rework limit is an **escalation**
+  - An unrecoverable condition — an unverifiable pin, a missing profile, a malformed risk map — is a **halt**
+  - Escalation produces a dossier issue carrying the attempt history, the failure classes seen, and the bundle hashes, so a human inherits the context rather than reconstructing it
+
+### Failure-Class Detection
+
+Recognises that attempts are failing the same way and stops spending budget on them.
+
+- **Input**: The classified failure of each consecutive attempt for a stage or slice
+- **Output**: Whether a repeating failure class has been reached
+- **Rules**:
+  - Failures are classified before being compared; the comparison is on class, not message text
+  - The same class recurring for a configurable number of consecutive attempts (default: 3) triggers early escalation, before the attempt budget is exhausted
+  - Distinct classes on successive attempts indicate progress and do not trigger escalation
+
+### Tier Derivation
+
+Derives the criticality tier of a work item from the paths it affects.
+
+- **Input**: `risk-map.yaml` path globs, the affected paths, and any previously recorded tier
+- **Output**: The derived tier
+- **Rules**:
+  - The tier is the maximum over the tiers of all affected paths
+  - Derivation is **raise-only**: a newly derived tier may exceed a recorded one but never lower it
+  - A tier is never read from a label, so a label edit cannot weaken the stringency applied to the work
+  - A missing or malformed risk map is a halt, never a default to the lowest tier
 
 ### Edge Condition Evaluation
 
-Evaluates edge conditions to determine which downstream nodes to activate.
+Evaluates edge conditions to determine which downstream nodes to activate. Conditions are
+deterministic expressions over pipeline state and verdicts. No condition is evaluated by a model:
+routing is code, so which edge is taken never depends on model output.
 
 - **Input**: Edge condition definition (deterministic expression, LLM-evaluated condition, or composite), current pipeline state, node output
 - **Output**: Boolean (edge taken or not taken), evaluation record for audit trail
@@ -120,10 +225,10 @@ Evaluates edge conditions to determine which downstream nodes to activate.
 
 Deterministic post-processing of LLM classification output.
 
-- **Input**: LLM classification result, safety-critical module registry
-- **Output**: Final classification (potentially with safety override)
+- **Input**: Model classification result, the derived tier, the scope threshold
+- **Output**: Final classification
 - **Rules**:
-  - If any affected module is in the safety-critical registry → override `safety_affecting` to true
+  - The tier is **not** taken from the classification. It is derived from `risk-map.yaml` over the affected paths, raise-only, so a model cannot argue its way to a lower tier
   - If estimated scope exceeds threshold → produce escalation result
 
 ### Dependency Graph
@@ -135,17 +240,6 @@ Topological sort and validation of sub-work-item dependencies.
 - **Rules**:
   - Cycles are rejected with a specific error identifying the cycle
   - The topological ordering is deterministic (stable sort by sub-work-item ID within each tier)
-
-### Review Aggregation
-
-Combines multiple review pass results into a single decision.
-
-- **Input**: Three review results (quality, architecture, security), each with per-finding severity
-- **Output**: Aggregate result (proceed / remediate / escalate) with categorized findings
-- **Rules**:
-  - Any `blocking` finding in any pass → aggregate result is `remediate`
-  - If remediation cycle count exceeds limit → aggregate result is `escalate`
-  - `warning` and `informational` findings are collected but don't block
 
 ### Budget Enforcement
 
@@ -183,7 +277,7 @@ Converts between structured pipeline state and GitHub label strings.
 
 Deterministic validation of the cross-domain interface registry.
 
-- **Input**: Interface definition files from `.cogworks/interfaces/`, registered domain services
+- **Input**: Interface definition files from the target repository's specification paths, registered domain services
 - **Output**: Valid (all definitions conform to schema, no conflicts) or list of validation errors
 - **Rules**:
   - All definitions must conform to the interface definition JSON Schema
@@ -205,19 +299,6 @@ Deterministic comparison of generated artifact values against interface registry
   - Computed constraints (e.g., total bus load) are evaluated deterministically by the validator
   - Validates against registry contracts only — does not require other domain services to be running
   - Runs during review gate (first, before LLM reviews) and during architecture node
-
-### Scenario Satisfaction Scoring
-
-Computes satisfaction scores from trajectory results.
-
-- **Input**: Per-scenario trajectory results (each trajectory has a boolean satisfaction determination), explicit failure criteria violations
-- **Output**: Per-scenario satisfaction score (0.0-1.0), overall satisfaction score, pass/fail decision
-- **Rules**:
-  - Satisfaction score = (satisfied trajectories / total trajectories)
-  - Overall score must meet threshold (default 0.95) to proceed
-  - Any explicit failure criterion violation → fail immediately regardless of score
-  - Missing applicable scenarios → skip validation (not an error)
-  - Context Packs may declare stricter thresholds for their domain; the stricter threshold applies
 
 ### Context Pack Selection
 
@@ -266,69 +347,8 @@ Validation that generated artifacts stay within the approved specification scope
 - **Rules**:
   - Generated files must be within the authorised file set derived from spec and interface documents
   - No unauthorized capabilities (network calls, file system access, IPC, hardware access) unless explicitly specified
-  - No generated files may match protected path patterns (constitutional rules, prompt templates, scenarios)
+  - No generated files may match protected path patterns (the pin, the risk map, locked tests and their manifest, gate configuration)
   - Scope violations for safety-affecting work items require human clarification
-
-### Required Artefact Checking
-
-Verification that all artefacts declared by loaded Context Packs are present.
-
-- **Input**: Required artefact declarations from loaded Context Packs, generated pipeline output
-- **Output**: Pass (all present) or blocking findings identifying the pack and missing artefact
-- **Rules**:
-  - Checked during the Review node
-  - Missing artefacts produce blocking findings (preventing PR creation)
-  - Each finding identifies which pack declared the requirement and what is missing
-
-### Tool Profile Resolution
-
-Determines the effective tool list for a pipeline node at activation time.
-
-- **Input**: Node identifier, base profile name (from pipeline configuration), per-node tool overrides, pipeline state (for template variable resolution), tool registry contents
-- **Output**: Resolved tool list with per-tool scope parameters (all template variables substituted)
-- **Rules**:
-  - Profile resolution is deterministic: same configuration + same pipeline state = same tool list
-  - Unknown tool names in a profile produce a configuration warning (not a hard error — allows profile reuse across repos with different adapter sets)
-  - Template variables (e.g., `{{affected_modules}}`) are resolved from pipeline state at activation time; unresolvable variables produce a clear error and prevent node activation
-  - Default profiles exist for all 7 core nodes; no configuration needed for out-of-the-box operation
-  - The resolved tool list is recorded in the audit trail
-
-### Tool Scope Validation
-
-Validates a tool invocation against the calling node's scope parameters before execution.
-
-- **Input**: Tool name, tool invocation parameters (LLM-supplied), scope parameters (orchestrator-injected, from the resolved tool profile)
-- **Output**: Pass (tool may execute) or scope violation (structured error identifying the violated constraint)
-- **Rules**:
-  - This is the second layer of defence in depth (after orchestrator-level tool filtering, before OS-level sandboxing)
-  - Operates independently of orchestrator filtering — even if a tool is in the profile, scope parameters may reject a specific invocation
-  - Protected path enforcement: `fs.write` and `fs.create` refuse operations targeting protected paths regardless of profile configuration
-  - Scope violations are counted per node execution; exceeding the threshold (default: 5) produces an audit warning and MAY halt the node
-  - Each violation is recorded as a `SCOPE_VIOLATION` event in the audit trail
-
-### Skill Validation and Execution
-
-Validates skill parameters and orchestrates skill script execution, enforcing scope constraints on every tool call within the skill.
-
-- **Input**: Skill name, skill parameters (from LLM invocation), skill manifest (TOML), calling node's tool profile
-- **Output**: Skill execution result (success with output, or failure with error)
-- **Rules**:
-  - Skill parameters are validated against the manifest schema before execution
-  - Each tool call within a skill is validated against the calling node's tool profile — skills cannot bypass scope enforcement
-  - Skill execution is deterministic: same parameters produce the same sequence of tool invocations
-  - Skill lifecycle state is checked: only Active skills can be invoked (Proposed, Deprecated with alternatives, Retired are rejected)
-
-### Progressive Discovery Index
-
-Generates a compact tool index for nodes with many tools, and handles meta-tool requests for on-demand schema expansion.
-
-- **Input**: Resolved tool list for a node, tool count threshold (default: 15), search query (for `tools.search`), tool name (for `tools.schema`)
-- **Output**: Compact tool index (name + one-line description per tool), or full schema for a specific tool, or search results ranked by relevance
-- **Rules**:
-  - Activated automatically when tool count exceeds the threshold
-  - Skills rank above raw tools in search results
-  - Meta-tools (`tools.search`, `tools.schema`, `tools.call`) are always available when progressive discovery is active
-  - The compact index replaces full schemas in the LLM tool list to reduce context token consumption
 
 ### Tracing-Based Observability
 
@@ -446,7 +466,7 @@ Invokes domain service methods through the Extension API protocol.
   - `health_check() → HealthStatus` — Verify service availability, negotiate API version, discover capabilities and supported artifact types/interface types via handshake protocol
 - **Data flowing across boundary**:
   - Inbound: structured diagnostics (artifact, location, severity, message), simulation results (name, pass/fail, output), interface definitions, dependency graph, handshake results (capabilities, artifact types, interface types, domain, API version)
-  - Outbound: artifact paths, test/simulation filters, scenario specifications, environment configuration, relevant interface registry entries
+  - Outbound: artifact paths, test/simulation filters, environment configuration, relevant interface registry entries
 - **Error cases**: Service unavailable (retryable), API version mismatch (non-retryable), method not supported (non-retryable), transport error (retryable with backoff), tool not found (non-retryable), operation timeout (potentially retryable)
 
 **Note**: The Domain Service Client is the CogWorks-side abstraction. It sends JSON messages over Unix socket (default) or HTTP/gRPC. The actual domain service is an external process that CogWorks does not manage. Capabilities, artifact types, interface types, and domain are discovered dynamically via the handshake — not statically configured. Future API versions may add progress polling or streaming for long-running operations.
@@ -462,55 +482,88 @@ Loads cross-domain interface definitions from the repository.
   - Inbound: parsed interface definitions (structured)
   - Outbound: directory path, raw file contents
 
-### Scenario Executor
+### Harness Loader
 
-Executes scenario trajectories and evaluates acceptance criteria.
-
-- **Operations**:
-  - `load_scenarios(directory, module_filter) → Vec<Scenario>` — Load scenario specifications applicable to given modules
-  - `execute_trajectory(scenario, twin_environment) → TrajectoryResult` — Run one trajectory of a scenario
-  - `evaluate_acceptance(trajectory_result, acceptance_criteria, method) → SatisfactionDetermination` — Evaluate whether a trajectory satisfies criteria using specified method (deterministic assertion, LLM-as-judge, or statistical)
-- **Data flowing across boundary**:
-  - Inbound: scenario specifications (from holdout location), trajectory results, satisfaction determinations
-  - Outbound: scenario loading requests, trajectory execution requests, evaluation requests
-
-### Twin Provisioner
-
-Manages Digital Twin instances for scenario execution.
+Resolves the harness at the version a target repository pins, and reads the agent-shaping
+configuration out of it. This is the only source of stage graphs, stage contracts, agent
+profiles, prompt templates, output schemas, Context Packs and constitutional rules.
 
 - **Operations**:
-  - `start_twin(twin_spec, isolated_state) → TwinHandle` — Start a twin instance with fresh state
-  - `stop_twin(handle)` — Stop a running twin instance
-  - `configure_failure_injection(handle, failure_profile)` — Configure failure modes for a twin
-  - `reset_twin_state(handle)` — Reset twin to initial state for next trajectory
+  - `read_pin(repository) → HarnessPin` — Read `.factory/pin.yaml` from the target repository
+  - `resolve(pin) → ResolvedHarness` — Resolve the harness at the pinned version, verifying the resolution
+  - `stage_registry(harness) → StageTypeRegistry` — The stage types this harness version defines
+  - `stage_graph(harness, tier, discipline) → PipelineGraph` — The graph governing a `(tier, discipline)` pair
+  - `resolve_profile(harness, stage_type, discipline, toolchain, tier) → (ProfileRef, StageContract)` — Deterministic profile resolution
+  - `context_packs(harness, triggers) → Vec<ContextPack>` — The packs matching a stage's triggers
+  - `constitutional_rules(harness) → ConstitutionalRules` — The rules at this harness version
 - **Data flowing across boundary**:
-  - Inbound: twin specifications, state reset confirmations
-  - Outbound: twin process handles, endpoint URLs/ports for scenario execution
+  - Inbound: the pin, the resolved harness content, registry, graphs, profiles, contracts, packs and rules
+  - Outbound: repository identifier, pin reference, resolution keys
+- **Access**: Read-only. CogWorks never writes to the harness.
+- **Error cases**: Pin absent, malformed, or naming a withdrawn version; harness unreachable;
+  resolution fails verification; no graph for the `(tier, discipline)` pair; no profile for the
+  resolution key. Every one of these is a halt, never a fallback to a default.
 
-### Summary Cache
+### Stage Runner
 
-Reads and manages pyramid summaries of modules.
+Runs one stage attempt in a fresh sandbox, on CogWorks' behalf, and pushes the resulting commits
+under the stage's identity role. CogWorks holds neither the virtualisation privilege nor the push
+credential this requires.
 
 - **Operations**:
-  - `get_summary(module, level) → Summary` — Retrieve cached summary at specified level (1, 2, or 3)
-  - `is_stale(module) → bool` — Check if cached summary is outdated relative to source
-  - `invalidate(module)` — Mark a module's summaries as needing regeneration
+  - `start_attempt(request) → AttemptHandle` — Request one stage attempt. The request carries the image, context bundle, mount plan, network profile, resource limits, identity role and branch
+  - `cancel_attempt(handle)` — Request cancellation on a terminal path
 - **Data flowing across boundary**:
-  - Inbound: cached summaries (Level 1/2/3 text), staleness indicators
-  - Outbound: module identifiers, level requests
+  - Inbound: an attempt handle; thereafter the attempt's observable effects in GitHub
+  - Outbound: the attempt request
+- **Completion**: Observed through GitHub state — the branch carries the attempt's commits and
+  its output record is present. A queue event may prompt an earlier read but is never the source
+  of truth, because a signal that exists only in a queue cannot be reconstructed after a restart.
+- **Error cases**: The runner is unreachable; the attempt is rejected; no completion is observed
+  within the stage contract's wall-clock limit.
 
-### Pipeline Configuration Loader
+### Check-Run Reader
 
-Loads and validates pipeline graph definitions from the repository.
+Reads gate verdicts for a commit. This is CogWorks' only source of pass or fail.
 
 - **Operations**:
-  - `load_pipeline_config(directory) → PipelineConfig` — Load and parse the `.cogworks/pipeline.toml` file
-  - `get_named_pipeline(config, name) → PipelineGraph` — Retrieve a specific named pipeline graph definition
-  - `get_default_pipeline() → PipelineGraph` — Return the built-in default linear pipeline when no configuration file exists
+  - `check_runs_for(repository, sha) → Vec<CheckRun>` — The check runs on a commit
+  - `structured_output(check_run) → Option<GateOutput>` — The gate's machine-readable output
 - **Data flowing across boundary**:
-  - Inbound: parsed pipeline configuration (node definitions, edge definitions, pipeline-level settings, named pipeline maps)
-  - Outbound: directory path, raw file contents
-- **Error cases**: Missing configuration file (falls back to default), invalid TOML (non-retryable), schema violation (non-retryable with error details), graph validation failure (cycle without termination condition, unreachable nodes, etc.)
+  - Inbound: check runs with their authoring identity, conclusion and structured output
+  - Outbound: repository identifier and commit SHA
+- **Rules**: Only check runs authored by the gate service's identity are considered. CogWorks
+  authors no check run and computes no verdict of its own.
+- **Error cases**: No check run for the SHA; a check run still in progress; a check run authored
+  by an unexpected identity. The first two mean wait; the third means ignore.
+
+### Mount-Plan Provider
+
+Translates a stage's writable paths into a mount plan the sandbox enforces, and is the authority
+on where a given identity role may write.
+
+- **Operations**:
+  - `mount_plan(identity_role, writable_paths, repository) → MountPlan` — The plan for one attempt
+- **Data flowing across boundary**:
+  - Inbound: the mount plan
+  - Outbound: identity role, the stage contract's writable paths, repository identifier
+- **Rules**: CogWorks passes the plan to the stage runner and is never the only enforcement point
+  for a write boundary. A path the plan does not make writable cannot be written by the attempt.
+- **Error cases**: No plan can be produced for the role, or the requested paths exceed what the
+  role may ever write. Both are a halt.
+
+### Risk-Map Loader
+
+Reads the human-owned criticality map from the target repository.
+
+- **Operations**:
+  - `load_risk_map(repository, git_ref) → RiskMap` — Read and parse `risk-map.yaml`
+- **Data flowing across boundary**:
+  - Inbound: parsed path-glob-to-tier mappings
+  - Outbound: repository identifier and git reference
+- **Rules**: The map is human-owned. CogWorks reads it and never writes it.
+- **Error cases**: Absent or malformed map. Both are a halt — never a default to the lowest tier,
+  since that would silently reduce the stringency applied to the work.
 
 ### Template Engine
 
@@ -533,22 +586,6 @@ Persists audit events.
 - **Data flowing across boundary**:
   - Outbound: structured audit events (LLM call records, validation results, state transitions, cost data)
 
-### Project Board (Optional)
-
-Synchronises work item status to an external project board for human oversight.
-
-- **Operations**:
-  - `sync_item_status(issue_id, status_field, value) → Result` — Update a work item's status field on the project board
-  - `sync_custom_field(issue_id, field_name, value) → Result` — Set a custom field value (e.g., current pipeline node, classification)
-- **Data flowing across boundary**:
-  - Outbound: issue identifiers, field names, field values
-- **Error cases**: Board unavailable (non-fatal — logged, pipeline continues), field not found (non-fatal — logged), authentication failure (non-fatal — logged)
-- **Constraint**: Project board operations are fire-and-forget. Failures MUST NOT block or slow pipeline execution. This abstraction is optional — if not configured, no calls are made.
-
-### Implementation Job Runtime Provider
-
-Provides the infrastructure capability used by the orchestrator to request one ephemeral container per implementation job. The provider owns runtime-specific operations; the orchestrator remains responsible for deciding when a job starts and requesting cleanup on all terminal paths. This specification does not prescribe provider methods, request fields, or runtime-specific configuration.
-
 ### Credential Provider
 
 Resolves credentials for infrastructure clients through the Vault library. Authentication and key lifecycle are provider concerns behind this interface. CogWorks does not define Vault APIs or lifecycle policy, and key material is not available to prompts, context, logs, audit records, or generated artifacts.
@@ -557,44 +594,23 @@ Resolves credentials for infrastructure clients through the Vault library. Authe
 
 Verifies required upstream attestations against the content and trust policy presented by the pipeline, and signs CogWorks action attestations. It uses the credential provider for signing capability; private key material is never returned to business logic or exposed to the LLM. Signature format and key lifecycle remain implementation concerns behind the provider interfaces.
 
-### Tool Profile Store
-
-Loads tool profile definitions and per-node tool overrides from the pipeline configuration file.
-
-- **Operations**:
-  - `load_profiles(config) → Map<ProfileName, ToolProfile>` — Load all tool profile definitions from `.cogworks/pipeline.toml`
-  - `get_node_profile(node_id) → ProfileName` — Get the base profile name assigned to a node
-  - `get_node_overrides(node_id) → ToolOverrides` — Get per-node scope parameter overrides
-  - `get_default_profiles() → Map<ProfileName, ToolProfile>` — Return built-in default profiles for core nodes
-- **Data flowing across boundary**:
-  - Inbound: parsed profile definitions (tool lists, scope parameters, overrides)
-  - Outbound: configuration file path, raw file contents
-- **Error cases**: Missing configuration (falls back to defaults), invalid profile reference (non-retryable with error details), schema violation (non-retryable)
-
-### Adapter Spec Loader
-
-Loads API specification files for adapter generation.
-
-- **Operations**:
-  - `load_spec(path) → ApiSpec` — Load and parse an API specification file (OpenAPI 3.0/3.1 JSON/YAML, or EAB JSON Schema)
-  - `list_specs(directory) → Vec<SpecInfo>` — List available API specification files in the adapters directory
-- **Data flowing across boundary**:
-  - Inbound: parsed API specification (endpoints, parameters, schemas)
-  - Outbound: file path, raw file contents
-- **Error cases**: Unsupported format (non-retryable), parse error (non-retryable with error details)
-
----
-
 ## Infrastructure Implementations
 
 Each abstraction has one or more concrete implementations. These are the only modules that import external crates or perform I/O.
 
-### Anthropic LLM Provider
+### Model-Gateway Client
 
 - Implements: LLM Provider
-- Uses: Anthropic Messages API (HTTP)
-- Handles: Authentication, request formatting, response parsing, rate limit headers, retry with exponential backoff
-- Future: Additional providers (OpenAI, local models) implement the same trait
+- Uses: The deployment's model gateway endpoint (HTTP)
+- Handles: Request formatting, response parsing, retry with exponential backoff
+- Credentials: None. Model provider API keys are held by the gateway. This process never holds a
+  model API key, and neither does any sandbox (REQ-BOUND-007)
+- Rate limiting: Owned by the gateway, which holds the keys and sees all traffic across the
+  factory. This client does not maintain rate-limit state
+- Scope: Deterministic-stage helper calls only. An agent turn runs inside a stage attempt and
+  reaches the gateway through the stage runner, not through this client
+- Model neutrality: The gateway fronts whichever providers a deployment configures; no provider
+  name appears in CogWorks
 
 ### GitHub Issue Tracker + PR Manager + Code Repository
 
@@ -602,14 +618,6 @@ Each abstraction has one or more concrete implementations. These are the only mo
 - Uses: GitHub REST API and GraphQL API via `octocrab` or direct HTTP
 - Handles: Authentication (GitHub App token or PAT), pagination, rate limiting (X-RateLimit headers), error mapping, native sub-issue API (REST), typed issue links (GraphQL), milestone read/write
 - Note: One GitHub client implementation serves three abstractions. Internally organized by concern, but all share the authenticated HTTP client.
-
-### GitHub Projects V2 Board
-
-- Implements: Project Board (optional)
-- Uses: GitHub Projects V2 GraphQL API
-- Handles: Authentication (same GitHub App token as Issue Tracker), project item lookup, status field updates, custom field mapping
-- Non-blocking: All operations are fire-and-forget; failures are logged, not fatal to the pipeline
-- Note: Requires the project number to be configured in `config.toml`. If not configured, this implementation is not instantiated.
 
 ### Extension API Client (Unix Socket / HTTP)
 
@@ -632,12 +640,43 @@ Each abstraction has one or more concrete implementations. These are the only mo
 - Uses: GitHub Client (posts issue comments or creates artifacts)
 - Handles: Formatting audit events into readable Markdown, batching events into comments
 
-### Container Runtime Adapter
+### Stage-Runner Client
 
-- Implements: Implementation Job Runtime Provider
-- Uses: A selected container runtime or hosting provider
-- Handles: Provider-specific container job requests and runtime operations
-- Lifecycle: The orchestrator requests cleanup after every implementation job; the adapter performs provider-specific cleanup
+- Implements: Stage Runner
+- Uses: The stage runner service's API
+- Handles: Serialising the stage-attempt request (image, bundle, mount plan, network profile,
+  limits, identity role, branch), submitting it, and surfacing rejections
+- Privilege: None. The virtualisation privilege, the sandbox hosts and the KVM capability they
+  require belong to the stage runner service. This adapter is an API client and nothing more
+- Lifecycle: One attempt per request, one fresh sandbox per attempt. Cancellation is requested on
+  terminal paths; the service performs the teardown
+
+### GitHub Check-Runs Adapter
+
+- Implements: Check-Run Reader
+- Uses: GitHub Checks API (REST)
+- Handles: Listing check runs for a SHA, exposing each run's authoring App identity, conclusion
+  and structured output
+- Filtering: Runs not authored by the configured gate service identity are discarded at this
+  boundary, so business logic cannot act on a check run from an unexpected author
+- Write access: None. This adapter never creates or updates a check run
+
+### Harness Loader Adapter
+
+- Implements: Harness Loader
+- Uses: The configured harness source, at the version resolved from the target repository's pin
+- Handles: Reading the pin, resolving and verifying the harness at that version, parsing the
+  stage-type registry, stage graphs, profiles, stage contracts, Context Packs, prompt templates,
+  output schemas and constitutional rules
+- Access: Read-only, and content-addressed where the source supports it, so a resolved version
+  cannot change underneath a run
+
+### Risk-Map Loader Adapter
+
+- Implements: Risk-Map Loader
+- Uses: The GitHub Contents API to read `risk-map.yaml` from the target repository
+- Handles: Parsing path globs to tiers, and reporting a malformed map as a halt rather than an
+  empty map
 
 ### Vault Credential Adapter
 
@@ -659,109 +698,142 @@ Each abstraction has one or more concrete implementations. These are the only mo
 - Uses: JSON console output and the CLI-configured OpenTelemetry OTLP exporter
 - Handles: Export of available tracing spans and events; backend aggregation and dashboards remain external
 
-### TOML Profile Loader
+## Data Flow: End-to-End Example (Oracle and Implementation)
 
-- Implements: Tool Profile Store
-- Uses: `toml` crate for parsing `.cogworks/pipeline.toml` `[tool_profiles.*]` sections
-- Handles: Loading profile definitions, resolving profile inheritance/overrides, validating profile contents against tool registry
-
-### OpenAPI / EAB Adapter Generator
-
-- Implements: Adapter Spec Loader (for loading specs), generates tool definitions registered in Tool Registry
-- Uses: OpenAPI 3.x parser (JSON/YAML), JSON Schema parser for EAB format
-- Handles: Parsing API specs, generating per-operation TOML tool definitions, namespace assignment, drift detection between generated adapters and source specs
-- Output: Generated tool definitions stored in `.cogworks/adapters/<name>/`, index file, and configuration file
-- CI integration: Drift detection runs as a CI check; regeneration is a CLI command
-
----
-
-## Data Flow: End-to-End Example (Code Generation)
-
-This traces data flow across all boundaries for a single sub-work-item code generation cycle:
+This traces data flow across every boundary for one slice, from the oracle stage through
+implementation, rework and the pull request. It is the L1 slice, and it shows where each of the
+three delegations happens.
 
 ```
-Graph Execution Engine
-  │  "Execute code-generation node for sub-work-item #5 of work item #42"
-  │  Resolves tool profile for this node (Tool Profile Resolution — business logic)
-  │  Template variables (e.g., {{affected_modules}}) resolved from pipeline state
-  │  Effective tool list recorded in audit trail
+Pipeline State Machine
+  │  "Slice #5 of work item #42 is ready; the stage graph says `unit-oracle` is next"
   ▼
-Code Generator (business logic)
-  │  Requests context assembly
+Risk-Map Loader (abstraction) → GitHub Contents API (infrastructure)
+  │  Returns: path globs → tiers
   ▼
-Context Assembler (business logic)
-  │  Needs: spec doc, interfaces, prior SWI outputs, constraints,
-  │         relevant cross-domain interface contracts
-  │  Reads from pipeline working directory + delegates to Code Repository abstraction
+Tier Derivation (business logic)
+  │  Max over affected paths; raise-only against the recorded tier → T1
   ▼
-Code Repository (abstraction) → GitHub API (infrastructure)
-  │  Returns: file contents
+Harness Loader (abstraction) → harness source (infrastructure)
+  │  Reads `.factory/pin.yaml`, resolves the harness at that version
+  │  Returns: stage-type registry, the (T1, software) stage graph, profiles, contracts, rules
   ▼
-Interface Registry Manager (business logic)
-  │  Provides: relevant interface contracts for cross-domain context
+Stage-Graph Resolution + Stage-Type Registry (business logic)
+  │  Validates every node's stage type against the registry; records the graph hash
   ▼
-Context Assembler
-  │  Needs: dependency graph for relevance ranking
-  │  Delegates to Domain Service Client abstraction
+Profile Selection (business logic)
+  │  (unit-oracle, software, rust, T1) → profile@version + stage contract
+  │  Deterministic. No model participates. Recorded in the attestation
   ▼
-Domain Service Client (abstraction) → Extension API Client (infrastructure) → Domain Service (external)
-  │  Sends: dependency_graph() request over Unix socket
-  │  Returns: DependencyGraph
+Context Bundle Assembly (business logic)
+  │  Inputs strictly from the contract's allowlist: the slice, the contracts, the
+  │  specification, the harness Context Packs. Everything else is absent, not deprioritised
+  │  The stage contract itself is NOT placed in the bundle
+  │  Bundle hashed; hash recorded
   ▼
-Context Assembler
-  │  Applies priority truncation (business logic)
-  │  Returns: context package (fits in window)
+Mount-Plan Provider (abstraction) → write-scope service (infrastructure)
+  │  Sends: identity role `oracle`, the contract's writable paths
+  │  Returns: mount plan making `tests/locked/` writable and `src/` not
   ▼
-Code Generator
-  │  Needs: rendered prompt
-  │  Delegates to Template Engine abstraction
+Stage Runner (abstraction) → stage runner service (infrastructure)
+  │  Sends: image, bundle, mount plan, network profile, limits, identity role, branch
+  │  One fresh sandbox. The agent turn happens there — never in this process
+  │  The service pushes the commits under the `oracle` identity. CogWorks holds no push token
   ▼
-Template Engine (abstraction) → Handlebars (infrastructure)
-  │  Returns: rendered prompt string
-  ▼
-Code Generator
-  │  Checks budget (business logic: Budget Enforcement — atomic across parallel nodes)
-  │  Sends prompt + context + schema
-  │  Delegates to LLM Provider abstraction
-  ▼
-LLM Provider (abstraction) → Anthropic API (infrastructure)
-  │  Returns: validated structured response + token count
-  ▼
-Code Generator
-  │  Writes output to pipeline working directory
-  │  Runs deterministic checks
-  │  Delegates to Domain Service Client abstraction
-  ▼
-Domain Service Client → Extension API Client → Domain Service (external)
-  │  normalise → validate → review_rules → simulate
-  │  Each method: JSON request over socket → structured JSON response
-  │  Returns: Diagnostics / SimulationResults
-  ▼
-Code Generator (business logic)
-  │  If checks fail: compose error feedback, loop back to LLM call (rework edge)
-  │  If checks pass: node completes, edge conditions evaluated
-  ▼
-Graph Execution Engine
-  │  Evaluates outgoing edges, activates next eligible node(s)
+Pipeline State Machine
+  │  Observes completion through GitHub state: branch carries commits, output record present
   │  Writes pipeline state to GitHub (crash-recovery point)
   ▼
-Review Executor (next node)
-  │  First: Cross-domain constraint validation (deterministic)
-  │  Delegates to Domain Service Client: extract_interfaces
-  │  Compares extracted values against interface registry contracts
-  │  Then: Three LLM review passes
-  │  Records all events via Audit Store abstraction
+Check-Run Reader (abstraction) → GitHub Checks API (infrastructure)
+  │  Returns: the gate service's check runs on the oracle SHA
+  │  Runs from any other author are discarded at the boundary
   ▼
-Audit Store (abstraction) → GitHub comments (infrastructure)
+Verdict Interpretation (business logic)
+  │  Oracle gates pass: the locked tests and their signed manifest now exist
+  │  The manifest is locked BEFORE implementation starts — this is the oracle barrier
+  ▼
+Profile Selection → (implement, software, rust, T1) → a DIFFERENT profile and contract
+  ▼
+Context Bundle Assembly (business logic)
+  │  A different allowlist, and a different trust zone. The bundle carries the slice, the
+  │  contracts and the locked tests as read-only. It carries no holdout content and no
+  │  acceptance source
+  ▼
+Mount-Plan Provider → mount plan making `src/` and `tests/own/` writable,
+  │  and the locked test paths read-only. A different identity role: `builder`
+  ▼
+Stage Runner → a second, separate sandbox under the `builder` identity
+  │  Two stages, two identities, two sandboxes. The builder cannot edit the oracle's tests
+  ▼
+Check-Run Reader → Verdict Interpretation (business logic)
+  │  The build gate fails: three locked tests fail
+  ▼
+Rework and Escalation Policy (business logic)
+  │  Output was technically valid, so this is rework, not retry
+  │  Feedback is the gate's structured output — failing test identities and messages,
+  │  never the test source, and for holdouts never more than failing requirement IDs
+  │  Rework counter incremented against the contract's limit
+  ▼
+Failure-Class Detection (business logic)
+  │  Classifies this failure; compares with prior attempts. A new class, so continue
+  ▼
+Context Bundle Assembly → a new bundle carrying the rework feedback, hashed anew
+  ▼
+Stage Runner → attempt 2 in a THIRD fresh sandbox. No sandbox is reused across attempts
+  ▼
+Check-Run Reader → Verdict Interpretation
+  │  The build gate passes
+  ▼
+Alignment Verification (business logic)
+  │  Deterministic and LLM checks against the slice and contracts
+  │  Bounds the attempt. Never published as a check run, never a gate verdict
+  ▼
+Pull Request Manager (abstraction) → GitHub API (infrastructure)
+  │  CogWorks opens or updates the PR for the branch the runner pushed
+  │  It does not push the commits, and it does not merge
+  ▼
+Attestation Provider (abstraction) → signer (infrastructure)
+  │  Signs the stage attestation: profile, harness version, bundle hashes, verdicts read
+  ▼
+Audit Store (abstraction) → GitHub issue comments (infrastructure)
+  │  The attestation and the run record land in GitHub, the only system of record
+  ▼
+Pipeline State Machine
+  │  Evaluates outgoing edges deterministically, activates the next eligible stage
 ```
 
----
+Three things in that trace are the whole point of the architecture, and each is a thing CogWorks
+deliberately does **not** do:
+
+- The agent ran in a sandbox CogWorks does not own, reached through the Stage Runner abstraction.
+- Pass and fail came from check runs CogWorks cannot author, read through the Check-Run Reader.
+- The commits were pushed by an identity CogWorks does not hold, under a mount plan a different
+  service authored.
+
+What CogWorks did was decide what runs next, decide what the agent may see, and record what
+happened.
 
 ## Boundary Rules
 
 1. **Business logic never performs I/O.** All external interaction flows through abstractions.
 2. **Abstractions define data contracts.** The data types that cross abstraction boundaries are defined by the abstraction, not by the infrastructure.
-3. **Infrastructure maps external formats.** GitHub API JSON, Anthropic API response format, compiler output text — all mapped to the abstraction's types by the infrastructure layer.
+3. **Infrastructure maps external formats.** GitHub API JSON, model gateway response format, compiler output text — all mapped to the abstraction's types by the infrastructure layer.
 4. **No abstraction leakage.** Business logic does not handle HTTP status codes, JSON parsing, subprocess exit codes, or file system errors. These are mapped to domain-level errors by infrastructure.
 5. **Dependency direction is inward.** Infrastructure depends on abstractions. Business logic depends on abstractions. Nothing depends on infrastructure directly.
 6. **Testing follows boundaries.** Business logic is unit-tested with pure data. Abstractions are contract-tested with mocks/fakes. Infrastructure is integration-tested against real or simulated external systems.
+
+The next three are absolute. They are not layering preferences but the boundaries that make
+CogWorks safe to run unattended, and no layer may breach them.
+
+7. **CogWorks never computes or publishes a verdict.** Whether an artifact passes is computed by
+   the gate service from a commit SHA, in its own sandbox, under its own identity. CogWorks reads
+   those check runs and authors none. Its own deterministic pre- and post-checks bound an
+   attempt — it may fail, retry or rework on them — but they are never published as a check run
+   and never constitute a gate verdict.
+8. **CogWorks never runs an agent in its own process or container.** Every agent turn happens in
+   a fresh sandbox owned by the stage runner. CogWorks holds no virtualisation privilege and no
+   host privilege.
+9. **CogWorks holds no push token and no model API key.** Commits are pushed by the stage runner
+   under the stage's identity role. Model credentials are held by the model gateway. A credential
+   that could push to a target repository, or call a model provider directly, must not be
+   reachable from this process.

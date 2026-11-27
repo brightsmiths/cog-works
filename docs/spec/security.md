@@ -7,41 +7,66 @@ This document identifies security threats to CogWorks and specifies mitigations.
 ## Trust Boundaries
 
 ```
-┌───────────────────────────────────────────────────────────────────┐
-│  Trusted: CogWorks Process                                       │
-│  - Business logic                                                │
-│  - Configuration (loaded and validated)                          │
-│  - Prompt templates (version-controlled)                         │
-│  - Output schemas (version-controlled)                           │
-│  - Extension API schemas (version-controlled)                    │
-│  - Interface registry schemas (version-controlled)               │
-└───┬─────────┬───────────┬───────────┬────────────┬───────┘
-    │         │           │           │            │
-┌───▼────┐ ┌──▼────────┐ ┌──▼────────┐ ┌──▼────────┐ ┌───▼──────────┐
-│Untrust.│ │ Untrusted │ │ Untrusted │ │ Untrusted │ │ Untrusted    │
-│GitHub  │ │ LLM       │ │ Repository│ │ Domain    │ │ Interface    │
-│Issue   │ │ Responses │ │ Content   │ │ Service   │ │ Registry     │
-│Body    │ │           │ │           │ │ Responses │ │ Definitions  │
-└────────┘ └───────────┘ └───────────┘ └───────────┘ └──────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│  The pinned harness — trusted, and not writable by CogWorks or by any    │
+│  agent or repository it operates on                                      │
+│  stage graphs · agent profiles · stage contracts · prompt templates      │
+│  output schemas · Context Packs · constitutional rules                   │
+└───────────────────────────────┬──────────────────────────────────────────┘
+                                │ resolved read-only at the repository's pin
+┌───────────────────────────────▼──────────────────────────────────────────┐
+│  Trusted: CogWorks Process                                               │
+│  - Business logic                                                        │
+│  - Its own process configuration (endpoints, label mappings, limits)     │
+│  - Extension API schemas (version-controlled)                            │
+│                                                                          │
+│  Holds no push credential, no model API key, no check-run credential     │
+└───┬──────────┬──────────┬──────────┬──────────┬──────────┬───────────────┘
+    │          │          │          │          │          │
+┌───▼────┐ ┌───▼─────┐ ┌──▼──────┐ ┌─▼───────┐ ┌▼────────┐ ┌▼──────────────┐
+│Untrust.│ │Untrusted│ │Untrusted│ │Untrusted│ │Untrusted│ │ Trusted but   │
+│GitHub  │ │ Model   │ │Repo     │ │Domain   │ │Interface│ │ external:     │
+│Issue   │ │Responses│ │Content  │ │Service  │ │Registry │ │ gate service  │
+│Body    │ │         │ │         │ │Responses│ │Defs     │ │ check runs    │
+└────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘ └───────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│  The sandbox boundary — where an agent turn actually happens             │
+│  Fresh per attempt · read-only root · non-root · no secrets             │
+│  Deny-by-default egress: model gateway and dependency proxy only        │
+│  Owned by the stage runner. CogWorks holds no privilege inside it.      │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Untrusted inputs:**
 
-1. GitHub Issue body and title (user-supplied, arbitrary content)
-2. LLM responses (non-deterministic, potentially nonsensical or adversarial)
+1. GitHub issue body and title (user-supplied, arbitrary content)
+2. Model responses (non-deterministic, potentially nonsensical or adversarial)
 3. Repository source code (could contain adversarial patterns)
-4. Repository configuration file (could be malformed or malicious)
+4. Repository configuration files, including `risk-map.yaml` and `.factory/pin.yaml` — human-owned, but readable and proposable by agents working in that repository
 5. Domain service responses (external process, potentially buggy or compromised)
 6. Interface registry definitions (human-authored but could be malformed)
+7. Check runs authored by any identity other than the gate service
 
 **Trusted inputs:**
 
-1. Prompt templates (version-controlled by CogWorks maintainers)
-2. Output schemas (version-controlled by CogWorks maintainers)
-3. Extension API schemas (version-controlled by CogWorks maintainers)
-4. CogWorks source code itself
-5. Constitutional rules (version-controlled, human-reviewed, required before any LLM call)
-6. Context Pack content (version-controlled in `.cogworks/context-packs/`, subject to code review)
+1. The harness at the resolved, verified pin — prompt templates, output schemas, stage contracts, Context Packs and constitutional rules
+2. Extension API schemas (version-controlled by CogWorks maintainers)
+3. CogWorks source code itself
+4. Check runs authored by the gate service identity, which are the **only** trust anchor for pass or fail
+5. Signed upstream attestations whose signatures verify against an expected identity
+
+**Three trust anchors, each narrow and each held by someone else.** The harness
+decides what an agent is and sees; the gate service decides whether work passes;
+the stage runner holds the privilege to execute and to push. CogWorks' own
+trustworthiness is therefore not load-bearing for any of those three questions —
+which is what makes it safe to run unattended.
+
+**What changed shape, and must not be forgotten**: when CogWorks made every model
+call itself, a compile-time guarantee ensured no call could bypass constitutional
+assembly. That guarantee still holds for the deterministic helper calls made in
+this process, but it cannot extend to an agent turn whose prompt is assembled
+inside a sandbox. See THREAT-023.
 
 ---
 
@@ -56,14 +81,15 @@ This document identifies security threats to CogWorks and specifies mitigations.
 **Mitigations**:
 
 1. **Constitutional layer (primary defense)**: Non-overridable behavioral rules are loaded before any LLM call and declare that external content is data, not instructions. The constitutional rules include explicit injection detection guidance and a rule that if injection is detected, the pipeline halts.
-2. **Injection detection and halt**: External content is scanned for injection patterns before inclusion in any LLM prompt. Detection triggers immediate pipeline halt with `INJECTION_DETECTED` event; the work item enters hold state.
+2. **Screening is upstream, and verified rather than repeated**: an incoming work item is screened by the intake service, which signs its approval. CogWorks verifies that signature and fails closed when it is missing or invalid, rather than re-running the scan. One service owns the screening, so there is one place for it to be right.
 3. **Schema validation (secondary defense)**: All LLM outputs are validated against strict JSON schemas. Even if the LLM is manipulated, the output must conform to the expected structure. Freeform text fields in the schema are limited to specific purposes (rationale, description) and are never executed.
 4. **Output is never executed**: CogWorks never executes LLM output as code within its own process. Generated code is written to files and validated by external tools (compiler, linter).
 5. **Prompt structure**: Issue body is clearly delimited in the prompt template (e.g., inside XML/Markdown tags) and framed as data, not instructions.
 6. **Human review**: Node gates (especially for safety-critical work items) provide human checkpoints before any generated code is merged.
-7. **Tool scope enforcement**: Even if prompt injection causes the LLM to attempt unauthorized operations, the tool profile and scope enforcement layers reject tool calls that violate the node's permissions. The LLM cannot write to files outside `allowed_write_paths`, commit to branches outside `branch_pattern`, or invoke domain services outside `allowed_services`.
+7. **The sandbox bounds what injection can achieve**: even a successful injection runs inside a fresh microVM with a read-only root filesystem, no secrets, a non-root user, and deny-by-default egress reaching only the model gateway and a dependency proxy. It can write only what the mount plan makes writable, and the commit-range scope check rejects commits reaching outside that. This is the mitigation that does not depend on detecting the injection at all.
+8. **Model-sourced text is re-scanned before prompt reuse**: a finding description or failure interpretation fed into a later prompt is model output re-entering a prompt, which no upstream service ever saw. CogWorks scans it as defence in depth.
 
-**Residual risk**: The constitutional layer reduces risk but cannot guarantee zero false negatives. A sufficiently sophisticated injection might evade detection. Mitigated by schema validation, multi-dimensional review (security pass), and human gates.
+**Residual risk**: no scan guarantees zero false negatives, and a sufficiently sophisticated injection may evade detection entirely. The design therefore does not rely on detection: the sandbox boundary, the mount plan, the independent gate verdict and the human gates at higher tiers all hold whether or not the injection was noticed.
 
 ---
 
@@ -87,13 +113,15 @@ This document identifies security threats to CogWorks and specifies mitigations.
 
 ### THREAT-003: GitHub Token Scope Exploitation
 
-**Description**: CogWorks' GitHub token has more permissions than necessary, and a vulnerability in CogWorks (or a dependency) allows the token to be misused.
+**Description**: CogWorks' GitHub credential has more permissions than necessary, and a vulnerability in CogWorks (or a dependency) allows it to be misused.
 
 **Impact**: Unauthorized repository access, branch protection bypass, or data exfiltration.
 
 **Mitigations**:
 
-1. **Minimum-privilege token**: The token must have only: `issues:write`, `pull_requests:write`, `contents:write` (for specific repos), and no admin or organization-level permissions.
+1. **Minimum-privilege credential**: `issues:write`, `pull_requests:write`, `labels:write`, `contents:**read**`, `checks:**read**`, and no admin or organization-level permissions.
+2. **No push capability**: the credential MUST NOT carry `contents:write`. Commits are pushed by the stage runner under the stage's identity role, so a compromise of this process cannot write code. The composition root asserts this at startup rather than trusting configuration.
+3. **No check-run capability**: the credential MUST NOT carry `checks:write`. A process that could author a verdict could certify its own work.
 2. **Vault-backed credential provider**: The Vault library behind the credential-provider interface handles authentication and key lifecycle. CogWorks relies on the provider and does not define its Vault protocol or rotation policy.
 3. **No token in context**: The token is never included in LLM context packages, audit trails, or generated code. It is used only by the GitHub Client infrastructure module.
 4. **Dependency auditing**: Regular `cargo audit` to detect known vulnerabilities in dependencies.
@@ -102,13 +130,13 @@ This document identifies security threats to CogWorks and specifies mitigations.
 
 ### THREAT-004: LLM API Key Exposure
 
-**Description**: The Anthropic (or other LLM provider) API key is accidentally logged, included in a context package, or committed to the repository.
+**Description**: A model provider API key is accidentally logged, included in a context bundle, or committed to the repository.
 
-**Impact**: Unauthorized LLM usage, potentially large bills.
+**Impact**: Unauthorized model usage, potentially large bills, and a credential that can be used outside the factory's accounting entirely.
 
 **Mitigations**:
 
-1. **Provider-resolved credentials**: The Vault library resolves the API credential through the credential-provider interface; CogWorks does not prescribe direct environment-variable, configuration-file, or command-line key handling.
+1. **CogWorks holds no model API key, and neither does any sandbox**: keys live in the model gateway. Every model call — CogWorks' own helper calls and every agent turn — reaches a provider through that gateway. There is no key in this process to leak, which is a stronger property than careful handling of one.
 2. **No key in logs**: Structured logging must redact any field matching known secret patterns.
 3. **No key in model content**: Credential material is used only for provider authentication and is never included in LLM prompts, context packages, or model-visible content.
 4. **No key in audit trail**: Audit events record non-secret provider metadata, not credential material.
@@ -235,7 +263,7 @@ This document identifies security threats to CogWorks and specifies mitigations.
 
 ### THREAT-011: Interface Registry Manipulation
 
-**Description**: An attacker modifies `.cogworks/interfaces/` TOML files to weaken cross-domain constraints — e.g., relaxing tolerances so that invalid artifacts pass constraint validation.
+**Description**: An attacker modifies interface registry TOML files in the repository's specification paths to weaken cross-domain constraints — e.g., relaxing tolerances so that invalid artifacts pass constraint validation.
 
 **Impact**: Artifacts that violate intended cross-domain contracts are accepted by the pipeline.
 
@@ -245,23 +273,6 @@ This document identifies security threats to CogWorks and specifies mitigations.
 2. **Schema validation**: CogWorks validates all interface definitions against a strict JSON/TOML schema. Malformed definitions are rejected with clear error messages.
 3. **Audit trail**: Changes to interface definitions are tracked in git history. CogWorks logs which interface definitions were loaded for each pipeline run.
 4. **Human authorship only**: CogWorks never creates or modifies interface definitions — they are always human-authored. This prevents an LLM from weakening constraints.
-
----
-
-### THREAT-012: Correlated LLM Failure Across Review Passes
-
-**Description**: The same LLM model is used for all three review passes. A systematic failure mode, bias, or blind spot in the model affects all passes simultaneously, giving false confidence that three independent reviews occurred.
-
-**Impact**: Vulnerabilities or quality defects that the model is systematically unable to detect pass all three review passes as if they were cleared by independent reviewers.
-
-**Mitigations**:
-
-1. **Different models for generation and review**: The review node uses a different model (or a different model configuration) from the code generation node. This reduces systematic correlation.
-2. **Focused pass prompts**: Each review pass uses a narrow, focused prompt. A model with a specific blind spot for one category is less likely to have the same blind spot for different categories.
-3. **Human gates for safety-critical**: Safety-critical PRs require human review regardless of automated results.
-4. **Scenario validation**: Independent of LLM review — tests actual behavior, not what the LLM says about the code.
-
-**Residual risk**: True independence is not achieved with a single-provider LLM. Multi-provider review (using different companies' models) would reduce correlation further but is not required at current autonomy levels.
 
 ---
 
@@ -288,7 +299,7 @@ This document identifies security threats to CogWorks and specifies mitigations.
 
 **Mitigations**:
 
-1. **Code review**: Context Pack files in `.cogworks/context-packs/` are subject to normal code review before merge. Changes to pack content require PR review.
+1. **Packs live in the harness**: pack content is changed by reviewed pull request in the harness and adopted only when a repository moves its pin. A repository cannot edit the packs that shape the agents working on it.
 2. **Constitutional layer primacy**: Constitutional rules take priority over Context Pack content and cannot be overridden by pack content.
 3. **Security review pass**: The security review pass checks generated code for vulnerability patterns — it is not guided by Context Pack content (it uses a separate focused prompt).
 4. **Pack content is Markdown/TOML only**: Context Packs cannot contain executable code, scripts, or structured commands — only documentation.
@@ -296,18 +307,22 @@ This document identifies security threats to CogWorks and specifies mitigations.
 
 ---
 
-### THREAT-015: Constitutional Rules File Tampering
+### THREAT-015: Harness Pin or Harness Content Tampering
 
-**Description**: An attacker modifies the `.cogworks/constitutional-rules.md` file to weaken or remove injection detection rules, scope binding rules, or other safety boundaries.
+**Description**: An actor changes the harness version a repository pins, or the content resolved at that version, so that agents run under altered rules, profiles, contracts or graphs.
 
-**Impact**: Subsequent pipeline runs operate without the intended behavioral constraints. Injection attacks succeed. Scope violations are not detected.
+**Impact**: Complete subversion of every guarantee that depends on the harness — an agent could be given wider tool access, wider writable paths, weakened constitutional rules, or a graph that omits a stage its tier requires.
 
 **Mitigations**:
 
-1. **Version-controlled with human review required**: Changes to the constitutional rules file require a reviewed and merged PR with at least one human approval.
-2. **Unreviewed branch rejection**: The Constitutional Rules Loader validates that the file comes from a reviewed/merged commit. Rules from unreviewed branches are rejected.
-3. **Protected path**: The constitutional rules file is in the protected path set. CogWorks cannot generate a PR that modifies it.
-4. **CODEOWNERS**: The constitutional rules file should be listed in CODEOWNERS to require review from specific trusted reviewers.
+1. **The pin is a protected path**: `.factory/pin.yaml` is in the protected path set, so no mount plan makes it writable and no stage attempt can change it. Moving a pin is a human-approved pull request.
+2. **Resolution is verified**: resolved harness content is checked against what the pin names, and a mismatch halts the run rather than proceeding with unverified content.
+3. **Content addressing**: where the harness source supports it, resolution is content-addressed, so a tag cannot be repointed at different content underneath a run.
+4. **Version stability within a run**: the resolved version is fixed for the whole run, and graph-hash drift between invocations escalates for human review rather than silently continuing.
+5. **The harness is never writable by CogWorks**: the loader exposes no write path, and the harness source is not configured with write credentials.
+6. **Review discipline in the harness**: changes are reviewed pull requests in a repository treated at product tier, and roll out per repository only as pins move.
+
+**Residual risk**: an actor with merge rights on both the harness and a target repository's pin can still change what agents do. That is a human-permissions problem rather than a software control, and it is the reason the harness is a product-tier repository with mandatory human review.
 
 ---
 
@@ -326,7 +341,7 @@ This document identifies security threats to CogWorks and specifies mitigations.
 
 ---
 
-### THREAT-017: CogWorks Modifies Its Own Behavioral Configuration
+### THREAT-017: CogWorks Modifies Its Own Behavioural Configuration
 
 **Description**: The CogWorks pipeline generates a PR that modifies its own prompt templates, constitutional rules, scenario specifications, or output schemas — subtly making future generation or review more permissive.
 
@@ -343,57 +358,20 @@ This document identifies security threats to CogWorks and specifies mitigations.
 
 ---
 
-### THREAT-018: Malicious Pipeline Configuration Hijacking Execution
+### THREAT-020: Model Output Reused in a Later Prompt
 
-**Description**: An attacker with write access to the repository modifies `.cogworks/pipeline.toml` to insert a malicious pipeline definition — for example, routing to a custom node that exfiltrates secrets via a spawning node, bypasses review nodes, or suppresses cost tracking. Because the pipeline configuration file is loaded at runtime, a subtle change could alter CogWorks' behavior without triggering obvious alerts.
+**Description**: Text a model produced — an alignment finding description, a review finding, an interpretation of a test failure — is carried into a later attempt's prompt. An attacker who can influence the first model's output can therefore influence a later prompt, including one for a stage running under a different profile.
 
-**Impact**: Pipeline executes attacker-controlled node sequencing. Review nodes skipped; audit trail incomplete; secrets potentially exfiltrated via domain service calls or spawning nodes.
-
-**Mitigations**:
-
-1. **Pipeline configuration in protected paths**: `.cogworks/pipeline.toml` must be added to the CODEOWNERS protected path set. Changes require human approval via required review.
-2. **Load-time schema validation**: Pipeline configuration is validated against a strict JSON Schema at load time. Invalid configurations are rejected before any node executes.
-3. **Node registry restriction**: User-supplied pipeline configurations (`pipeline.toml`) may only use `domain_service` or `builtin` execution methods for Deterministic nodes. The `script` execution method (arbitrary shell command) is prohibited in externally-configurable pipelines — it would allow an attacker to run arbitrary commands with CogWorks' process credentials. Script-method nodes are only permitted in CogWorks' own built-in pipeline definitions, which are not user-controllable. Unknown node type identifiers cause load-time rejection.
-4. **Audit log**: Pipeline configuration hash is recorded in the audit trail at pipeline start. Unexpected changes are detectable.
-5. **Rework loop cap enforcement**: Max traversal limits are enforced even if the configuration specifies an unusually high value (hard cap in code, not just validation).
-
-**Residual risk**: An attacker with legitimate human-reviewed PR access can still modify the configuration. The primary protection is change control (CODEOWNERS + required review), not technical enforcement within CogWorks.
-
----
-
-### THREAT-019: Tool Scope Bypass via Misconfigured Profile or Skill
-
-**Description**: An attacker modifies `.cogworks/pipeline.toml` to expand a node's tool profile permissions (e.g., granting the Review node write access), or crafts a skill that attempts filesystem operations outside the node's intended scope.
-
-**Impact**: A node gains capabilities beyond its intended role, potentially allowing data exfiltration (via `net.fetch`), unauthorized file modification, or privilege escalation across pipeline stages.
+**Impact**: Injection that crosses stage boundaries, reaching a stage the attacker had no direct input to.
 
 **Mitigations**:
 
-1. **Pipeline configuration in protected paths**: `.cogworks/pipeline.toml` changes require human-reviewed PR (CODEOWNERS). Tool profile changes are visible in diff review.
-2. **Defence in depth**: Tool access is enforced at three independent layers (orchestrator filtering, tool-level scope validation, OS-level sandboxing). Expanding a profile at Layer 1 does not automatically bypass Layer 2 scope constraints or Layer 3 OS restrictions.
-3. **Skill scope enforcement**: Every tool call within a skill is validated against the calling node's profile. Skills cannot bypass scope enforcement — they are convenience wrappers, not privilege escalation mechanisms.
-4. **Skill review lifecycle**: Skills must pass through human review (Proposed → Reviewed → Active) before they appear in LLM tool lists. Malicious skill content would be caught during review.
-5. **Audit trail**: All tool invocations, scope violations, and profile resolutions are recorded. Post-hoc review can detect unauthorized capability expansion.
-6. **Default profiles are conservative**: Built-in default profiles follow least-privilege: only Code Generation has write access; all other core nodes are read-only. Expanding beyond defaults requires explicit configuration.
+1. **Scan before reuse**: model-sourced text is scanned with `detect_injection` before being placed in any bundle. This is CogWorks' own defence in depth, distinct from the upstream intake screening, because no upstream service ever saw this text.
+2. **Structured, bounded carry-over**: feedback into a rework attempt carries structured fields — failing test identities, finding categories, requirement identities — rather than free prose wherever the structure allows it. A bounded field is a smaller injection surface than a paragraph.
+3. **Framed as data**: carried text enters a bundle as a delimited data item, never as an instruction, and is never interpolated into a prompt template's instruction section.
+4. **The bundle hash records it**: whatever was carried is covered by the bundle hash, so an attempt influenced by injected feedback is identifiable after the fact.
 
-**Residual risk**: An attacker with human-reviewed PR access can intentionally expand profiles. Mitigation: the tool usage report in the pipeline summary makes capability changes visible, and scope violation monitoring detects runtime misuse.
-
----
-
-### THREAT-020: Skill Injection via Audit Trail Manipulation
-
-**Description**: If an attacker can influence the audit trail data used for offline skill extraction, they could cause malicious tool invocation patterns to be proposed as candidate skills. If the human reviewer does not catch the malicious pattern, the skill becomes available to LLM nodes.
-
-**Impact**: A skill containing malicious tool invocations (e.g., exfiltrating data via `net.fetch` or writing to unexpected paths) becomes an Active tool available to pipeline nodes.
-
-**Mitigations**:
-
-1. **Human review gate**: All proposed skills MUST be reviewed by a human before transitioning to Active. The review includes inspecting the skill script and its scope requirements.
-2. **Skill scope enforcement**: Even if a malicious skill is activated, every tool call within it is validated against the calling node's profile. The skill cannot exceed the node's permissions.
-3. **Audit trail integrity**: The audit trail is written to GitHub issue comments (immutable once posted). Tampering requires GitHub API access with the CogWorks token.
-4. **Skill success tracking**: A skill that frequently causes scope violations will have a low success rate and be auto-deprecated.
-
-**Residual risk**: A malicious skill that operates within scope but performs subtly harmful actions (e.g., introducing benign-looking but vulnerable code patterns). Mitigated by the review gate and the multi-dimensional code review pass.
+**Residual risk**: free-text fields that must stay free text — a finding's reasoning, for instance — remain an injection surface. The sandbox boundary and the independent gate verdict bound what a successful injection can accomplish.
 
 ---
 
@@ -405,7 +383,7 @@ This document identifies security threats to CogWorks and specifies mitigations.
 
 1. Forge `GateConfig::gated_nodes` entries as `GateStatus::Approved { approved_by: "<arbitrary>" }` for any `HumanGated` node — completely bypassing the mandatory human-review gate that THREAT-002, THREAT-012, THREAT-014, and THREAT-016 all rely on as their primary or backstop mitigation for safety-critical work items.
 2. Reset or fabricate `PipelineState::cost_accumulator` — defeating the THREAT-005 cost-budget mitigation (reset to zero for unlimited spend) or inflating it to force spurious `BudgetExceeded` halts (denial of service against a legitimate run).
-3. Forge `graph_hash` to match the freshly computed hash of the current pipeline graph — silencing the graph-hash-drift escalation (Architectural Decision #4) that is meant to catch stale/tampered state after a `.cogworks/pipeline.toml` change (THREAT-018).
+3. Forge `graph_hash` to match the freshly computed hash of the resolved stage graph — silencing the graph-hash-drift escalation that is meant to catch stale or tampered state after a pin move or a change to harness content (THREAT-015).
 4. Fabricate arbitrary `NodeState` entries (e.g. marking nodes `Completed` that never executed), corrupting downstream edge evaluation and node dispatch.
 
 **Mitigations**:
@@ -418,26 +396,129 @@ This document identifies security threats to CogWorks and specifies mitigations.
 
 **Deployment assumption**: `authenticated_bot_user_id()` trusts *whatever identity the configured GitHub credential resolves to* — it has no independent notion of "the CogWorks bot." If CogWorks is deployed with a personal access token belonging to a human (shared with that person's own interactive use of GitHub), rather than a dedicated bot account or GitHub App installation token, then every comment that human posts under their own account — including ordinary discussion comments that happen to look like, or be crafted as, `PipelineStateComment` JSON — becomes automatically trusted as pipeline state. Operators MUST use a dedicated bot/App identity, never a token shared with a human user's own GitHub activity. This is a deployment-configuration requirement, not something the author-ID check itself can enforce.
 
-**Status**: Identified during the #57 Security Review (2026-10-25) as a gap in this document; `nodes::executor` step 3 (`reconstruct_state`) had no mitigation in place as of that review. **Fixed** (2026-10-25): mitigations #1 (author-ID verification) and #2 (work-item-id self-consistency check) are now implemented in `nodes::executor::steps::reconstruct_state` and covered by unit tests. `IssueComment` now exposes `author_id` and `IssueTracker` exposes `authenticated_bot_user_id`. Mitigation #3 (MAC hardening) remains future work, out of scope for this fix — see the Residual risk note above. Originally tracked as a Critical finding — see `.llm/security-review/2026-10-25-pipeline-executor-57.md`.
+**Status**: mitigations #1 (author-ID verification) and #2 (work-item-id self-consistency) are required and specified. Mitigation #3 (message authentication on the state comment) is a hardening step layered on top; a signature proves integrity but not that this state belongs to this work item, so it supplements the first two rather than replacing them. Recorded in `docs/security-review/`.
 
 ---
 
-### THREAT-021: LLM API Rate Limit Exhaustion
+### THREAT-021: Model Rate Limit Exhaustion
 
-**Description**: CogWorks exhausts the LLM provider's API rate limit — either through legitimate heavy usage (many parallel nodes, large work items) or through an attacker crafting work items that maximize LLM calls. Unlike GitHub API rate limits (THREAT-008), LLM rate limits directly block all pipeline progress since every LLM node depends on API availability.
+**Description**: Factory-wide model usage exhausts a provider's rate limit, stalling every run.
 
-**Impact**: Pipeline stalls indefinitely; cost budget may not be exceeded (calls are free when rate-limited), but time and scheduling are wasted. If multiple CogWorks instances share the same API key, one instance can starve others.
+**Impact**: Throughput collapse across all repositories, not just the run that caused it.
 
 **Mitigations**:
 
-1. **Proactive throttling**: The LLM Gateway reads rate limit headers from every response and paces requests to avoid hitting the limit (REQ-LLM-001).
-2. **Reactive backoff**: On HTTP 429, the gateway respects the `Retry-After` header and pauses all LLM requests (REQ-LLM-001).
-3. **Parallel coordination**: A shared rate limit budget prevents parallel nodes from independently exhausting the limit (REQ-LLM-002).
-4. **Halt threshold**: If rate limiting persists beyond a configurable duration (default: 30 minutes), the pipeline aborts rather than waiting indefinitely (REQ-LLM-003).
-5. **Visibility**: Rate limit state changes are logged at warning level and emitted as metrics for operational monitoring (REQ-LLM-004).
-6. **Cost budget**: The existing per-pipeline cost budget (REQ-CODE-004) limits total LLM consumption, indirectly reducing rate limit pressure.
+1. **The gateway enforces limits**: it holds the credentials and sees all factory traffic, so it is the only component positioned to throttle coherently. CogWorks tracks no provider rate-limit state of its own; per-process throttling would be blind to the other processes sharing the same quota.
+2. **Per-run budgets stay with CogWorks**: the gateway cannot enforce a per-run budget because it does not know which run a call belongs to. Budget exhaustion escalates rather than stalling.
+3. **Throttling is retriable**: a gateway response indicating throttling surfaces as a retriable condition, so a run waits rather than failing.
 
-**Residual risk**: If the LLM provider changes rate limit semantics without updating response headers, proactive throttling may not function correctly. Mitigated by the reactive 429 backoff as a fallback.
+---
+
+### THREAT-023: Loss of the Compile-Time Constitutional Guarantee for Agent Turns
+
+**Description**: When CogWorks made every model call itself, `ConstitutionallyWrappedPrompt` made it impossible at compile time to reach a model without passing through constitutional assembly. An agent turn's prompt is assembled inside a sandbox, from the resolved profile, by a process CogWorks does not control. The compile-time guarantee cannot extend to it.
+
+**Impact**: An agent could in principle run without the constitutional rules in their privileged position — through a harness profile that omits them, or a stage runner that fails to place them — and nothing in CogWorks' type system would prevent it.
+
+This threat exists because of a deliberate architectural trade, and is recorded so that nobody assumes the old guarantee still covers everything.
+
+**Mitigations**:
+
+1. **The guarantee is retained where it still applies**: deterministic helper calls made in this process still cannot bypass constitutional assembly, enforced at the type level.
+2. **The profile places the rules, and the profile is pinned**: rules placement is part of the agent profile in the harness, which is versioned, reviewed, pinned and not writable by the agent or its repository.
+3. **The sandbox preserves the placement**: a read-only root filesystem and a fresh sandbox per attempt mean the agent cannot alter the prompt assembly it was started with.
+4. **The verdict does not depend on the agent's compliance**: whatever the agent was told, the gate service recomputes pass or fail independently from the commit SHA. An agent that ignored its rules does not thereby get its work accepted.
+5. **Rules resolution is verified**: CogWorks verifies the resolved rules against the pin and halts rather than proceed with rules it cannot verify, so an attempt is never started against unverified rules.
+
+**Residual risk**: a compile-time guarantee was traded for a set of runtime ones distributed across the harness, the stage runner and the gate service. Each is a stronger boundary than a type check in isolation, but the property is no longer provable in one place. A bug in profile authorship or in the stage runner's prompt assembly would not be caught by this repository's type system.
+
+---
+
+### THREAT-024: Forged or Spoofed Gate Check Run
+
+**Description**: An actor creates a check run that appears to come from the gate service, or CogWorks accepts a check run from an unexpected author, causing failing work to be treated as passing.
+
+**Impact**: Complete subversion of pass and fail. Since the gate service's check runs are CogWorks' **only** trust anchor for a verdict, a forgery here is a forgery of the entire quality guarantee.
+
+**Mitigations**:
+
+1. **Author filtering at the adapter boundary**: the check-run adapter is constructed with the gate service's App identity and discards every check run whose authoring App differs, before business logic can see it. Business logic cannot act on a check run from an unexpected author even by mistake.
+2. **Numeric identity, not a name**: the comparison is on the numeric App identity, never on a display name or slug, both of which are attacker-influenceable.
+3. **SHA binding**: a check run bound to a SHA other than the attempt's is treated as absent, so an old passing verdict cannot be replayed against new work.
+4. **No CogWorks check-run credential**: CogWorks cannot author a check run at all, so a compromise of this process cannot manufacture a verdict — only misread one.
+5. **Pending is not passing**: an absent or in-progress verdict yields a waiting state, never an assumed pass, so a verdict cannot be forged simply by preventing the real one from appearing.
+
+**Residual risk**: an actor who compromises the gate service's App credential can author verdicts directly. That is the trust anchor, and protecting it is the gate service's responsibility; CogWorks cannot detect it.
+
+---
+
+### THREAT-025: Oracle Manifest Forgery or Bypass
+
+**Description**: An actor causes the implementation stage to run against tests it can influence — by forging the signed manifest that seals the locked tests, by starting implementation before the manifest exists, or by modifying locked tests after sealing.
+
+**Impact**: A passing run that carries no evidence. The whole value of the oracle separation is that the thing being measured could not shape the measurement.
+
+**Mitigations**:
+
+1. **Signature verification before implementation**: the manifest's signature is verified, and an `implement` attempt is not requested until the locked tests and a valid sealed manifest exist for the slice.
+2. **Separate identity roles**: the oracle and build identities differ, and the build identity cannot write the locked-test paths.
+3. **Enforcement outside CogWorks**: the mount plan the attempt runs under and the commit-range scope check applied to what it produced both enforce the boundary, so CogWorks is not the only thing preventing the edit.
+4. **Protected paths**: locked tests and their manifest are in the protected path set, so no mount plan makes them writable.
+5. **Disputes instead of edits**: where a locked test is genuinely wrong, the path is a recorded dispute for a human, so there is no legitimate mechanism for a build stage to change a locked test.
+
+**Residual risk**: an oracle stage can still write a weak test. The separation guarantees independence, not quality; test quality is addressed by the acceptance oracle, holdouts and mutation testing.
+
+---
+
+### THREAT-026: Context Bundle Leakage Across Trust Zones
+
+**Description**: Content one trust zone must not see reaches it through a bundle — holdout tests or acceptance source reaching a build stage, or implementation source reaching an oracle stage.
+
+**Impact**: An implementation overfitted to the acceptance criteria it could read, or an oracle that tests what was built rather than what was asked for. Both produce green runs that mean nothing, and neither is visible in the result.
+
+**Mitigations**:
+
+1. **Allowlist, not denylist**: the bundle is built strictly from the stage contract's input allowlist. An input the allowlist does not name is absent, so leakage requires an allowlist to be wrong rather than an exclusion to be missing.
+2. **Zone filtering as defence in depth**: `enforce_trust_zone` removes anything the zone forbids that the allowlist nonetheless admitted, and a non-empty removal set is recorded as a warning — the filter worked, but an allowlist needs correcting.
+3. **Repository separation at the product tier**: holdouts live outside the implementation repository entirely, so the boundary rests on repository access rather than on allowlist correctness.
+4. **Bundle hashing**: what a stage saw is recorded, so leakage is provable after the fact rather than merely suspected.
+5. **Bidirectional barriers**: the oracle barrier is specified as explicitly as the build barrier, because an oracle that sees the implementation is the easier failure to overlook.
+
+**Residual risk**: an allowlist entry that resolves more broadly than its author intended can admit content the zone should not see, at tiers where repository separation does not apply. The zone filter catches the known categories, not an unanticipated one.
+
+---
+
+### THREAT-027: Holdout Leakage Through Rework Feedback
+
+**Description**: Feedback from a failed holdout run carries enough detail for an implementation to be shaped around the holdout tests, reconstructing them across several attempts.
+
+**Impact**: The holdout stops being a holdout. An implementation iterated against a holdout is overfitted to it in exactly the way a visible test would allow, while still appearing to have passed an independent check.
+
+**Mitigations**:
+
+1. **Requirement identities only**: holdout feedback carries no more than the failing requirement identities — never test names, assertions, messages or diffs.
+2. **The gate composes the feedback**: the detail reduction happens in the gate service, which has the holdout content, rather than in CogWorks filtering something richer it was given.
+3. **Attempt limits bound reconstruction**: the stage contract's attempt and rework limits cap how many rounds of inference an attacker gets, and a repeating failure class escalates early.
+4. **Separate repository**: at the product tier the holdout content is not in the repository the attempt can read at all.
+
+**Residual risk**: coarse feedback makes genuine holdout failures hard to diagnose, which pushes toward escalation and human investigation. That cost is accepted deliberately: feedback rich enough to fix a holdout failure directly is feedback rich enough to overfit to it.
+
+---
+
+### THREAT-028: Stage Runner Compromise
+
+**Description**: The stage runner service is compromised. It holds the virtualisation privilege, the push credentials for every identity role, and the ability to run arbitrary code in a sandbox.
+
+**Impact**: The most severe single-service compromise in the factory. An attacker could push arbitrary commits under any identity role, including the oracle identity, defeating the oracle separation entirely.
+
+**Mitigations**:
+
+1. **The gate service is independent**: it recomputes verdicts from a commit SHA in its own sandbox under its own identity, reading gate configuration from the default branch. Pushed code still has to pass gates the stage runner does not control.
+2. **Product-tier treatment**: the stage runner is a security-boundary repository, so every change to it gets human review regardless of who wrote it.
+3. **Attestation chain**: each stage's attestation records what ran under which identity, so anomalous activity is detectable after the fact by a party that trusts nothing about the runner.
+4. **Human review at the pull request**: nothing merges without a human reviewing the pull request, at the tiers where that gate applies.
+
+**Residual risk**: this is a genuine concentration of privilege, accepted because the alternative — spreading virtualisation and push privilege across every service — is worse. CogWorks' own compromise is correspondingly less severe precisely because it holds none of it.
 
 ---
 
@@ -454,16 +535,27 @@ This document identifies security threats to CogWorks and specifies mitigations.
 | Extension API response validation | All responses validated against JSON Schema | Unit tests + conformance test suite |
 | Interface registry validation | Definitions validated against schema | Unit tests for registry loader |
 | Rate limit respect | Proactive tracking and backoff for GitHub API | Integration tests for GitHub client |
-| LLM rate limit respect | Proactive throttling, reactive backoff, parallel coordination, halt threshold for LLM API | Unit tests for LLM Gateway rate limit logic |
+| Model rate limiting | Enforced by the model gateway, which holds the credentials and sees all factory traffic; CogWorks tracks no provider rate-limit state | Assertion that no rate-limit state exists in this process |
 | Cost budget enforcement | Per-pipeline token budget | Unit tests for budget logic |
 | Constitutional rules loaded | Non-overridable rules before any LLM call | Unit test: missing rules file halts pipeline |
 | Injection detection | External content scanned before prompt inclusion | Property-based tests for injection patterns |
 | Protected path enforcement | Generated files never modify behavioral config | Unit tests for scope enforcer, pre-PR validation |
-| Pipeline configuration validation | `.cogworks/pipeline.toml` validated against schema at load time; unknown node types rejected | Unit tests for pipeline config loader |
-| Pipeline configuration change control | `.cogworks/pipeline.toml` in CODEOWNERS protected paths; changes require human approval | CODEOWNERS + repository branch protection |
-| Constitutional rules change control | Human-reviewed PR required for rule changes | Constitutional Rules Loader branch validation |
-| Tool profile enforcement | LLM nodes receive only profiled tools; scope validated per invocation | Unit tests for tool filtering + scope enforcement |
-| Tool scope defence in depth | Three independent enforcement layers (filtering, scope validation, OS sandbox) | Integration tests for each layer; E2E test for combined enforcement |
-| Skill review lifecycle | Skills require human review before activation | Lifecycle state machine enforcement + audit trail |
-| Adapter scope integration | Generated adapters participate in same scope enforcement as built-in tools | Unit tests for adapter tool registration + scope enforcement |
+| Harness pin resolution | Pin read from the target repository, resolved version verified against what the pin names; failure halts | Unit tests for absent, malformed, unresolvable and unverified pins |
+| Stage graph validation | Resolved graph validated at load; a stage type absent from the harness registry fails validation | Unit tests for unknown stage type and structural violations |
+| Harness change control | Agent-shaping configuration changes by reviewed pull request in the harness, adopted per repository by moving its pin | Harness branch protection + the pin in CODEOWNERS protected paths |
+| Constitutional rules change control | Rules resolve from the pinned harness; a repository cannot supply the rules governing its own runs | Provenance verification before use |
+| No push credential | The process credential carries no `contents:write`; commits are pushed by the stage runner under the stage identity role | Composition-root assertion at startup |
+| No model API key | No model credential in this process or any sandbox; all model calls go through the gateway | Assertion that no credential field exists on the gateway client |
+| No check-run credential | The process credential carries no `checks:write`; CogWorks authors no verdict | Composition-root assertion at startup |
+| Verdict author filtering | Only check runs authored by the gate service App identity are considered; filtering applied at the adapter boundary | Unit test: a passing check run from another App yields an absent verdict |
+| Pending verdict never assumed | An absent or in-progress verdict yields a waiting result | Unit test for in-progress and missing check runs |
+| Oracle separation | Oracle and build stages run under different identity roles; the build identity cannot write locked-test paths | Mount-plan assertion + commit-range scope check |
+| Oracle lock before implementation | No `implement` attempt requested before the locked tests and a verified sealed manifest exist | Unit test: unsigned or absent manifest blocks the stage |
+| Context bundle allowlisting | A bundle is built strictly from the stage contract's input allowlist; a non-allowlisted input is absent regardless of token budget | Unit test: holdout content absent with an unbounded budget |
+| Bundle hashing | Every bundle hashed and the hash recorded before the attempt is requested | Assertion that no attempt is requested without a recorded hash |
+| Stage contract withheld from the agent | A stage contract is never placed in the bundle of the stage it governs | Unit test over every stage type |
+| Holdout feedback bounds | Holdout feedback carries only failing requirement identities | Unit test: no test names, assertions or diffs in feedback |
+| Fresh sandbox per attempt | One sandbox per attempt; none reused across retries | Assertion that each retry issues a new attempt request |
+| Tier derivation raise-only | Tier derived from the risk map over affected paths; never lowered, never read from a label | Unit tests for maximum-over-paths, raise-only and label-ignored cases |
+| Upstream attestation verification | Required upstream attestations verified before acting; missing or invalid fails closed | Unit tests for absent, unsigned and mismatched attestations |
 | Pipeline state comment authenticity | `PipelineStateComment` reconstruction must verify the authoring GitHub numeric user ID and the payload's `work_item_id` before trusting a comment as pipeline state (THREAT-022) | Implemented in `nodes::executor::steps::reconstruct_state`; unit tests covering forged-author and work-item-id-mismatch rejection |

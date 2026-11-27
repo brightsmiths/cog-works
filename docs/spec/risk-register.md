@@ -18,15 +18,13 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 
 | ID | Risk | L | I | Score | Status |
 | ---- | ------ | --- | --- | ------- | -------- |
-| CW-R01 | Subtle logic error in safety-critical firmware | 4 | 5 | 20 | Mitigations required |
+| CW-R01 | Subtle logic error in high-tier code | 4 | 5 | 20 | Mitigations required |
 | CW-R02 | LLM reward-hacks the review process | 3 | 4 | 12 | Mitigations required |
 | CW-R03 | Security vulnerability in generated code | 3 | 4 | 12 | Mitigations required |
 | CW-R04 | Accumulated technical debt from generated code | 3 | 3 | 9 | Monitor |
 | CW-R05 | CogWorks / external system race condition on GitHub state | 2 | 4 | 8 | Mitigations required |
 | CW-R06 | Domain service crash or garbage response | 2 | 3 | 6 | Mitigations required |
 | CW-R07 | Cross-domain constraint false negative | 3 | 4 | 12 | Mitigations required |
-| CW-R08 | Digital twin diverges from real system | 3 | 3 | 9 | Mitigations required |
-| CW-R09 | Digital twin insufficient fidelity | 3 | 3 | 9 | Mitigations required |
 | CW-R10 | Uncontrolled LLM cost on stuck pipeline | 2 | 4 | 8 | Mitigations required |
 | CW-R11 | Credential exposure or scope creep | 3 | 4 | 12 | Mitigations required |
 | CW-R12 | Malicious or adversarial work item injection | 2 | 4 | 8 | Mitigations required |
@@ -34,14 +32,19 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 | CW-R14 | Team loses understanding of generated codebase | 2 | 3 | 6 | Monitor |
 | CW-R15 | Context assembly includes wrong or stale files | 3 | 3 | 9 | Mitigations required |
 | CW-R16 | Prompt template drift degrades output quality | 2 | 3 | 6 | Monitor |
-| CW-R17 | LLM provider API change or outage | 2 | 3 | 6 | Mitigations required |
-| CW-R18 | CogWorks modifies its own prompts or scenarios | 4 | 4 | 16 | Mitigations required |
+| CW-R17 | Model gateway change or outage | 2 | 3 | 6 | Mitigations required |
+| CW-R18 | CogWorks modifies its own behavioural configuration | 4 | 4 | 16 | Mitigations required |
+| CW-R22 | Three unbuilt services are hard dependencies at L1 | 4 | 4 | 16 | Mitigations required |
+| CW-R23 | Harness coupling and cross-service version skew | 3 | 4 | 12 | Mitigations required |
+| CW-R24 | Gate service is a single point of workflow failure | 3 | 3 | 9 | Accepted with mitigations |
+| CW-R25 | Holdout leakage through feedback or bundle assembly | 2 | 5 | 10 | Mitigations required |
+| CW-R26 | Security properties redistributed when execution left the process | 3 | 4 | 12 | Accepted with mitigations |
 
 ---
 
 ## Detailed Risk Entries
 
-### CW-R01: Subtle Logic Error in Safety-Critical Firmware
+### CW-R01: Subtle Logic Error in High-Tier Code
 
 **Description:** The LLM generates code with a subtle logic error (off-by-one, sign error, race condition, incorrect unit conversion) in a safety-critical module such as motor control, brake actuation, or slope stability calculation. The error passes compilation, unit tests, and LLM review, and is deployed to hardware.
 
@@ -55,7 +58,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 
 | ID | Mitigation | Type | Status |
 | ---- | ----------- | ------ | -------- |
-| CW-R01-M1 | Safety-critical modules require mandatory human review regardless of CogWorks review results (REQ-REVIEW-006, REQ-CLASS-002). No configuration option to bypass. | Preventive | Designed |
+| CW-R01-M1 | Safety-critical modules require mandatory human review regardless of CogWorks review results (REQ-ASSURE-002, REQ-TIER-001). No configuration option to bypass. | Preventive | Designed |
 | CW-R01-M2 | Maintain a catalogue of "LLM failure patterns" (sign errors, off-by-one, integer overflow at boundaries, unit confusion). Write specific scenarios targeting these patterns. Update catalogue from audit trail analysis. | Detective | Planned |
 | CW-R01-M3 | Implement property-based testing (proptest) for all safety-critical modules. Properties include: angle never exceeds physical limits, velocity never exceeds safe threshold, watchdog always triggers on comms loss, brake always engages on fault. | Detective | Planned |
 | CW-R01-M4 | Scenario validation with satisfaction threshold ≥ 0.99 for safety-critical modules (stricter than the default 0.95). Failure criteria violations are always blocking. | Detective | Planned |
@@ -105,7 +108,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 
 | ID | Mitigation | Type | Status |
 | ---- | ----------- | ------ | -------- |
-| CW-R03-M1 | Dedicated security review pass in the review gate (REQ-REVIEW-002) with a domain-specific security checklist covering: OTA authentication, CAN bus message authentication, bootloader integrity, panic paths in no-std, unbounded allocations, unsafe block justification. | Detective | Designed |
+| CW-R03-M1 | Dedicated security review pass in the review gate (REQ-ASSURE-001) with a domain-specific security checklist covering: OTA authentication, CAN bus message authentication, bootloader integrity, panic paths in no-std, unbounded allocations, unsafe block justification. | Detective | Designed |
 | CW-R03-M2 | Deterministic security scanning as part of the Rust domain service: `cargo audit` (dependency CVEs), `cargo clippy` security lints, `cargo-geiger` (unsafe code auditing). These run before LLM review. | Detective | Planned |
 | CW-R03-M3 | Generated code must never contain credentials, tokens, or secrets. The constitutional layer explicitly prohibits this. CI checks scan for high-entropy strings and known credential patterns. | Preventive | Planned |
 | CW-R03-M4 | Add a `security_scan` capability to the domain service interface for domain-specific static analysis tools beyond standard linting. | Detective | Future |
@@ -207,52 +210,6 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 
 ---
 
-### CW-R08: Digital Twin Diverges from Real System
-
-**Description:** A DTU twin is built against a specific version of an external system (hardware revision, firmware version, protocol specification). The real system changes (updated firmware, hardware ECO, protocol revision) and the twin is not updated. Scenarios pass against the stale twin but fail against the real system.
-
-**Likelihood:** 3 (Possible — systems change, twin maintenance is easy to neglect)
-
-**Impact:** 3 (Moderate — false confidence in validation results, bugs escape to physical testing or field)
-
-**Risk Score:** 9
-
-**Mitigations:**
-
-| ID | Mitigation | Type | Status |
-| ---- | ----------- | ------ | -------- |
-| CW-R08-M1 | Each twin has a conformance test suite that runs against the real system (REQ-DTU-004). Schedule monthly and on every hardware/firmware revision. | Detective | Planned |
-| CW-R08-M2 | Track twin conformance status. If conformance tests fail, mark the twin as stale. Scenario validation results from stale twins are flagged as unverified. | Detective | Planned |
-| CW-R08-M3 | Downstream gate systems check twin conformance status before accepting scenario validation results for production releases. | Preventive | Planned |
-| CW-R08-M4 | Twin specifications include the version of the real system they target. Version mismatch between twin spec and current system version triggers a warning. | Detective | Planned |
-
-**Residual Risk:** Low with regular conformance testing. The risk increases if conformance testing is neglected — hence the downstream gate enforcement (CW-R08-M3).
-
----
-
-### CW-R09: Digital Twin Insufficient Fidelity
-
-**Description:** A twin replicates the basic API or protocol behaviour but doesn't simulate important real-world characteristics: timing jitter, bus contention, error frames, partial failures, environmental effects. Code that works against the idealised twin fails under real-world conditions.
-
-**Likelihood:** 3 (Possible — there's always a fidelity trade-off in simulation)
-
-**Impact:** 3 (Moderate — bugs escape to physical testing, potential field failures)
-
-**Risk Score:** 9
-
-**Mitigations:**
-
-| ID | Mitigation | Type | Status |
-| ---- | ----------- | ------ | -------- |
-| CW-R09-M1 | Twin specifications document fidelity boundaries: what behaviours are replicated and what is simplified or omitted. | Preventive | Planned |
-| CW-R09-M2 | Scenarios are tagged with required fidelity level. Scenarios requiring higher fidelity than the available twin are flagged as requiring physical test validation. | Preventive | Planned |
-| CW-R09-M3 | Twins support failure injection (REQ-DTU-003) to test degraded-mode behaviour even when base fidelity is limited. | Detective | Planned |
-| CW-R09-M4 | Prioritise twin development for the dependencies with the most complex failure modes and highest safety impact. Don't twin everything. | Preventive | Planned |
-
-**Residual Risk:** Moderate. Simulation can never fully replace physical testing for safety-critical systems. Twins are a pre-filter, not a replacement.
-
----
-
 ### CW-R10: Uncontrolled LLM Cost on Stuck Pipeline
 
 **Description:** A code generation loop can't converge — the LLM keeps producing code that fails validation, burning tokens on every retry. The retry budget eventually halts the loop, but if the budget is too high or cost tracking has a bug, the bill is large.
@@ -293,10 +250,10 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 | ---- | ----------- | ------ | -------- |
 | CW-R11-M1 | CogWorks runs in an isolated environment with access only to: its GitHub token (minimum required scopes), LLM API key, and domain service sockets. No production database, manufacturing, or cloud service credentials. | Preventive | Planned |
 | CW-R11-M2 | GitHub token scoped to minimum permissions: repo contents read/write, issues read/write, pull requests read/write. No admin, no org-level access. | Preventive | Planned |
-| CW-R11-M3 | Domain service test execution runs in a network-restricted sandbox — no outbound network except to DTU twins on localhost. | Preventive | Planned |
+| CW-R11-M3 | A stage attempt runs with deny-by-default egress, reaching only the model gateway and a curated dependency proxy. | Preventive | Planned |
 | CW-R11-M4 | Container network policies enforce isolation. CogWorks container can reach: LLM API (outbound HTTPS), GitHub API (outbound HTTPS), domain service sockets (local). Nothing else. | Preventive | Planned |
 | CW-R11-M5 | Separate credential store for CogWorks with only CogWorks-relevant secrets. No shared credential store with production systems. | Preventive | Planned |
-| CW-R11-M6 | Tool profile scoping limits each pipeline node to the minimum set of tools it needs. Network access (`net.fetch`) is opt-in and requires explicit URL allowlists. Shell execution is restricted to pre-configured command allowlists. | Preventive | Designed |
+| CW-R11-M6 | The resolved profile's tool allowlist limits each stage to the minimum it needs, and the sandbox boundary enforces it. CogWorks holds no push credential and no model API key, so a compromise of this process cannot write code or call a provider directly. | Preventive | Designed |
 | CW-R11-M7 | OS-level sandboxing (Layer 3) for Code Generation constrains process-level filesystem and network access independently of tool-level enforcement. | Preventive | Designed |
 
 **Residual Risk:** Low with proper isolation. Requires discipline during deployment setup to not take shortcuts.
@@ -365,7 +322,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 
 | ID | Mitigation | Type | Status |
 | ---- | ----------- | ------ | -------- |
-| CW-R14-M1 | Safety-critical modules require human review (REQ-REVIEW-006). This forces engagement with the most important code. | Preventive | Designed |
+| CW-R14-M1 | Safety-critical modules require human review (REQ-ASSURE-002). This forces engagement with the most important code. | Preventive | Designed |
 | CW-R14-M2 | CogWorks-generated specifications and PR descriptions include rationale and design decisions, making the generated code's intent understandable. | Preventive | Designed |
 | CW-R14-M3 | Periodic human-driven refactoring work items (see CW-R04-M3). Refactoring requires understanding the code, maintaining comprehension. | Corrective | Planned |
 | CW-R14-M4 | Track which modules have not been human-reviewed in the last N months. Flag stale modules for human review. | Detective | Future |
@@ -420,9 +377,9 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 
 ---
 
-### CW-R17: LLM Provider API Change or Outage
+### CW-R17: Model Gateway Change or Outage
 
-**Description:** The LLM provider (Anthropic initially) changes their API (deprecates a model, changes response format, alters rate limits), or experiences an extended outage. CogWorks pipeline cannot function without LLM access.
+**Description:** The model gateway changes its contract or experiences an extended outage, or a provider behind it deprecates a model. No run can proceed without model access.
 
 **Likelihood:** 2 (Unlikely for breaking changes — providers usually give notice; 3 Possible for outages)
 
@@ -438,14 +395,14 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 | CW-R17-M2 | Pin model versions in configuration. Do not use "latest" model aliases. Test against specific model versions. | Preventive | Planned |
 | CW-R17-M3 | Multi-provider support planned (see tradeoffs.md). Adding a second provider (e.g., OpenAI) provides failover capability. | Preventive | Future |
 | CW-R17-M4 | Monitor provider status pages and API changelog. Proactively test against new API versions before migration. | Detective | Planned |
-| CW-R17-M5 | LLM rate limit handling with proactive throttling and reactive backoff (REQ-LLM-001). Prevents CogWorks from triggering provider-side blocks due to excessive request rates. | Preventive | Designed |
-| CW-R17-M6 | Halt threshold (REQ-LLM-003, default 30 min). If rate limiting persists, pipeline aborts cleanly rather than waiting indefinitely for provider recovery. | Preventive | Designed |
+| CW-R17-M5 | LLM rate limit handling with proactive throttling and reactive backoff (REQ-BOUND-007). Prevents CogWorks from triggering provider-side blocks due to excessive request rates. | Preventive | Designed |
+| CW-R17-M6 | Halt threshold (REQ-BOUND-007, default 30 min). If rate limiting persists, pipeline aborts cleanly rather than waiting indefinitely for provider recovery. | Preventive | Designed |
 
 **Residual Risk:** Low with single provider; very low with multi-provider failover. The abstraction trait ensures the migration path exists; implementing a second provider is the key remaining mitigation.
 
 ---
 
-### CW-R18: CogWorks Modifies Its Own Prompts or Scenarios
+### CW-R18: CogWorks Modifies Its Own Behavioural Configuration
 
 **Description:** A work item processed by CogWorks results in changes to files that govern CogWorks' own behaviour: prompt templates, scenario specifications, constitutional rules, the conformance test suite, or CogWorks' own source code. If these changes make generation or review more lenient, subsequent pipeline runs produce lower-quality output with less effective review — a self-reinforcing degradation loop.
 
@@ -472,7 +429,7 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 
 ### CW-R19: Graph Misconfiguration Causes Runaway Rework or Dead-End Pipeline
 
-**Description:** A misconfigured `.cogworks/pipeline.toml` results in a pipeline graph with an inadvertent cycle that evades the `max_traversals` limit, a dead-end node (no forward edge and not a terminal), or edge conditions that can never evaluate to true — causing CogWorks to spin, stall, or consume cost budget without making progress.
+**Description:** A stage graph in the harness contains an inadvertent cycle that evades the `max_traversals` limit, a dead-end node (no forward edge and not a terminal), or edge conditions that can never evaluate to true — causing a run to spin, stall, or consume cost budget without making progress.
 
 **Likelihood:** 3 (Possible — graph configuration is complex and teams may introduce subtle errors)
 
@@ -537,26 +494,145 @@ This document catalogs identified risks to CogWorks operations, their assessed l
 
 ---
 
+### CW-R22: Three Unbuilt Services Are Hard Dependencies at L1
+
+**Description:** The first dark slice depends on the stage runner, the gate service and the write-scope service. None exists yet. CogWorks cannot run a single stage without all three: no stage runner means no attempt, no gate service means no verdict and therefore no advancement, no write-scope service means no mount plan and therefore no attempt.
+
+This is a schedule and integration risk rather than a design flaw — the dependencies are the point of the architecture — but it means CogWorks' own progress is gated on three other repositories reaching a working state simultaneously.
+
+**Likelihood:** 4 (Likely — three services, built in parallel, with contracts still settling)
+
+**Impact:** 4 (Major — L1 cannot be demonstrated end to end, and integration problems surface late)
+
+**Risk Score:** 16
+
+**Mitigations:**
+
+| ID | Mitigation | Type | Status |
+| ---- | ----------- | ------ | -------- |
+| CW-R22-M1 | Every boundary is a trait with a test double that can simulate each failure mode. CogWorks' logic is fully testable before any of the three exists. | Preventive | Planned |
+| CW-R22-M2 | Contract-first: the attempt request shape, the check-run reading contract and the mount-plan contract are specified here before implementation, so the three services build against a written contract rather than a conversation. | Preventive | Planned |
+| CW-R22-M3 | Humans stand in for each missing service during bring-up, producing the same observable GitHub state a real service would. A human-produced attestation must verify the same way. | Corrective | Planned |
+| CW-R22-M4 | Integrate against one service at a time rather than waiting for all three, so interface mismatches surface individually. | Detective | Planned |
+
+**Residual Risk:** Moderate. Test doubles prove CogWorks behaves correctly against a contract, not that the contract matches what the three services will actually do. That gap closes only at integration.
+
+---
+
+### CW-R23: Harness Coupling and Cross-Service Version Skew
+
+**Description:** Everything that shapes an agent now resolves from the harness at a pinned version. That makes the harness a hard dependency on the critical path of every run, and introduces a compatibility surface: a harness version may define a stage type a given CogWorks build cannot drive, or a pinned graph may name a stage type a newer harness has dropped.
+
+**Likelihood:** 3 (Possible — two artefacts versioned independently, released on different cadences)
+
+**Impact:** 4 (Major — a skew can stop every run on every repository pinned to the affected version)
+
+**Risk Score:** 12
+
+**Mitigations:**
+
+| ID | Mitigation | Type | Status |
+| ---- | ----------- | ------ | -------- |
+| CW-R23-M1 | Load-time validation against the stage-type registry catches a skew before any stage dispatches, with an error naming the node and stage type (REQ-STAGE-002). | Detective | Planned |
+| CW-R23-M2 | Pin-gated adoption: a harness change reaches a repository only when its pin moves, so a bad harness version cannot roll out everywhere at once. | Preventive | Planned |
+| CW-R23-M3 | Canary rollout of a new harness version through a small set of repositories before wider pin moves. | Preventive | Planned |
+| CW-R23-M4 | The resolved version is fixed for a whole run, and graph-hash drift between invocations escalates rather than continuing. | Detective | Planned |
+| CW-R23-M5 | Harness unreachability is treated as retriable and distinguished in the audit trail from an unresolvable pin, so an outage does not look like a misconfiguration. | Corrective | Planned |
+
+**Residual Risk:** Moderate. Pin-gating bounds the blast radius to repositories that moved, but a repository pinned to a broken version is stopped until someone moves it back.
+
+---
+
+### CW-R24: Gate Service Is a Single Point of Workflow Failure
+
+**Description:** CogWorks reads every verdict from the gate service and computes none itself. If the gate service is down, no verdict appears, so no stage advances. The correct behaviour — waiting — is indistinguishable from a hang to anyone watching.
+
+**Likelihood:** 3 (Possible — any service has outages)
+
+**Impact:** 3 (Moderate — throughput stops, but nothing is corrupted and nothing is lost)
+
+**Risk Score:** 9
+
+**Mitigations:**
+
+| ID | Mitigation | Type | Status |
+| ---- | ----------- | ------ | -------- |
+| CW-R24-M1 | Waiting is explicit in the state machine: `StepResult::Waiting` carries why, so the condition is visible rather than inferred from inactivity. | Detective | Planned |
+| CW-R24-M2 | The waiting reason is surfaced to operators and distinguishable from a slow gate. | Detective | Planned |
+| CW-R24-M3 | Work is never lost: a run's position is reconstructable from GitHub, so runs resume when the gate recovers with no manual intervention. | Corrective | Planned |
+
+**Residual Risk:** Accepted. This is the deliberate cost of not self-certifying. A CogWorks that could compute its own verdict to keep working would be a CogWorks whose verdicts mean nothing.
+
+---
+
+### CW-R25: Holdout Leakage Through Feedback or Bundle Assembly
+
+**Description:** Holdout content reaches an implementation stage — through an allowlist entry resolving more broadly than intended, or through rework feedback carrying more detail than the requirement identities it is limited to. An implementation iterated against a holdout is overfitted to it while still appearing to have passed an independent check.
+
+**Likelihood:** 2 (Unlikely — several independent controls)
+
+**Impact:** 5 (Severe — the leak is silent, and every holdout result after it is worthless without anyone knowing)
+
+**Risk Score:** 10
+
+**Mitigations:**
+
+| ID | Mitigation | Type | Status |
+| ---- | ----------- | ------ | -------- |
+| CW-R25-M1 | Allowlist rather than denylist: holdouts are absent because nothing named them, not because something stripped them (REQ-BUNDLE-001). | Preventive | Planned |
+| CW-R25-M2 | Repository separation at the product tier: holdout content is not in the repository the attempt can read at all. | Preventive | Planned |
+| CW-R25-M3 | Feedback bounded to failing requirement identities, composed by the gate service rather than filtered by CogWorks (REQ-VERDICT-005). | Preventive | Planned |
+| CW-R25-M4 | The zone filter records every removal as a warning, so an over-broad allowlist is surfaced rather than silently compensated for. | Detective | Planned |
+| CW-R25-M5 | Bundle hashing makes what a stage saw provable after the fact. | Detective | Planned |
+
+**Residual Risk:** Low at the product tier where repository separation applies; moderate below it, where the guarantee rests on allowlist correctness. The detective controls matter most there, because the failure is otherwise invisible.
+
+---
+
+### CW-R26: Security Properties Redistributed When Execution Left the Process
+
+**Description:** Moving agent execution out of CogWorks changed the shape of three guarantees rather than strengthening or weakening them outright. The compile-time constitutional guarantee no longer covers agent turns. Tool-access control is no longer something CogWorks can enforce at all. The write boundary is now a mount plan another service authors.
+
+Each is replaced by a stronger runtime control — sandbox isolation, deny-by-default egress, an independent scope check — but the properties are now distributed across three repositories instead of provable in one.
+
+**Likelihood:** 3 (Possible — the risk is a reasoning failure, not a component failure)
+
+**Impact:** 4 (Major — someone could assume a guarantee still holds locally when it now depends on another service)
+
+**Risk Score:** 12
+
+**Mitigations:**
+
+| ID | Mitigation | Type | Status |
+| ---- | ----------- | ------ | -------- |
+| CW-R26-M1 | Written down explicitly: THREAT-023 records exactly what the compile-time guarantee now covers and what replaces it elsewhere. | Preventive | Complete |
+| CW-R26-M2 | The surviving guarantee is kept where it applies: deterministic helper calls in this process still cannot bypass constitutional assembly. | Preventive | Planned |
+| CW-R26-M3 | Defence in depth is specified as a requirement, not an aspiration: CogWorks must never be the only enforcement point for a write boundary (REQ-SANDBOX-003). | Preventive | Planned |
+| CW-R26-M4 | The verdict does not depend on agent compliance, so an agent that ignored its rules does not thereby get its work accepted. | Detective | Planned |
+
+**Residual Risk:** Accepted. The runtime controls are individually stronger than what they replaced; the cost is that no single repository's type system proves the whole property. Recording that plainly is the mitigation.
+
+---
+
 ## Cross-Reference to Spec
 
 The following spec documents contain mitigations or design decisions informed by entries in this risk register:
 
 | Risk | Primary Spec Reference |
 | ------ | ---------------------- |
-| CW-R01 | constraints.md (testing), requirements.md (REQ-REVIEW-006, REQ-CLASS-002, REQ-CONST) |
+| CW-R01 | constraints.md (testing), requirements.md (REQ-ASSURE-002, REQ-TIER-001, REQ-CONST) |
 | CW-R02 | constraints.md (security), requirements.md (REQ-CONST, REQ-ALIGN-001, REQ-ALIGN-004), assertions.md (ASSERT-ALIGN-012) |
-| CW-R03 | security.md (THREAT-001, THREAT-002, THREAT-014), requirements.md (REQ-REVIEW-002) |
+| CW-R03 | security.md (THREAT-001, THREAT-002, THREAT-014), requirements.md (REQ-ASSURE-001) |
 | CW-R05 | vocabulary.md (Processing Lock), operations.md (runbook) |
 | CW-R06 | edge-cases.md (EDGE-043, EDGE-044), testing.md (conformance tests) |
 | CW-R07 | architecture.md (Cross-Domain Constraint Validation), requirements.md (REQ-XVAL) |
-| CW-R08–09 | vocabulary.md (Digital Twin), operations.md (twin maintenance) |
 | CW-R10 | requirements.md (REQ-CODE-004, REQ-CODE-006), operations.md (cost management, semantic stalling runbook) |
 | CW-R11 | security.md (THREAT-003, THREAT-004, THREAT-019), constraints.md (security, tool scoping) |
 | CW-R12 | security.md (THREAT-001, THREAT-015, THREAT-019), requirements.md (REQ-CONST, REQ-ENFORCE) |
 | CW-R13 | requirements.md (REQ-AUDIT), operations.md (audit trail) |
 | CW-R15 | constraints.md (pyramid summary accuracy), vocabulary.md (Pyramid Summary Levels) |
-| CW-R18 | requirements.md (REQ-CONST, REQ-TOOL-011, REQ-ENFORCE), security.md (THREAT-015, THREAT-017, THREAT-019) |
-| CW-R17 | requirements.md (REQ-LLM-001 through REQ-LLM-004), security.md (THREAT-021), operations.md (LLM rate limit runbook) |
+| CW-R18 | requirements.md (REQ-CONST, REQ-SANDBOX-003, REQ-ENFORCE), security.md (THREAT-015, THREAT-017, THREAT-019) |
+| CW-R17 | requirements.md (REQ-BOUND-007 through REQ-BOUND-007), security.md (THREAT-021), operations.md (LLM rate limit runbook) |
 | CW-R19 | edge-cases.md (EDGE-006a, EDGE-006b, EDGE-057, EDGE-058, EDGE-064), constraints.md (Pipeline Graph), assertions.md (ASSERT-GRAPH-004, ASSERT-GRAPH-005, ASSERT-GRAPH-006, ASSERT-GRAPH-014), security.md (THREAT-018) |
 | CW-R20 | constraints.md (Observability), assertions.md (ASSERT-OBS-001 through ASSERT-OBS-003), operations.md (Tracing and external analysis views) |
 | CW-R21 | operations.md (Review Cadence, Improvement Loop) |

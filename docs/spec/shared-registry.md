@@ -3,8 +3,9 @@
 This registry catalogs every reusable type, trait, and pattern in the CogWorks
 workspace. It is updated incrementally as each PR adds new definitions.
 
-**Coders**: before creating a new type, check here to avoid duplication.
-**Reviewers**: verify that new types are registered here before approving.
+Every reusable type, trait and pattern is registered here. A new type that
+duplicates one already listed is a defect, and a new type absent from this
+registry is undocumented.
 
 ---
 
@@ -20,20 +21,24 @@ Spec: `docs/spec/interfaces/shared-types.md` §Identifiers.
 | `MilestoneId` | `u64` | GitHub Milestone number |
 | `PullRequestId` | `u64` | GitHub PR number |
 | `PipelineRunId` | `Uuid` | Generated per CLI invocation |
-| `NodeId` | `String` | Pipeline node name |
-| `EdgeId` | `String` | Pipeline edge name |
-| `PipelineName` | `String` | Named pipeline configuration |
+| `NodeId` | `String` | Node name within a resolved stage graph |
+| `EdgeId` | `String` | Edge name within a resolved stage graph |
+| `StageTypeId` | `String` | Stage type a node declares, drawn from the harness registry |
+| `ProfileId` | `String` | Agent profile resolved for a stage |
+| `HarnessVersion` | `String` | Harness version resolved from `.factory/pin.yaml` |
+| `DisciplineId` | `String` | Discipline pack selected for the work |
+| `SliceId` | `String` | Slice within an approved `plan.yaml` |
+| `IdentityRole` | `String` | Role a stage attempt's commits are pushed under |
+| `BundleHash` | `String` | 64-char hex SHA-256 of an assembled context bundle |
+| `CheckRunId` | `u64` | GitHub check run carrying a gate verdict (read-only) |
 | `BranchName` | `String` | Git branch name |
 | `CommitSha` | `String` | 40-char hex git commit SHA |
 | `GitObjectSha` | `String` | Git object SHA (blob or tree) as returned by the GitHub Contents API. Not a commit SHA. |
 | `RepositoryId` | `String` | `"owner/repo"` format |
-| `DomainServiceName` | `String` | Key in `.cogworks/services.toml` |
+| `DomainServiceName` | `String` | Key in CogWorks' own process configuration |
 | `ArtifactPath` | `String` | Repo-relative file path |
 | `InterfaceId` | `String` | Interface contract ID |
 | `ContextPackId` | `String` | Context Pack directory name |
-| `SkillName` | `String` | Skill identifier |
-| `ToolName` | `String` | Tool identifier |
-| `ProfileName` | `String` | Tool profile identifier |
 
 ---
 
@@ -47,7 +52,6 @@ Spec: `docs/spec/interfaces/shared-types.md` §Value Types.
 | `TokenCount` | LLM token count (non-negative integer) |
 | `TokenCost` | LLM call cost in USD (`f64`) |
 | `CostBudget` | Maximum allowed cost cap (`f64`) |
-| `SatisfactionScore` | Scenario satisfaction score in `[0.0, 1.0]` |
 | `AlignmentScore` | Alignment verification score in `[0.0, 1.0]` |
 | `DiagnosticSeverity` | `Blocking` / `Warning` / `Informational` |
 | `DiagnosticCategory` | Category tag string (open set) |
@@ -83,7 +87,6 @@ Spec: `docs/spec/interfaces/pipeline-graph.md`.
 | Type | Purpose |
 |------|---------|
 | `Expression` | Newtype — deterministic boolean predicate string |
-| `NaturalLanguageCondition` | Newtype — LLM-evaluated condition description string |
 | `TimeoutSeconds` | Newtype — serialisable timeout (wraps `u64` seconds) |
 | `SchemaVersion` | Newtype — serde-enforced version token for `PipelineStateComment`; rejects unknown values at deserialisation |
 
@@ -91,13 +94,11 @@ Spec: `docs/spec/interfaces/pipeline-graph.md`.
 
 | Type | Purpose |
 |------|---------|
-| `NodeType` | `Llm` / `Deterministic` / `Spawning` |
 | `NodeGate` | `AutoProceed` / `HumanGated` |
-| `ValidationKind` | `None` / `DomainService` / `Scenario` |
 | `EvaluationMode` | `AllMatching` / `FirstMatching` / `Explicit` |
 | `ReworkSemantics` | `Retry` / `Rework` |
 | `OverflowBehaviour` | `HaltWithError` / `Escalate` / `TakeEdge(EdgeId)` |
-| `EdgeConditionKind` | `Deterministic(Expression)` / `LlmEvaluated` / `Composite` |
+| `EdgeConditionKind` | `Always` / `Expression(Expression)` / `Composite` — no model-evaluated variant |
 | `CompositeCondition` | `And` / `Or` / `Not` combinator |
 
 **Graph structure structs**
@@ -109,8 +110,6 @@ Spec: `docs/spec/interfaces/pipeline-graph.md`.
 | `EdgeDefinition` | Static edge declaration (source, target, condition, rework metadata) |
 | `PipelineSettings` | Pipeline-level execution defaults |
 | `PipelineGraph` | Validated graph (nodes + edges + eval modes + explicit-edge lists + settings + tool_profiles) |
-| `PipelineToolProfileConfig` | Tool-profile overrides per node (scoped to one pipeline) |
-| `PipelineConfiguration` | Full `.cogworks/pipeline.toml` contents; each pipeline carries its own tool_profiles |
 
 **Runtime state enums**
 
@@ -201,7 +200,6 @@ Spec: `docs/spec/interfaces/github-traits.md`.
 | `IssueTracker` | `GithubClient` | Issue / sub-issue / label / comment / milestone operations |
 | `PullRequestManager` | `GithubClient` | PR lifecycle and review operations |
 | `CodeRepository` | `GithubClient` | Read-only file and tree access |
-| `ProjectBoard` | `GithubClient` | Projects V2 status/field sync (non-blocking) |
 
 **Template types** (`templates.rs`)
 
@@ -237,21 +235,14 @@ Spec: `docs/spec/interfaces/domain-traits.md` §Domain Service Traits.
 |------|---------|
 | `Diagnostics` | Collection of `Diagnostic` items; has `has_blocking() -> bool` helper |
 | `NormaliseResult` | Files modified + diagnostics from a normalisation pass |
-| `SimulationResults` | Scenario execution counts + diagnostics + opaque detail payload |
+| `SimulationResults` | Executed and passed counts + diagnostics + opaque detail payload |
 | `DependencyResult` | Dependency satisfaction flag + missing dep list + diagnostics |
 | `InterfaceMap` | List of `InterfaceDefinition` entries extracted from artifacts |
 | `DependencyGraph` | Directed graph: `nodes: Vec<String>`, `edges: Vec<(String, String)>` |
 | `HealthStatus` | `Healthy` / `Degraded { message }` / `Unhealthy { message }` |
 | `InterfaceDefinition` | Interface contract: id, domain, JSON schema, artifact types, version |
 | `ValidationResult` | Schema validation outcome: `valid: bool` + `diagnostics: Diagnostics` |
-| `Scenario` | Acceptance scenario: id, description, input/holdout artifacts, criteria |
-| `TrajectoryResult` | Single scenario execution outcome: passed, score, diagnostics |
 | `AcceptanceCriteria` | Min score threshold + required/prohibited behaviour lists |
-| `SatisfactionDetermination` | `Satisfied { score }` / `NotSatisfied { score, failing_criteria }` |
-| `TwinHandle` | Opaque handle to a running digital twin: `id: String`, `service: DomainServiceName` |
-| `TwinSpec` | Twin launch specification: `service`, opaque `config: serde_json::Value` |
-| `FailureProfile` | List of `FailureInjection` directives |
-| `FailureInjection` | Single fault injection: operation, `failure_rate: f32`, error message |
 | `HandshakeResult` | Extension API handshake response: domain, api_version, capabilities, artifact/interface types |
 
 **Error types**
@@ -260,8 +251,6 @@ Spec: `docs/spec/interfaces/domain-traits.md` §Domain Service Traits.
 |------|---------|
 | `DomainServiceError` | `ConnectionFailed` / `RequestFailed` / `ProtocolError` / `HandshakeFailed` / `ServiceUnavailable` |
 | `RegistryError` | `LoadFailed` / `SchemaInvalid` / `NotFound` |
-| `ScenarioError` | `LoadFailed` / `ExecutionFailed` |
-| `TwinError` | `StartFailed` / `StopFailed` / `ConfigurationFailed` / `NotRunning` |
 
 **Port traits**
 
@@ -269,8 +258,6 @@ Spec: `docs/spec/interfaces/domain-traits.md` §Domain Service Traits.
 |-------|---------------|---------|
 | `DomainServiceClient` | `ExtensionApiClient` | All domain service operations via Extension API |
 | `InterfaceRegistryLoader` | Config adapter (wired in `cli`) | Human-authored interface registry |
-| `ScenarioExecutor` | Wired in `cli` | Scenario load + trajectory execution + acceptance evaluation |
-| `TwinProvisioner` | `ExtensionApiClient` | Digital twin lifecycle management |
 
 ### Knowledge & Configuration (`pipeline/src/knowledge.rs`)
 
@@ -281,14 +268,7 @@ Spec: `docs/spec/interfaces/domain-traits.md` §Knowledge & Configuration Traits
 
 | Type | Purpose |
 |------|---------|
-| `SummaryLevel` | `OneLine(0)` / `Paragraph(1)` / `FullInterface(2)` / `Source(3)` — pyramid granularity |
-| `PyramidSummary` | Cached artifact summary: path, level, content, commit SHA, token count |
 | `ScopeParameters` | Artifact scope constraints: max file/new-file counts, allowed/prohibited glob patterns |
-| `ToolProfile` | Per-node tool & skill availability: name, node_id, allowed tools/skills, scope |
-| `ToolOverrides` | Node-specific overlay: additional/removed tools, optional scope overrides |
-| `SpecInfo` | Adapter spec metadata: title, version, description, service name |
-| `OperationSpec` | Single Extension API operation: name, description, input/output JSON schemas |
-| `ApiSpec` | Full adapter spec: service name, `SpecInfo`, list of `OperationSpec` |
 
 **Error types**
 
@@ -303,10 +283,6 @@ Spec: `docs/spec/interfaces/domain-traits.md` §Knowledge & Configuration Traits
 
 | Trait | Implemented by | Purpose |
 |-------|---------------|---------|
-| `SummaryCache` | GitHub comment cache (wired in `cli`) | Read/stale-check/invalidate artifact summaries |
-| `PipelineConfigurationLoader` | TOML reader (wired in `cli`) | Load + access `.cogworks/pipeline.toml` |
-| `ToolProfileStore` | TOML reader (wired in `cli`) | Per-node tool/skill profile resolution |
-| `AdapterSpecLoader` | JSON file reader (wired in `cli`) | Extension API adapter spec access |
 
 ### LLM Provider (`pipeline/src/tools.rs`)
 
@@ -333,7 +309,7 @@ Spec: `docs/spec/interfaces/domain-traits.md` §LLM Provider Trait.
 
 | Trait | Implemented by | Purpose |
 |-------|---------------|---------|
-| `LlmProvider` | `AnthropicProvider` (llm crate) | Raw LLM completion API |
+| `LlmProvider` | `ModelGatewayProvider` (llm crate) | Model gateway endpoint; holds no credential |
 
 ### Security (`pipeline/src/security.rs`)
 
@@ -402,7 +378,6 @@ Spec: `docs/spec/interfaces/context.md`.
 |------|---------|
 | `ContextPriority` | `CurrentInterfaceDefinition(0)` → `TransitiveDependency(5)`; `Ord` by declaration order |
 | `ContextItem` | One knowledge unit: content, summary_level, priority, token_count, source_path |
-| `ContextPackage` | Assembled context: ordered items, total_token_count, truncation_applied |
 
 **Context pack types** (`context.rs`)
 
@@ -417,7 +392,7 @@ Spec: `docs/spec/interfaces/context.md`.
 
 | Type | Purpose |
 |------|---------|
-| `ContextAssemblyRequest` | Assembly inputs: `node_type`, `sub_work_item_description`, `affected_modules`, `scenario_holdout_dirs`, `pipeline_working_dir` |
+| `ContextAssemblyRequest` | Assembly inputs: `stage_type`, `stage_contract`, `slice_description`, `affected_modules`, `zone_barrier_paths` |
 
 **Context assembly pure/async functions** (`context.rs`)
 
@@ -425,9 +400,9 @@ Spec: `docs/spec/interfaces/context.md`.
 |----------|---------|
 | `select_context_packs` | `(&ClassificationResult, &[ContextPack]) → Vec<ContextPackId>` — infallible |
 | `merge_pack_guidance` | `(&[ContextPack]) → MergedGuidance` — infallible |
-| `assemble_context` | `async (&ContextAssemblyRequest, &dyn SummaryCache, &LoadedContextPacks, &[InterfaceDefinition], TokenCount) → ContextPackage` |
+| `assemble_bundle` | `async (&ContextAssemblyRequest, &LoadedContextPacks, &[InterfaceDefinition], TokenCount) → ContextBundle` |
 | `apply_priority_truncation` | `(Vec<ContextItem>, TokenCount) → ContextPackage` — infallible |
-| `enforce_scenario_holdout` | `(Vec<ContextItem>, &[PathBuf]) → Vec<ContextItem>` — infallible, hard holdout constraint |
+| `enforce_trust_zone` | `(Vec<ContextItem>, TrustZone) → ZoneFilteredItems` — infallible; defence in depth behind the allowlist |
 
 **Pipeline labels** (`labels.rs`)
 
@@ -439,6 +414,45 @@ Spec: `docs/spec/interfaces/context.md`.
 |----------|---------|
 | `parse_label` | `(&str) → Option<PipelineLabel>` — returns `None` for non-CogWorks labels |
 | `generate_label` | `(&PipelineLabel) → String` — round-trip guaranteed with `parse_label` |
+
+### Harness and Factory Boundaries (`pipeline/src/harness.rs`)
+
+Spec: `docs/spec/interfaces/domain-traits.md`, `docs/spec/interfaces/github-traits.md`.
+
+| Type | Kind | Notes |
+|------|------|-------|
+| `HarnessPin` | struct | The pin read from `.factory/pin.yaml` |
+| `ResolvedHarness` | struct | A verified harness at one specific version; stable for a whole run |
+| `HarnessPinProvenance` | struct | Asserts resolved content matches what the pin names |
+| `StageTypeRegistry` | struct | Stage types a harness version defines; the validation source at graph load |
+| `StageContract` | struct | Input allowlist, output schema, writable paths, network profile, budget, attempt and rework limits, identity role |
+| `ProfileRef` | struct | The resolved profile and the harness version it came from |
+| `Tier` | enum | `T0`–`T3`, ordered so a maximum is well defined and raise-only is enforceable |
+| `RiskMap` | struct | Path globs to tiers, read from the target repository, human-owned |
+| `TrustZone` | enum | Design, Oracle, Build, Review — determines bundle barriers and identity role |
+| `ContextBundle` | struct | Allowlisted, hashed inputs for one stage attempt |
+| `ZoneFilteredItems` | struct | Items retained and removed by the zone barrier, with the barrier that removed each |
+| `MountPlan` | struct | Writable paths for one attempt, obtained from the write-scope service |
+| `AttemptRequest` | struct | Image, bundle, mount plan, network profile, limits, identity role, branch |
+| `AttemptHandle` | struct | Handle to an in-flight attempt; completion is observed in GitHub, not here |
+| `CheckRun` | struct | A check run with its authoring App identity, conclusion and structured output |
+| `CheckConclusion` | enum | `conclusion: None` means in progress, which is distinct from any conclusion |
+| `GateOutput` | struct | Machine-readable gate detail; for a holdout, only failing requirement IDs |
+| `VerdictState` | enum | Passing, failing, pending, absent |
+| `FailureClass` | enum | Classified attempt failure, compared across attempts for early escalation |
+| `AttemptDisposition` | enum | Retry, Rework, Escalate, Halt — the bounded-loop decision |
+| `ReworkFeedback` | struct | Structured guidance for the next attempt; never test source |
+| `StageAttestation` | struct | Stage type, profile, harness version, bundle hash, identity role, verdicts read |
+| `SignedComment` | struct | An attestation payload with its detached signature, transported as a hidden comment |
+| `HarnessLoader` | trait | Resolves the harness and reads everything agent-shaping from it. Read-only |
+| `StageRunner` | trait | Runs one attempt in a fresh sandbox. The only path by which execution leaves this process |
+| `CheckRunReader` | trait | Reads gate verdicts. The only path by which a verdict enters this process. Read-only |
+| `MountPlanProvider` | trait | Obtains the mount plan bounding an attempt's writes |
+| `RiskMapLoader` | trait | Reads `risk-map.yaml`. Read-only |
+
+Three of these traits have **no write counterpart, deliberately**: `HarnessLoader`,
+`CheckRunReader` and `RiskMapLoader`. Adding a write method to any of them would breach a
+boundary rule in `docs/spec/architecture.md`.
 
 ### Execution Core (`pipeline/src/execution.rs`, `budget.rs`, `classification.rs`, `review.rs`, `interfaces.rs`)
 
@@ -487,22 +501,19 @@ Spec: `docs/spec/interfaces/pipeline-execution.md`.
 
 | Type | Purpose |
 |------|---------|
-| `SafetyCriticalRegistry` | Glob patterns identifying safety-critical module paths |
 | `EscalationResult` | `estimated_scope: u32`, `threshold: u32`; `description() → String` |
 
 | Function | Signature summary |
 |----------|---------|
-| `apply_safety_override` | `(ClassificationResult, &SafetyCriticalRegistry) → ClassificationResult` |
+| `derive_tier` | `(&RiskMap, &[ArtifactPath], Option<Tier>) → Tier` — maximum over paths, raise-only |
 | `check_scope_threshold` | `(ClassificationResult, u32) → Result<ClassificationResult, EscalationResult>` |
 
 **Review aggregation** (`review.rs`)
 
 | Type | Purpose |
 |------|---------|
-| `ReviewPass` | `Quality` / `Architecture` / `Security` |
 | `ReviewFinding` | Single finding: `pass`, `severity: DiagnosticSeverity`, `description`, `location: Option<ArtifactPath>` |
 | `ReviewResult` | Pass result: `pass`, `findings`; helpers `has_blocking()`, `blocking_findings()` |
-| `AggregateReviewDecision` | `Proceed` / `Remediate(Vec<ReviewFinding>)` / `Escalate(EscalationReason)` |
 
 | Function | Signature summary |
 |----------|---------|
@@ -518,17 +529,11 @@ Spec: `docs/spec/interfaces/pipeline-execution.md`.
 |----------|---------|
 | `validate_cross_domain_constraints` | `(&[InterfaceDefinition], &InterfaceMap) → Vec<ConstraintFinding>` |
 
-### Advanced Features
-
-| Type | Purpose |
-|------|---------|
-| *(to be added)* | `AlignmentResult`, `TraceabilityMatrix`, `SkillManifest`, `CompactToolIndex`, etc. |
-
 ### Nodes (`nodes/src/`)
 
 | Type | Purpose |
 |------|---------|
-| `PipelineConfig` | Resolved per-run config passed to node `execute` functions: `graph`, `run_id`, `safety_registry: SafetyCriticalRegistry`, `scope_threshold: u32`, `constitutional_rules: ConstitutionalRules` |
+| `PipelineConfig` | Resolved per-run config passed to stage drivers: `harness_version`, `graph`, `graph_hash`, `stage_registry`, `run_id`, `tier`, `discipline`, `risk_map`, `scope_threshold`, `constitutional_rules` |
 | `IntakeNode` | First pipeline node: fetch issue → injection scan (title + body) → LLM classify → safety override → scope check → extract requirements → initial `TraceabilityMatrix` |
 | *(to be added)* | `NodeInput`, `NodeOutput`, `LlmGateway`, `PipelineExecutor`, `StepResult`, etc. |
 
@@ -540,14 +545,13 @@ Stubs introduced in PRs 3–4; full method bodies added in PR 10.
 
 | Crate | Type | Implements | Added in |
 |-------|------|-----------|----------|
-| `github` | `GithubClient` | `IssueTracker`, `PullRequestManager`, `CodeRepository`, `ProjectBoard`, `AuditStore` | PR 3 |
 | `listener` | `GitHubWebhookEventSource` | `EventSource` | PR 3 |
 | `listener` | `QueueEventSource` | `EventSource` | PR 3 |
 | `extension-api` | `ExtensionApiClient` | `DomainServiceClient` | PR 4 |
 | `extension-api` | `ServiceTransportConfig` | — | PR 4 |
 | `extension-api` | `TransportKind` | — | PR 4 |
-| `llm` | `AnthropicProvider` | `LlmProvider` | PR 4 |
-| `llm` | `AnthropicConfig` | — | PR 4 |
+| `llm` | `ModelGatewayProvider` | `LlmProvider` | — |
+| `llm` | `ModelGatewayConfig` | — | — |
 
 ---
 

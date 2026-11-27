@@ -36,23 +36,17 @@ This document catalogs non-standard flows and failure scenarios that the system 
 **Expected behavior**: If the pipeline is already running, the orchestrator backs off or queues the duplicate according to configuration. If it is complete, it takes no action unless an explicit restart is requested through the configured work-item interface. Re-triggering a failed pipeline resumes from the failed node using persisted state (REQ-PIPE-009). Provider-specific labels, project statuses, and webhook mappings are selected by the adapter.
 **Key requirement**: Idempotent trigger handling.
 
-### EDGE-006: Configuration File Missing or Invalid
+### EDGE-006: Process Configuration Missing or Invalid
 
-**Scenario**: The `.cogworks/config.toml` file doesn't exist, is malformed, or contains invalid values.
-**Expected behavior**: The system posts an error comment on the work item identifying the configuration problem and halts. No pipeline nodes execute with invalid or missing configuration.
-**Key requirement**: Fail fast on invalid configuration. Do not use implicit defaults when the configuration file is expected but missing.
+**Scenario**: CogWorks' own process configuration — the endpoints it talks to, its label mappings, its concurrency limits — is absent, malformed, or contains invalid values.
+**Expected behavior**: The process fails to start, with an error identifying the configuration problem. No run begins. This is an operator-facing failure at startup, not a per-work-item failure: the configuration describes the host, so it cannot be wrong for one work item and right for another.
+**Key requirement**: Fail fast at startup. Do not use implicit defaults for an endpoint or an identity that was expected but missing.
 
-### EDGE-006a: Pipeline Configuration File Invalid
+### EDGE-006a: Resolved Stage Graph Invalid
 
-**Scenario**: The `.cogworks/pipeline.toml` file exists but contains a cycle without a termination condition, has orphan nodes, or uses invalid TOML syntax.
-**Expected behavior**: Pipeline configuration validation fails at load time. The system posts an error comment identifying the specific graph validation error and halts. The default pipeline is NOT used as a fallback for malformed configuration (only for missing configuration).
-**Key requirement**: Fail fast on invalid pipeline configuration. Missing configuration falls back to default; malformed configuration is an error.
-
-### EDGE-006b: Pipeline Configuration References Unknown Named Pipeline
-
-**Scenario**: The Intake node classifies a work item and selects a pipeline name that is not defined in `.cogworks/pipeline.toml`.
-**Expected behavior**: The system posts an error comment identifying the requested pipeline name and the available pipeline names, and halts.
-**Key requirement**: Pipeline selection errors are non-retryable.
+**Scenario**: The graph resolved from the harness for the run's `(tier, discipline)` pair contains a cycle without a termination condition, has orphan nodes, or has an edge whose target does not exist.
+**Expected behavior**: Graph validation fails at load. An error comment identifies the specific validation failure and the run halts. No graph is substituted — a harness that ships an invalid graph is a harness problem, and silently using a different one would hide it.
+**Key requirement**: Validate the resolved graph before any stage is dispatched, and never fall back.
 
 ---
 
@@ -160,7 +154,7 @@ This document catalogs non-standard flows and failure scenarios that the system 
 
 ### EDGE-020: LLM API Returns 500 or Timeout
 
-**Scenario**: The Anthropic API returns a server error or times out.
+**Scenario**: The model gateway returns a server error or times out.
 **Expected behavior**: Retry with exponential backoff (up to a configurable maximum). If retries are exhausted, fail the current step and exit with a retriable exit code.
 **Key requirement**: Transient API errors are retried; persistent errors cause the step to fail gracefully.
 
@@ -212,79 +206,11 @@ This document catalogs non-standard flows and failure scenarios that the system 
 
 ---
 
-## Scenario Validation Edge Cases
-
-### EDGE-026: Scenario Specification Accidentally Included in Context
-
-**Scenario**: Due to a configuration error, a scenario file is not properly excluded from the context assembly.
-**Expected behavior**: The scenario holdout enforcement constraint (constraints.md) prevents this. If it somehow occurs, the scenario validation results will be unreliable (overfitting). Detection: audit trail review should reveal scenario filenames in context packages. Prevention: explicit exclusion list in configuration, verified at system startup.
-**Key requirement**: Scenario holdout is enforced, not advisory.
-
-### EDGE-027: Non-Deterministic Scenario Trajectories Span Threshold
-
-**Scenario**: A scenario's satisfaction score fluctuates around the threshold (e.g., 0.94, 0.96, 0.93) across pipeline runs due to non-deterministic behavior in the implementation or test environment.
-**Expected behavior**: This indicates genuine non-determinism that should be addressed. The system does not "average across runs"—each pipeline run computes its own satisfaction score. If the score fails, remediation occurs. If the non-determinism is acceptable, the threshold should be lowered or the scenario should be made more tolerant.
-**Key requirement**: Each pipeline run is independent; no cross-run state.
-
-### EDGE-028: Digital Twin Fails to Start
-
-**Scenario**: A required Digital Twin cannot be started (e.g., port already in use, twin binary missing, or crashes on startup).
-**Expected behavior**: Scenario validation fails with a clear error identifying which twin failed and why. If the twin binary is missing, the error should suggest filing a work item to build the twin. If a port conflict exists, the error should include the conflicting port.
-**Key requirement**: Infrastructure failures in scenario validation produce actionable diagnostics.
-
-### EDGE-029: Digital Twin Behavior Diverges from Real Service
-
-**Scenario**: A twin's conformance tests pass against the twin but fail against the real service, indicating the twin has diverged.
-**Expected behavior**: This is detected externally (periodic conformance runs against the real service). When detected, a work item should be filed to update the twin. Scenarios that depend on the diverged twin may produce incorrect validation results until the twin is fixed.
-**Key requirement**: Twin conformance monitoring is separate from pipeline execution.
-
-### EDGE-030: LLM-as-Judge Disagrees with Human Reviewer
-
-**Scenario**: Scenario acceptance criteria evaluated via LLM-as-judge produce a different result than a human evaluating the same trajectory.
-**Expected behavior**: The LLM-as-judge is probabilistic and may disagree with humans. If this occurs frequently, the acceptance criteria should be revised to be more objective, or a deterministic assertion should replace LLM-as-judge. The judge model must be different from the code generation model to reduce bias.
-**Key requirement**: LLM-as-judge is a tool, not ground truth.
-
-### EDGE-031: All Trajectories Fail Due to Environment Issue
-
-**Scenario**: All trajectories for a scenario fail due to an environment configuration problem (e.g., twin misconfigured, insufficient memory, network issue), not due to generated code defects.
-**Expected behavior**: Satisfaction score is 0.0, triggering remediation. However, feeding the same error back to the code generator won't help—it's not a code issue. Detection: if all trajectories fail identically, this suggests an environment problem. The system should escalate with a note that all trajectories failed (potential infrastructure issue).
-**Key requirement**: Distinguish code failures from infrastructure failures where possible.
-
----
-
-## Pyramid Summary Edge Cases
-
-### EDGE-032: Stale Summary Used for Context Assembly
-
-**Scenario**: A module's source code changes but its cached summary is not regenerated, and the stale summary is used for context assembly.
-**Expected behavior**: The staleness check (file hash comparison) must detect this and either regenerate on-the-fly or fall back to including the full file. Using a stale summary is a constraint violation.
-**Key requirement**: Staleness detection is mandatory before using any cached summary.
-
-### EDGE-033: Summary Generation for Non-Code Files
-
-**Scenario**: A file in the affected area is not source code (e.g., a Markdown doc, a config file).
-**Expected behavior**: Level 1/2 summaries are generated only for artifacts with extractable interfaces (via domain service). Non-code files are either included in full (if small and relevant) or excluded. The system should not attempt to generate "interface summaries" for non-interfaceable files.
-**Key requirement**: Summary generation is domain-specific (delegated to domain service's `extract_interfaces`).
-
-### EDGE-034: Summary Cache Storage Limits
-
-**Scenario**: The summary cache grows very large (thousands of modules, tens of MB).
-**Expected behavior**: This is acceptable—summaries are small compared to source code. If storage becomes a concern, summaries for rarely-accessed modules can be evicted (LRU). Regeneration is cheap (batch LLM job).
-**Key requirement**: Summary cache is not a performance bottleneck.
-
-### EDGE-035: Progressive Demotion Still Exceeds Budget
-
-**Scenario**: Even after demoting all distant modules to Level 1, the context package still exceeds the model's window.
-**Expected behavior**: Begin excluding Level 1 summaries for the most distant modules (those far from affected area in the dependency graph). If even this is insufficient, escalate with a "context too large" error.
-**Key requirement**: Truncation strategy has a final exclusion step after all demotions.
-
----
-
 ## Interface Registry Edge Cases
 
 ### EDGE-036: Interface Registry Directory Missing
 
-**Scenario**: The configuration references `.cogworks/interfaces/` but the directory doesn't exist or is empty.
+**Scenario**: The configuration references the interface registry directory in the repository's specification paths, but the directory doesn't exist or is empty.
 **Expected behavior**: If the directory doesn't exist and no cross-domain interfaces are expected, this is not an error — the registry is simply empty. If the directory exists but contains no valid interface files, validation passes (empty registry is valid). The system logs an informational message.
 **Key requirement**: Empty registry is a valid state.
 
@@ -372,23 +298,23 @@ This document catalogs non-standard flows and failure scenarios that the system 
 **Expected behavior**: Pipeline proceeds with no packs loaded. Context assembly uses only the standard context sources (ADRs, standards, coding conventions). This is the common case for general-purpose or new-domain work items. An informational log entry notes that no packs were loaded.
 **Key requirement**: Zero loaded packs is a valid state. It is not an error.
 
-### EDGE-049: Context Pack Directory Does Not Exist
+### EDGE-049: No Context Packs Match a Stage
 
-**Scenario**: The configuration references `.cogworks/context-packs/` but the directory doesn't exist or is empty.
-**Expected behavior**: Pack loading completes with zero packs loaded. This is not an error — the pack system is optional per repository. The pipeline proceeds with standard context sources.
-**Key requirement**: Absent or empty pack directory is a valid state (mirrors the empty interface registry behavior).
+**Scenario**: The resolved harness contains Context Packs, but none of their triggers match the stage's tier, discipline, stage type and toolchain.
+**Expected behavior**: Bundle assembly completes with zero packs loaded. This is not an error — a stage may legitimately need no domain guidance. The attempt proceeds with the rest of its allowlisted inputs.
+**Key requirement**: No matching pack is a valid state. This is distinct from a pack that matched but could not be read, which is a harness resolution error and halts.
 
-### EDGE-050: Context Packs with Contradictory Required Artefacts
+### EDGE-050: Context Packs with Contradictory Guidance
 
-**Scenario**: Two loaded packs both declare required artefacts, but the artefacts are incompatible — e.g., Pack A requires a "no-allocation proof" and Pack B specifies that allocation is permitted for this domain.
-**Expected behavior**: The more restrictive rule applies. "No-allocation proof" is required (not-allocating is more conservative). If requirements are genuinely contradictory (not just one being more restrictive), the conflict is reported as a configuration warning, and both artefacts are required. If both cannot be present simultaneously, human review is needed.
-**Key requirement**: Pack conflict resolution always favors the more restrictive rule. Genuine incompatibility produces a configuration warning, not a silent choice.
+**Scenario**: Two loaded packs give contradictory guidance — Pack A states that allocation is forbidden in this domain, Pack B that it is permitted.
+**Expected behavior**: The more restrictive rule applies. Where the guidance is genuinely contradictory rather than one being stricter, the conflict is reported as a configuration warning and both statements are carried, so the agent sees the tension rather than an arbitrary resolution.
+**Key requirement**: Conflict resolution always favours the more restrictive rule, and never silently discards one side. A pack may tighten guidance and may never relax a global threshold or override the constitutional rules.
 
-### EDGE-051: Constitutional Rules File Missing
+### EDGE-051: Constitutional Rules Absent or Unverifiable
 
-**Scenario**: The pipeline starts but `.cogworks/constitutional-rules.md` does not exist at the expected path.
-**Expected behavior**: The pipeline halts immediately with a clear error: missing constitutional rules file, cannot proceed. No LLM calls are made. A failure report is posted on the work item.
-**Key requirement**: Missing constitutional rules halts the pipeline entirely. This is not a recoverable error — the file must be created and committed before the pipeline can run.
+**Scenario**: The resolved harness does not contain the constitutional rules at the expected path, or the resolved content fails verification against what the pin names.
+**Expected behavior**: The run halts immediately with an error distinguishing "absent" from "present but unverified", because the operator action differs. No model call is made. A failure report is posted on the work item.
+**Key requirement**: Missing or unverifiable rules halt the run entirely, and no configuration option may override this. There is no fallback rule set: running an agent under rules nobody vouched for is worse than not running it.
 
 ### EDGE-052: Injection Detected in Issue Body
 
@@ -416,7 +342,7 @@ This document catalogs non-standard flows and failure scenarios that the system 
 
 ### EDGE-056: Generated Artifact Matches Protected Path Pattern
 
-**Scenario**: A work item's context (from a dependency README or code comment) causes the LLM to generate a file at `.cogworks/constitutional-rules.md` or modify a prompt template.
+**Scenario**: A work item's context (from a dependency README or code comment) causes a stage attempt to generate a file at `.factory/pin.yaml` or `risk-map.yaml`.
 **Expected behavior**: Pre-PR validation runs scope enforcement. The generated file path matches a protected path pattern. A `PROTECTED_PATH_VIOLATION` event is emitted. PR creation is blocked. A failure report is posted on the work item identifying the protected path violation. The Code Generator is not retried — this is a scope boundary violation, not a retryable generation error.
 **Key requirement**: Protected path violations block PR creation and are not fed back to the LLM as retryable errors. Modifying protected files is not a recoverable generation failure — it requires human review of the underlying specification
 ---
@@ -447,45 +373,18 @@ This document catalogs non-standard flows and failure scenarios that the system 
 **Expected behavior**: The deterministic fallback specified on the edge is applied (either edge taken or not taken). The fallback application is recorded in the audit trail. The pipeline continues.
 **Key requirement**: LLM edge condition failures are not pipeline-fatal. Fallback behavior must be declared in configuration.
 
-### EDGE-061: Implementation Container Lost
+### EDGE-061: Stage Attempt Sandbox Lost
 
-**Scenario**: The ephemeral container for an implementation job is lost or corrupted during execution.
-**Expected behavior**: The orchestrator records the failure and reconstructs durable pipeline state from the work-item and repository interfaces. A resumed implementation job requests a new ephemeral container; it does not depend on container-local state.
-**Key requirement**: Container-local state is not durable; a new implementation job gets a new container.
+**Scenario**: The sandbox running a stage attempt is lost — the host failed, the attempt was evicted, or the stage runner was restarted — after the agent produced work but before its commits were pushed.
+**Expected behavior**: No completion is observed in GitHub state, so the attempt is not treated as complete. The attempt is retried, which requests a **new** sandbox. Nothing is recovered from the lost sandbox: sandbox-local files are never a source of durable recovery data.
+**Key requirement**: Completion is determined from GitHub state (branch contents plus output record), not from the runner's liveness. One fresh sandbox per attempt.
 
 ### EDGE-062: Cancellation During Parallel Execution or Persistence
 
-**Scenario**: Nodes B and C are executing in parallel when the work-item interface reports cancellation; persistence of the final state may also fail.
-**Expected behavior**: Both nodes receive cancellation signals. In-progress LLM calls are allowed to complete. The orchestrator attempts to persist current state before requesting container cleanup. If persistence fails, it records the failure through available operational logging and still requests cleanup; the next invocation reconstructs from the last durable state and must not assume unpersisted container data exists. A summary is posted when the work-item interface is available.
-**Key requirement**: Cancellation is graceful, cleanup is requested on every terminal path, and persistence failure does not turn an ephemeral container into a durable state store.
+**Scenario**: A run is cancelled while several stage attempts are in flight, or while state is being persisted.
+**Expected behavior**: Cancellation is requested for each in-flight attempt through the stage runner. Durable state is persisted before teardown where possible; if persistence fails, teardown still proceeds and recovery uses the last successfully persisted state. A cancelled attempt is not recorded as a failure, so its attempt counter is not consumed.
+**Key requirement**: Cleanup is requested on every terminal path. Container-local state is never durable.
 
-### EDGE-063: Spawning Node Creates Issue But GitHub API Fails
-
-**Scenario**: A spawning node creates 3 derivative issues. The first two succeed. The third fails due to a GitHub API error.
-**Expected behavior**: The spawning node is non-blocking. It logs the failure for the third issue. The pipeline continues regardless. The audit trail records which issues were created and which creation failed.
-**Key requirement**: Spawning node failures do not block the pipeline. Partial creation is acceptable.
-
-### EDGE-064: All Outgoing Edge Conditions Evaluate False
-
-**Scenario**: Node A completes. All outgoing edges from A have conditions that evaluate to false.
-**Expected behavior**: No downstream nodes are activated. The pipeline detects that no progress is possible from this point. It posts a warning comment identifying the dead-end node and halts with a clear error.
-**Key requirement**: Dead-end detection prevents silent pipeline stalls.
-
----
-
-### EDGE-065: OpenTelemetry Exporter Unavailable During Pipeline Run
-
-**Scenario**: The configured OpenTelemetry exporter or collector is unavailable during a pipeline run.
-**Expected behavior**: Export failure is handled by the tracing/export configuration and does not change pipeline correctness or disposition. CogWorks does not compute or promise a separate set of metric data points as a fallback.
-**Key requirement**: External observability availability must not block or fail pipeline execution.
-
-### EDGE-066: Incomplete Metrics from Pipeline Crash
-
-**Scenario**: A pipeline run crashes mid-execution (process killed, OOM, hardware failure). Some nodes completed and emitted incremental data points, but the pipeline-level summary was never emitted.
-**Expected behavior**: External metrics systems receive partial data (whatever was emitted at node boundaries before the crash). The pipeline resume mechanism (REQ-EXEC-004) may produce a complete set on the resumed run. No data corruption occurs in the external backend.
-**Key requirement**: Incremental emission at node boundaries ensures partial data is available even after crashes.
-
----
 
 ## Alignment Verification Edge Cases
 
@@ -533,55 +432,141 @@ This document catalogs non-standard flows and failure scenarios that the system 
 
 ---
 
-## Tool Scoping and Enforcement Edge Cases
+## Harness and Pin Edge Cases
 
-### EDGE-074: Tool Scope Violation During Code Generation
+### EDGE-086: Pin File Absent
 
-**Scenario**: The Code Generation node's LLM attempts to write a file to a path outside the node's `allowed_write_paths` (e.g., the LLM tries to modify a test helper in a shared module while working on a specific sub-work-item scoped to `src/modules/auth/`).
-**Expected behavior**: The `fs.write` tool rejects the operation with a structured error explaining that the path is outside the allowed scope. The error is returned to the LLM, which may adjust its approach. A `SCOPE_VIOLATION` event is recorded in the audit trail. The file is NOT modified. If the LLM repeatedly violates scope (>5 times in one execution), an audit warning is emitted.
-**Key requirement**: Scope enforcement is independent of orchestrator-level tool filtering — this is Layer 2 defence in depth.
+**Scenario**: A run is triggered on a repository with no `.factory/pin.yaml`.
+**Expected behavior**: The run halts with an error naming the file. No harness version is substituted, no default graph is used, and no stage executes.
+**Key requirement**: A missing pin halts. Defaulting would run agents under configuration nobody chose for that repository.
 
-### EDGE-075: Skill Execution Fails Mid-Way Through Tool Sequence
+### EDGE-087: Pin Malformed or Names a Withdrawn Version
 
-**Scenario**: A skill that normally performs 4 tool calls succeeds on the first 2, but the 3rd call violates the calling node's scope (because the node's effective scope changed since the skill was last used, e.g., `allowed_write_paths` was narrowed).
-**Expected behavior**: The 3rd tool call is rejected by the scope enforcer. The entire skill execution fails with a structured error identifying the specific tool call that violated scope. The first 2 tool calls' effects remain (they were within scope). The LLM receives an error explaining the failure and may attempt the remaining operations individually or via a different approach. The scope violation is recorded in the audit trail and counts against the node's violation threshold.
-**Key requirement**: Skills do not bypass scope enforcement. Each tool call within a skill is independently validated.
+**Scenario**: The pin exists but does not parse, or names a harness version that has been withdrawn.
+**Expected behavior**: The run halts with an error distinguishing "cannot read the pin" from "the pin names a version that does not resolve", because the operator action differs.
+**Key requirement**: Halt, not fall back to a nearby version. A version adjacent to the one requested is not the one anybody reviewed.
 
-### EDGE-076: Adapter Drift Detected by CI Check
+### EDGE-088: Harness Unreachable
 
-**Scenario**: A developer updates an OpenAPI spec in the repository but forgets to regenerate the CogWorks adapter definitions. The CI drift detection check identifies that the generated adapters no longer match the source specification (e.g., a new endpoint was added to the spec but no corresponding tool definition exists).
-**Expected behavior**: The CI check fails with a report identifying the drift: new endpoints not represented, removed endpoints still represented, or parameter changes between spec and adapter. The developer must run the adapter regeneration CLI command and commit the updated adapter files.
-**Key requirement**: Adapters are derived artifacts; the source spec is the source of truth. CI verification prevents silent drift.
+**Scenario**: The harness source is unreachable — a network partition, an outage, an authentication failure.
+**Expected behavior**: Treated as retriable. The run does not halt permanently; it reports the condition and retries on a later invocation. Distinguished in the audit trail from a pin that cannot resolve.
+**Key requirement**: An outage is transient; a bad pin is not. Conflating them either wedges runs on a blip or hides a real misconfiguration.
 
-### EDGE-077: Progressive Discovery with No Matching Tools
+### EDGE-089: Harness Content Changes Mid-Run
 
-**Scenario**: The LLM invokes `tools.search` with a query that matches no tools in the node's resolved tool list (e.g., searching for "deploy" in a Review node that has no deployment tools).
-**Expected behavior**: `tools.search` returns an empty result set with a message indicating no tools match the query. The LLM may refine its search or request the full tool index. This is not an error — it's valid behavior when the node's tool set doesn't include what the LLM is looking for.
-**Key requirement**: Progressive discovery gracefully handles zero-match queries without error.
+**Scenario**: Between two invocations of the same run, the content resolved at the pinned version changes — a mutable tag was repointed.
+**Expected behavior**: The graph-hash comparison on resume detects the drift and escalates. No stage executes against the changed content, and a human decides whether to restart the run.
+**Key requirement**: The resolved graph's hash is recorded in state. Content addressing prevents this where the source supports it; the hash check catches it where it does not.
 
-### EDGE-078: Template Variable Refers to Empty Pipeline State
+### EDGE-090: No Stage Graph for the Tier and Discipline
 
-**Scenario**: A Code Generation node's profile uses `allowed_write_paths = ["src/{{affected_modules}}/**"]`, but the Architecture node's output did not populate `affected_modules` in the pipeline state (e.g., the architecture was so broad that no specific modules were identified).
-**Expected behavior**: Profile resolution fails with a structured error: "Template variable `affected_modules` could not be resolved from pipeline state." The node does NOT activate. The pipeline escalates the issue. No LLM call is made with an overly-permissive empty-string substitution.
-**Key requirement**: Strict template resolution prevents accidental scope widening through empty values.
+**Scenario**: The pin resolves, but the harness defines no stage graph for the run's `(tier, discipline)` pair — a repository was raised to a tier the discipline pack does not yet cover.
+**Expected behavior**: The run halts with an error naming both the tier and the discipline.
+**Key requirement**: No substitution from an adjacent tier. A lower tier's graph would omit stages the derived tier requires, which is the exact failure tier derivation exists to prevent.
 
-### EDGE-079: Custom Tool Registration at Pipeline Startup
+### EDGE-091: No Profile for the Resolution Key
 
-**Scenario**: A repository defines 3 custom tools in `.cogworks/tools/` and 2 adapter-generated tool sets in `.cogworks/adapters/`. At pipeline startup, one custom tool definition has an invalid schema (missing required `scope_parameters` field).
-**Expected behavior**: The two valid custom tools and both adapter tool sets register successfully. The invalid custom tool is rejected with a clear error message identifying the file and the schema violation. The pipeline proceeds with the valid tools. The rejection is logged as a warning.
-**Key requirement**: Invalid tool definitions are rejected individually without preventing the entire pipeline from starting.
+**Scenario**: A graph node's stage type exists in the registry, but no profile resolves for `(stage type, discipline, toolchain, tier)` — commonly a language the discipline pack does not cover.
+**Expected behavior**: The run halts with an error naming the full resolution key.
+**Key requirement**: Never a default profile. Running a stage under an approximately-right profile means an agent operating under a contract nobody chose.
 
-### EDGE-080: Scope Violation Threshold Exceeded
+### EDGE-092: Stage Type Absent From the Registry
 
-**Scenario**: During a Code Generation node execution, the LLM makes 7 tool calls that violate scope constraints (e.g., repeatedly trying to write to paths outside its scope, possibly due to poor prompt instructions or a misunderstanding of the task scope).
-**Expected behavior**: Each violation is returned to the LLM as a structured error. After the 5th violation (default threshold), an audit warning is emitted. The node MAY be halted at this point (configurable behavior). If the node continues and the LLM eventually succeeds within scope, the pipeline continues but the high violation count is prominently noted in the tool usage report.
-**Key requirement**: Excessive scope violations are a signal of misconfiguration or prompt issues, not just individual rejections.
+**Scenario**: A resolved graph contains a node whose declared stage type the harness's registry does not define — a graph and registry out of step within one harness version.
+**Expected behavior**: Graph validation fails at load, naming the node and its stage type, before any dispatch. Dispatch remains defensive as a second line: a node reaching dispatch with an unresolvable stage type returns a non-retryable failure rather than panicking.
+**Key requirement**: Validation at load, defence at dispatch. A panic in a process handling several work items would take down unrelated runs.
 
-### EDGE-081: Layer 1 Filtering Failure — Layer 2 Must Catch
+### EDGE-093: Risk Map Absent or Malformed
 
-**Scenario**: Due to a bug or race condition, a tool that should NOT be in the node's profile appears in the LLM's tool list (Layer 1 filtering failure). The LLM invokes this tool with parameters that violate the node's scope constraints.
-**Expected behavior**: Layer 2 (tool-level scope enforcement) independently validates the invocation. Because the tool's scope parameters for this node are either absent or restrictive, the invocation is rejected with a `SCOPE_VIOLATION` event. The audit trail records both the anomalous tool presence and the scope violation. The defence-in-depth property holds: failure at Layer 1 does not compromise Layer 2.
-**Key requirement**: The three enforcement layers operate independently. Layer 2 does not assume Layer 1 has already validated tool availability. This is the core security property of the defence-in-depth design (constraints.md: "Failure at one layer MUST NOT compromise the others").
+**Scenario**: The target repository has no `risk-map.yaml`, or it does not parse.
+**Expected behavior**: The run halts with an error naming the file. The tier does not default to the lowest.
+**Key requirement**: Defaulting to T0 would apply the least rigour to work nobody has assessed — the worst available outcome.
+
+### EDGE-094: Tier Raised Mid-Run
+
+**Scenario**: A slice turns out to touch a path that raises the derived tier above the one recorded when the run started.
+**Expected behavior**: The tier is raised. Where the new tier selects a different graph or stricter thresholds, the run escalates for human review rather than silently switching graphs mid-run. The tier is never lowered.
+**Key requirement**: Raise-only. Scope growth increases rigour; it never reduces it.
+
+---
+
+## Verdict Edge Cases
+
+### EDGE-095: No Check Run for the Attempt SHA
+
+**Scenario**: An attempt's commits are pushed, but no gate check run has appeared for that SHA.
+**Expected behavior**: The verdict state is absent, and the step returns a waiting result. The stage neither advances nor fails.
+**Key requirement**: Absent is not passing and not failing. Assuming either direction is a correctness bug.
+
+### EDGE-096: Check Run In Progress
+
+**Scenario**: The gate check run exists for the SHA with no conclusion yet.
+**Expected behavior**: Waiting result, as for an absent verdict. The next invocation re-reads.
+**Key requirement**: In-progress is distinct from any conclusion and must not be collapsed into a failure.
+
+### EDGE-097: Check Run Authored by an Unexpected Identity
+
+**Scenario**: A successful check run exists for the SHA, authored by an App other than the configured gate service.
+**Expected behavior**: Discarded at the adapter boundary. The verdict state is absent, not passing. The discard is recorded, because an unexpected check-run author on a factory repository is worth an operator's attention.
+**Key requirement**: Exactly one trust anchor for pass and fail. A check run from anywhere else carries no weight at all, not reduced weight.
+
+### EDGE-098: Verdict Bound to a Stale SHA
+
+**Scenario**: A gate check run exists from the previous attempt, and the current attempt has produced a new SHA with no verdict yet.
+**Expected behavior**: The older check run is treated as absent for the current attempt. Waiting result.
+**Key requirement**: Verdicts are per commit. Replaying an old pass against new work is the simplest way to defeat the gate.
+
+### EDGE-099: Gate Service Unavailable
+
+**Scenario**: The gate service is down, so no verdicts appear for any SHA.
+**Expected behavior**: Runs wait. Nothing fails and nothing advances. The condition is reported so an operator can distinguish it from slow gates.
+**Key requirement**: Waiting is correct, but it looks like a hang. The operator-facing signal matters as much as the behaviour.
+
+### EDGE-100: Conflicting Check Runs From the Gate Service
+
+**Scenario**: Two check runs from the gate identity on the same SHA disagree.
+**Expected behavior**: The run escalates rather than choosing. Picking either one would be CogWorks adjudicating a verdict, which is precisely what it must not do.
+**Key requirement**: CogWorks interprets verdicts; it never arbitrates between them.
+
+---
+
+## Oracle and Attempt Edge Cases
+
+### EDGE-101: Oracle Manifest Unsigned or Hash-Mismatched
+
+**Scenario**: Locked tests exist for a slice, but the manifest is unsigned, fails signature verification, or its digest does not match the tests it seals.
+**Expected behavior**: No `implement` attempt is requested. The run halts for human investigation.
+**Key requirement**: The lock is what makes the oracle an oracle. Proceeding without a valid one reduces "written first" to "written first and then possibly revised".
+
+### EDGE-102: Agent Raises a Dispute Over a Locked Test
+
+**Scenario**: An `implement` attempt judges a locked test to be wrong — testing behaviour the specification does not require, or asserting something impossible.
+**Expected behavior**: A dispute is recorded on the work item for a human, naming the test and the attempt's reasoning. The locked test is unchanged, the stage does not advance, and the attempt budget is not consumed by repeated attempts against a test the agent has already disputed.
+**Key requirement**: Some locked tests will genuinely be wrong. An escape hatch that lets the builder fix them is indistinguishable from one that lets the builder delete them, so resolution runs through a human.
+
+### EDGE-103: Stage Runner Never Reports Completion
+
+**Scenario**: An attempt is accepted by the stage runner, but no completion is ever observable in GitHub state.
+**Expected behavior**: After the stage contract's wall-clock limit, the attempt is treated as failed and the disposition is computed. Cancellation is requested for the orphaned attempt.
+**Key requirement**: The timeout comes from the stage contract, not from a global default, because stage durations differ by orders of magnitude.
+
+### EDGE-104: Mandatory Bundle Inputs Exceed the Token Budget
+
+**Scenario**: A stage contract marks the specification and contracts mandatory, and together they exceed the stage's token budget.
+**Expected behavior**: Assembly reports a structured error and the run escalates. No attempt is requested with a mandatory input missing.
+**Key requirement**: An attempt that silently lost its specification is worse than an attempt that did not run, because its failure looks like model incapability.
+
+### EDGE-105: Zone Filter Removes an Allowlisted Item
+
+**Scenario**: The trust-zone filter removes an item the stage contract's allowlist admitted — the allowlist entry resolved more broadly than its author intended.
+**Expected behavior**: The item is removed and the removal is recorded as a **warning**, not silently discarded. The attempt proceeds.
+**Key requirement**: The filter worked, but it should not have had to. A non-empty removal set means an allowlist needs correcting, and that signal must reach a human.
+
+### EDGE-106: Mount Plan Cannot Be Produced
+
+**Scenario**: The mount-plan provider cannot produce a plan for the stage's identity role, or the contract requests paths the role may never write.
+**Expected behavior**: The stage halts. No attempt is requested without a mount plan, and no attempt is requested with a plan wider than the role allows.
+**Key requirement**: CogWorks must never be the only enforcement point for a write boundary. An attempt without a plan would make it exactly that.
 
 ---
 
@@ -607,6 +592,6 @@ This document catalogs non-standard flows and failure scenarios that the system 
 
 ### EDGE-085: Configured Workflow Label Conflicts with Existing Label
 
-**Scenario**: The team configures the awaiting-review label as `needs-review` in `.cogworks/config.toml`, but the repository already uses `needs-review` for a different purpose.
+**Scenario**: The team configures the awaiting-review label as `needs-review` in CogWorks' process configuration, but the repository already uses `needs-review` for a different purpose.
 **Expected behavior**: CogWorks uses the configured label name. The semantic conflict with the existing usage is a human configuration error. CogWorks validates that no two workflow labels map to the same string (REQ-LABEL-003), but cannot detect semantic conflicts with pre-existing label usage.
 **Key requirement**: Label configuration validation catches internal conflicts (duplicate mappings) but not external semantic conflicts. Documentation should advise teams to review existing labels before configuring mappings.

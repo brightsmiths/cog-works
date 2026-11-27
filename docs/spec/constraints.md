@@ -20,8 +20,13 @@ These constraints MUST be enforced during implementation. They inform the interf
 - **Abstractions are traits**: External system interfaces are defined as Rust traits. Business logic depends on these traits via generics or trait objects.
 - **Infrastructure implements traits**: Each infrastructure module implements one or more abstraction traits. Only infrastructure modules import external crates.
 - **No circular dependencies**: Module dependency graph must be a DAG. Business logic → abstractions ← infrastructure. Abstractions never depend on business logic or infrastructure.
-- **Node implementations are orchestration, not business logic**: Node implementations coordinate calls between business logic, abstractions, and other components. They contain sequencing logic, not domain rules.
-- **Scenario holdout enforcement**: The Context Assembler MUST enforce that scenario specifications are never included in code generation context packages. This is a hard constraint, not advisory. The configuration must explicitly list scenario directories to exclude.
+- **Stage drivers are orchestration, not business logic**: A stage driver coordinates calls between business logic, abstractions, and other components. It contains sequencing logic, not domain rules.
+- **Trust-zone barriers are enforced during bundle assembly**: The Context Bundle Builder MUST exclude holdout content and acceptance source from any bundle built for a build-zone stage. This is a hard constraint, not advisory, and it is enforced by the allowlist rather than by a list of exclusions — an input the allowlist does not name is absent from the bundle.
+- **Business logic never computes or publishes a verdict**: No business-logic module may decide that an artifact passes, author a check run, or satisfy a required check. Verdicts are read from the gate service's check runs. CogWorks' own deterministic pre- and post-checks bound an attempt and are never published as a check run.
+- **The harness is read-only and pinned**: No module may write to the harness, and no module may resolve a floating harness reference. Every read resolves through the version pinned by the target repository.
+- **A stage contract is never visible to the agent it governs**: The contract names the agent's allowlist, writable paths, limits and identity role. It MUST NOT be placed in the bundle of the stage it governs.
+- **Bundle hashing is mandatory**: Every context bundle MUST be hashed and the hash recorded before the attempt that consumes it starts. An attempt whose bundle was not hashed MUST NOT be requested.
+- **The harness loader, stage runner, check-run reader, mount-plan provider and risk-map loader are abstractions**: Business logic depends on their traits, never on a harness source, a runner API, the Checks API or a YAML parser.
 - **Domain services are external processes**: CogWorks MUST NOT contain domain-specific code. All domain operations (validate, normalise, review_rules, simulate, validate_deps, extract_interfaces, dependency_graph) are delegated to external domain services via the Extension API.
 - **Engineering workflows are domain-neutral**: CogWorks MUST support software and other engineering work through generic test-first, implementation, and validation/iteration orchestration. Test formats, toolchains, and domain validation remain behind the domain-service interface.
 - **No built-in privileged path**: The Rust domain service MUST use the Extension API like any other domain service. If the API is insufficient for the Rust domain service, the API must be improved, not bypassed.
@@ -54,7 +59,7 @@ direction. See `docs/spec/interfaces/README.md` for the full dependency graph.
   `extension-api`, or `listener` directly.
 - **`cli` is the sole composition root**: Only `cli` imports all other workspace
   crates and constructs concrete infrastructure instances. This is the only place
-  where `GithubClient`, `AnthropicProvider`, `ExtensionApiClient`,
+  where `GithubClient`, `ModelGatewayProvider`, `ExtensionApiClient`,
   `GitHubWebhookEventSource`, and `QueueEventSource` are instantiated.
 - **Readiness mapping is an infrastructure concern**: Trigger sources report
   work-item readiness through the `pipeline::EventSource` abstraction. The
@@ -73,13 +78,16 @@ direction. See `docs/spec/interfaces/README.md` for the full dependency graph.
 
 ## Pipeline Graph
 
-- **Every cycle must have a termination condition**: The pipeline configuration validator must reject any graph containing a cycle without an explicit `max_traversals` on at least one edge in the cycle. There must be no path to infinite execution.
+- **Every cycle must have a termination condition**: The graph validator must reject any resolved graph containing a cycle without an explicit `max_traversals` on at least one edge in the cycle. There must be no path to infinite execution.
 - **Cost budget is shared across parallel nodes**: When nodes execute concurrently, budget acquisition must be atomic. Two nodes must not both be approved if their combined estimated cost exceeds the remaining budget.
 - **Pipeline state is recoverable from GitHub**: The pipeline working directory is a performance optimisation. All pipeline state must be reconstructable from GitHub artifacts (issue comments, labels, PRs). Loss of the working directory must not require restarting the pipeline from scratch.
-- **Implementation containers are not durable state**: Job-local files are transient. Durable pipeline state and deliverables must be persisted through the existing work-item and repository interfaces before container cleanup.
+- **Stage attempt sandboxes are not durable state**: Sandbox-local files are transient. Durable pipeline state and deliverables must be persisted through the work-item and repository interfaces before the sandbox is torn down. One fresh sandbox per attempt; no sandbox is reused across attempts.
 - **Node inputs must be verified before execution**: The graph execution engine must verify that all declared inputs for a node are available before starting the node. Missing inputs must produce a clear error identifying the node and the missing input.
-- **Edge condition evaluation is audited**: Every edge condition evaluation (deterministic, LLM-evaluated, or composite) must be recorded in the audit trail with the condition definition, the evaluation input, and the result.
-- **Pipeline configuration is validated at load time**: The pipeline configuration must be fully validated when loaded (before any node executes). Invalid configurations must produce clear errors and prevent the pipeline from starting.
+- **Stage types are validated against the registry at load**: Every node in a resolved graph must declare a stage type present in the pinned harness's stage-type registry. A node declaring an unknown stage type must fail graph validation before any dispatch is attempted.
+- **The stage graph comes from the harness**: The graph governing a work item is resolved from the pinned harness for its `(tier, discipline)` pair. No repository-local file may add a stage type, remove a stage the tier requires, or change a gate.
+- **Edge conditions are deterministic**: An edge condition is a deterministic expression over pipeline state and verdicts. No condition may be evaluated by a model: routing is code, so which edge is taken never depends on model output.
+- **Edge condition evaluation is audited**: Every edge condition evaluation (deterministic or composite) must be recorded in the audit trail with the condition definition, the evaluation input, and the result.
+- **The resolved graph is validated at load time**: The resolved stage graph must be fully validated when loaded, before any stage executes. An invalid graph must produce clear errors and prevent the run from starting.
 
 ---
 
@@ -103,7 +111,6 @@ direction. See `docs/spec/interfaces/README.md` for the full dependency graph.
 - **Pipeline configuration validation tests**: The pipeline configuration loader must have tests for: valid TOML parsing, missing file (falls back to default), malformed TOML, cycles without termination conditions, unreachable nodes, duplicate node names, invalid edge source/target references.
 - **Test naming**: `test_<function>_<scenario>_<expected>` (per `.tech-decisions.yml`).
 - **No test pollution**: Tests must not depend on external state. Each test sets up its own context and tears it down.
-- **Scenarios test generated code, not CogWorks**: Scenario validation tests the code generated by CogWorks. CogWorks' own correctness is tested through unit/integration/E2E tests as defined in testing.md.
 - **Pyramid summary accuracy**: Summaries must be regenerated when source changes. Staleness check must be deterministic (file hash comparison). Stale summaries must never be used for context assembly decisions.
 - **Extension API conformance tests**: A published conformance test suite must exist that any domain service can run to verify it correctly implements the Extension API. The Rust domain service must pass this suite.
 - **Cross-domain constraint validation tests**: The constraint validator must have tests for all contract parameter types (numeric with tolerance, exact, enumerated, boolean, reference, computed).
@@ -125,35 +132,37 @@ direction. See `docs/spec/interfaces/README.md` for the full dependency graph.
 ## Security
 
 - **Credential lifecycle is provider-owned**: The Vault library behind the credential-provider interface resolves credentials and implements their authentication/key lifecycle. CogWorks MUST NOT prescribe Vault mechanics or expose key material to LLM prompts/context, audit records, logs, or generated artifacts.
-- **Minimum-privilege GitHub token**: The token must have only the permissions needed: issues (read/write), pull requests (read/write), contents (read/write), labels (read/write). No admin access.
-- **No secrets in context packages**: LLM API keys, GitHub tokens, and any other credentials must never appear in context packages, audit trails, or generated code.
+- **Minimum-privilege GitHub credential**: The credential must carry only what CogWorks needs: issues (read/write), pull requests (read/write), contents (**read only**), labels (read/write), checks (**read only**). No admin access.
+- **No push credential**: CogWorks MUST NOT hold a credential capable of pushing commits to a target repository. Commits are pushed by the stage runner under the stage's identity role. A `contents:write` grant on this process is a defect.
+- **No model API key**: CogWorks MUST NOT hold a model provider API key, and neither may any sandbox. Model credentials are held by the model gateway, and every model call reaches a provider through it.
+- **No check-run authorship**: CogWorks MUST NOT hold a credential capable of creating or updating a check run. Verdicts are authored by the gate service alone.
+- **No secrets in context bundles**: Credentials of any kind must never appear in a context bundle, an audit trail, or generated code.
 - **No secrets in generated code**: Code generation must use placeholder values for secrets, with documentation on what needs to be configured.
 - **Domain service isolation**: Domain services run as separate processes. CogWorks does not pass secrets to domain services. Domain services receive only the Extension API context (work item info, node, repository path, relevant interface contracts).
-- **Prompt injection awareness**: Issue bodies and repository content are untrusted input. The constitutional layer is the primary defense; schema validation of LLM outputs is the secondary defense. Neither is sufficient alone.
-- **Constitutional rules are mandatory**: Constitutional rules MUST be loaded before any LLM call on every pipeline run. No configuration option may disable this. Failure to load constitutional rules halts the pipeline. This is not a security option — it is a hard constraint.
-- **Protected paths**: CogWorks MUST NOT create or modify files matching protected path patterns through the normal pipeline. Protected paths include at minimum: the constitutional rules file, prompt template files, scenario specification files, and Extension API schemas. The protected path list is version-controlled and configurable.
+- **Prompt injection awareness**: Issue bodies and repository content are untrusted input. They enter a bundle as data, never as instructions, and event or work-item fields are never interpolated into a prompt. Screening incoming work items belongs to the upstream intake service, whose signed approval CogWorks verifies; sanitising model-sourced text before reusing it in a later prompt remains CogWorks' own defence in depth.
+- **Constitutional rules are mandatory**: Constitutional rules MUST be resolved from the pinned harness and loaded before any model call on every run. No configuration option may disable this. Failure to resolve or verify them halts the run. This is not a security option — it is a hard constraint.
+- **Protected paths**: CogWorks MUST NOT create or modify files matching protected path patterns through the normal pipeline, and no mount plan may make one writable. Protected paths include at minimum: the pin file, the risk map, locked tests and their manifest, gate configuration, and the Extension API schemas. The protected path list is version-controlled and configurable, and these defaults cannot be removed by configuration.
 - **Protected-path matching is case-sensitive**: Glob matching for protected paths and approved-scope patterns (`security::is_protected`, `security::validate_scope`, `alignment::run_deterministic_alignment`) is case-sensitive. On a case-insensitive filesystem (default Windows, default macOS), a declared protected path such as `"SECURITY.md"` does not match an artifact key that differs only in case (e.g. `"Security.md"`), even though both resolve to the same file at write time. Deployments on case-insensitive filesystems MUST either enumerate case variants explicitly in the protected-path list, or run CogWorks only on case-sensitive filesystems (the recommended default for CI/production runners). This is a pre-existing constraint of the underlying glob engine, not a bug in any single check.
 - **Rate limit respect**: The system must respect GitHub API rate limits (5000/hr for authenticated requests). Track remaining budget from response headers, back off proactively.
-- **LLM API rate limit respect**: The LLM Gateway must respect provider-imposed rate limits (requests per time window). Rate-limit state must be tracked from provider response headers, shared across parallel nodes, and enforced proactively (throttle before hitting the limit, not just react to 429s). If the required wait time exceeds the configured halt threshold (default: 30 minutes), the step must halt with a retriable exit code rather than blocking indefinitely.
-- **Extension API authentication**: For Unix domain sockets, file system permissions provide access control. For HTTP/gRPC transport, authentication mechanism is to be determined but the design must not preclude adding authentication later (e.g., bearer tokens, mutual TLS). (see ADR-0006)
+- **Model rate limiting is the gateway's**: CogWorks does not track or enforce model provider rate limits. The model gateway holds the credentials and sees all factory traffic, so it is the only component positioned to enforce them. A gateway response indicating throttling is surfaced as a retriable condition.
+- **Extension API authentication**: The Unix domain socket transport is the default, and file system permissions on the socket provide its access control. The HTTP/gRPC transport MUST only be used where the network path between CogWorks and the domain service lies inside the deployment's trust boundary. Its transport design MUST NOT preclude adding an authentication mechanism (for example bearer tokens or mutual TLS) without a breaking change.
 
 ---
 
 ## Configuration
 
-- **Configuration file**: `.cogworks/config.toml` in the target repository. Loaded once per CLI invocation.
+- **Configuration describes the host, not the repository**: CogWorks' own configuration carries the endpoints it talks to, its label mappings and its concurrency limits. It is loaded once per invocation. Everything that shapes an agent — stage graphs, stage contracts, profiles, prompt templates, output schemas, Context Packs and constitutional rules — comes from the pinned harness, and no repository-local file may override it.
 - **Mandatory fields**: At minimum: a reference to a domain service registration file and at least one LLM model selection.
-- **Domain service registration file**: Domain services are declared in `.cogworks/services.toml` (overridable via `COGWORKS_DOMAIN_SERVICES_CONFIG`), not in `config.toml`. Each service entry (under `[[services]]`) specifies name, transport, and connection endpoint (socket path or URL). Service capabilities, artifact types, interface types, and domain are discovered dynamically via the handshake (health check) — they are NOT statically configured. This keeps the config minimal and ensures the config can't drift from what the service actually provides.
+- **Domain service registration**: Domain services are declared in CogWorks' own process configuration. Each entry specifies name, transport, and connection endpoint (socket path or URL). Service capabilities, artifact types, interface types, and domain are discovered dynamically via the handshake — they are NOT statically configured, so the configuration cannot drift from what the service actually provides.
 - **Interface registry configuration**: `[interfaces]` section specifying registry directory and startup validation flag.
 - **Constraint validation configuration**: `[constraint_validation]` section specifying enabled flag and missing-service behavior.
 - **Sensible defaults**: Every configurable value must have a sensible default. A minimal configuration file should be sufficient to run the pipeline.
 - **Validation at load time**: Configuration must be fully validated when loaded. Invalid configuration produces a clear error message and halts the pipeline before any work begins.
 - **No environment-variable-driven behavior in business logic**: Environment variables are read in the infrastructure/configuration layer only. Business logic receives typed configuration values, never raw strings from the environment.
-- **Label configuration**: Workflow-semantic labels and signals (readiness/trigger, awaiting-review, safety-critical, hold, cancel, restart, sub-work-item) must be configurable through the `[labels]` section in `.cogworks/config.toml` or the corresponding provider adapter. Pipeline-internal labels (`cogworks:processing`, `cogworks:node:<name>`, `cogworks:node:failed`, `cogworks:status:<status>`) are never configurable. Duplicate mappings must be rejected at load time, including collisions with pipeline-internal labels. Business logic must not depend on a particular workflow label or project status.
-- **GitHub Project integration is optional and non-blocking**: When a `[github_project]` section is present, pipeline state is synced to a GitHub Projects V2 board at node boundaries. Project board update failures are logged as warnings and must never block, slow, or fail the pipeline. CogWorks must operate identically with or without project configuration.
+- **Label configuration**: Workflow-semantic labels and signals (trigger, awaiting-review, hold, cancel, restart, slice) must be configurable in CogWorks' own process configuration. Duplicate mappings must be rejected at load time, including collisions with run-state labels. Business logic must not depend on a particular label string or project status. A work item's tier MUST NOT be read from a label.
 - **Native sub-issues for work item hierarchy**: Sub-work-items must be created as native GitHub sub-issues (using the sub-issue API), not as standalone issues linked only by labels. Dependencies between sub-work-items must use native GitHub typed issue links (`blocks` / `is blocked by`).
 - **Milestone inheritance**: Sub-work-items must inherit the parent work item's GitHub Milestone when one is set. CogWorks must not create, modify, or delete milestones.
-- **Semantic stalling threshold**: The consecutive-same-category threshold (`semantic_stall_threshold`, default: 3) must be validated against each node's retry budget (`max_retries`) at configuration load time. If a node's stalling threshold exceeds its retry budget, a warning must be emitted at load time and stalling detection is treated as disabled for that node. This is a warning, not an error — the pipeline still starts.
+- **Semantic stalling threshold**: The consecutive-same-class threshold (`semantic_stall_threshold`, default: 3) must be validated against the attempt budget the resolved stage contract declares. Where the stalling threshold exceeds that budget, a warning must be emitted and stalling detection is treated as disabled for that stage. This is a warning, not an error — the run still starts.
 
 ---
 
@@ -187,24 +196,23 @@ direction. See `docs/spec/interfaces/README.md` for the full dependency graph.
 ## Context Pack Constraints
 
 - **Pack structure is enforced**: Context Pack directories must contain a valid `trigger.toml`. Packs without a valid trigger file are skipped with a warning, not ignored silently.
-- **Pack content is trusted as configuration**: Loaded Context Pack content is treated as configuration-level input (higher trust than user-supplied content) but lower trust than CogWorks' own constitutional rules. Pack content cannot override constitutional rules.
+- **Pack content is trusted as harness configuration**: Loaded Context Pack content is treated as configuration-level input — higher trust than work-item or repository content, lower trust than the constitutional rules. Pack content cannot override constitutional rules.
 - **Pack loading is deterministic**: The same classification input must always produce the same set of loaded packs. Pack selection must be a pure function with no randomness or LLM involvement.
-- **Pack directory is version-controlled**: Context Pack files in `.cogworks/context-packs/` are subject to normal code review and branch protection. Changes are tracked in git.
+- **Packs live in the harness**: Context Packs are part of the harness discipline pack, subject to its review and branch protection, and adopted by a repository only when its pin moves. A pack is prompt material; a repository-local pack would be prompt content an agent working in that repository could edit.
 - **Pack content never includes executable code**: Pack files are Markdown and TOML documents. They must not contain scripts, compiled artifacts, or anything that could be executed by CogWorks.
-- **Required artefact declarations are validated at load time**: The `required-artefacts.toml` file must conform to the required artefacts schema. Malformed declarations are reported as configuration errors, not silently ignored.
-- **Stricter thresholds are pack-declared**: Context Packs may declare stricter satisfaction thresholds for their domain. These override the global threshold for affected scenarios. They cannot relax the global threshold.
+- **Packs tighten, never loosen**: A Context Pack may declare stricter guidance or thresholds for its domain. It may never relax a global threshold, and it may never override constitutional rules.
 
 ---
 
 ## Constitutional Layer Constraints
 
 - **Constitutional rules loading is unconditional**: There MUST NOT be a configuration option to skip constitutional rules loading. Any code path that calls the LLM without loading constitutional rules first is a defect.
-- **Constitutional rules position is fixed**: The constitutional rules are always the first component of the system prompt. No business logic may prepend content before them or demote them in the prompt order.
+- **Constitutional rules position is fixed**: The constitutional rules are always the first component of the system prompt. No business logic may prepend content before them or demote them in the prompt order. For a deterministic helper call made in CogWorks' own process, this is enforced at the type level, so no call can reach a model without passing through constitutional assembly. For an agent turn, the resolved profile places the rules and the sandbox boundary preserves that position.
 - **Constitutional rules are not context items**: Constitutional rules are NOT subject to context truncation. They are not in the context priority queue. They are always present in full.
-- **Constitutional rules change requires human approval**: Changes to `.cogworks/constitutional-rules.md` must be made via a reviewed PR. Unreviewed changes must be detected and rejected at load time. This constraint is enforced by checking that the file's current content matches a reviewed commit.
+- **Constitutional rules change requires human approval**: Rules are changed by a reviewed pull request in the harness, and adopted by a repository only when its pin moves. CogWorks verifies the resolved rules against the pin before use, and halts rather than proceed with rules it cannot verify. A repository cannot change the rules that govern its own runs.
 - **Injection detection is pre-prompt**: Injection detection runs before any external content is assembled into the LLM prompt. Detecting injection after prompt assembly is insufficient.
-- **Hold state is enforced by label**: Work items in hold state have `cogworks:hold` label. All pipeline invocations must check for this label and exit without action. The label can only be removed by a human.
-- **Protected paths are configurable but non-empty**: At minimum, the constitutional rules file, prompt template directory, scenario directory, and Extension API schemas are always in the protected path set, regardless of configuration. These defaults cannot be removed via configuration.
+- **Hold state is enforced by label**: A work item in hold state carries the configured hold label. Every invocation must check for it and exit without action. The label can only be removed by a human.
+- **Protected paths are configurable but non-empty**: At minimum the pin file, the risk map, locked tests and their manifest, gate configuration, and the Extension API schemas are always in the protected path set, regardless of configuration. These defaults cannot be removed via configuration.
 
 ---
 
@@ -212,29 +220,28 @@ direction. See `docs/spec/interfaces/README.md` for the full dependency graph.
 
 - **Alignment checker model separation**: The LLM alignment check SHOULD use a different model from the generating node. Using the same model risks correlated blind spots (a model is unlikely to detect its own semantic errors). When only one model is available, this constraint is relaxed with a warning logged, not silently ignored.
 - **Rework and retry budgets are independent**: Rework (alignment failure) and retry (technical failure) MUST have separate counters and separate configurable budgets. Exhausting one does not affect the other. Both appear independently in the audit trail and metrics.
-- **Rework budget is enforced**: When the rework budget is exhausted for a node, the pipeline MUST fail with a structured error including the alignment findings from the final rework attempt. The pipeline MUST NOT silently pass after rework exhaustion.
+- **Rework budget is enforced**: When the rework budget declared by the stage contract is exhausted, the run MUST escalate with a structured error including the findings from the final rework attempt. It MUST NOT silently pass after rework exhaustion.
 - **Finding types are structured enums**: Alignment finding types (missing, extra, modified, ambiguous, scope_exceeded) and severity levels (blocking, warning, informational) MUST be structured enums, not free-form strings. This enables reliable external aggregation and deterministic pass/fail evaluation.
 - **Blocking findings always fail**: If any alignment finding has severity `blocking`, the alignment check MUST fail regardless of the alignment score. The score threshold is necessary but not sufficient.
-- **Safety-critical alignment constraints cannot be relaxed**: For safety-classified work items: LLM alignment checks cannot be disabled, alignment threshold cannot be set below 0.95, and the traceability matrix requires human sign-off. These constraints are enforced at configuration load time, not at check time.
+- **An alignment result is not a verdict**: An alignment check bounds a stage attempt. CogWorks may fail, retry or rework the attempt on its result, but MUST NOT publish it as a check run or treat it as a gate verdict. An attempt that passes every alignment check still has to pass the gate service.
+- **Tier alignment constraints cannot be relaxed**: At the higher tiers the LLM alignment check cannot be disabled, the alignment threshold cannot be set below the tier's floor, and the traceability matrix requires human sign-off. These constraints are enforced when configuration is loaded, not at check time, and neither a profile nor any repository-level configuration may weaken them.
 - **Traceability matrix is incremental**: The traceability matrix MUST be built incrementally during pipeline execution, not reconstructed after the fact. Each alignment check contributes its entries as they occur.
-- **Alignment check cost is budgeted**: LLM alignment check token usage MUST be counted against the node's token budget. Alignment checks that would exceed the budget are reported as a structured error, not silently skipped.
+- **Alignment check cost is budgeted**: LLM alignment check token usage MUST be counted against the stage's token budget. Alignment checks that would exceed the budget are reported as a structured error, not silently skipped.
 - **Deterministic checks run first**: Deterministic alignment checks MUST complete before the LLM alignment check is invoked. Their results are included in the LLM check context to avoid redundant LLM work.
 
 ---
 
-## Tool Scoping Constraints
+## Stage Attempt Constraints
 
-- **Tool profile is mandatory for LLM nodes**: Every pipeline node that invokes an LLM MUST have a resolved tool profile before execution. If no explicit profile is configured, the built-in default profile for the node type MUST be applied. A node MUST NOT execute with an undefined or empty tool profile.
-- **Defence in depth is mandatory**: Tool access control MUST be enforced at all three layers independently: (1) orchestrator-level tool filtering (unscoped tools never appear in LLM tool lists), (2) tool-level scope enforcement (each tool validates parameters against scope constraints before executing), (3) OS-level sandboxing for write-capable nodes. Failure at one layer MUST NOT compromise the others.
-- **Only Code Generation has core write access**: Among the 7 core pipeline nodes, only Code Generation has filesystem write and git commit tools in its default profile. All other core nodes are read-only by default. Pipeline configuration MAY grant write access to custom nodes, but this is an explicit opt-in recorded in the audit trail.
-- **LLM-requested validation and Git actions are deterministic tools**: LLMs may request validation or Git operations only through scoped, allowlisted tools with validated parameters. Arbitrary LLM-generated shell or Git commands MUST NOT be executed.
-- **Shell execution is restricted**: The `shell.run_restricted` tool executes infrastructure commands (build, test, lint) from an explicit allowlist — NOT arbitrary LLM-generated shell commands. The allowed command list is defined in the tool profile scope parameters, not by the LLM.
-- **Network access is opt-in**: The `net.fetch` tool is NOT enabled in any default profile. Enabling network access requires explicit configuration in the tool profile. Network-capable profiles MUST specify URL allowlists.
-- **Protected path enforcement at tool level**: Filesystem write tools (`fs.write`, `fs.create`, `fs.delete`) MUST refuse operations targeting protected paths (constitutional rules, prompt templates, scenario specs, Extension API schemas) regardless of the node's profile configuration. This is a hard constraint that cannot be overridden by profile configuration.
-- **Scope parameter template resolution is strict**: Template variables (`{{variable}}`) in scope parameters MUST be resolved from pipeline state before node activation. Unresolvable variables MUST produce a clear error and prevent node activation. Empty-string substitution for missing variables is NOT permitted.
-- **Skill scope enforcement is unconditional**: Tool calls within skill execution MUST be validated against the calling node's tool profile. A skill MUST NOT bypass scope enforcement. This constraint exists because skills are deterministic scripts — but the node's effective scope may change between runs.
-- **Adapter tools are regular tools**: Adapter-generated tool definitions MUST participate in the same tool registry, profile scoping, and scope enforcement as built-in tools. No special bypass for adapter tools.
-- **Tool profile validation at load time**: Tool profile definitions are validated when the pipeline configuration is loaded. Profiles that reference nonexistent tools produce warnings (not errors, to allow profile reuse across repos with different adapter sets). Profiles with invalid scope parameter schemas produce errors and prevent pipeline start.
+- **One fresh sandbox per attempt**: Every stage attempt runs in a sandbox created for it and torn down after it. A retry is a new attempt and therefore a new sandbox. No sandbox is reused across attempts, and no state carries between them except through GitHub.
+- **No agent runs in CogWorks' process or container**: Every agent turn happens in a sandbox owned by the stage runner. CogWorks holds no virtualisation privilege and no host privilege.
+- **Every attempt carries a mount plan**: An attempt request MUST carry a mount plan obtained from the mount-plan provider for the stage's identity role. CogWorks MUST NOT be the only enforcement point for a write boundary.
+- **Identity roles are per stage, not per run**: The identity an attempt's commits are pushed under comes from the stage contract. The oracle and implement stages MUST run under different identities, and the implement identity MUST NOT be able to write the locked-test paths.
+- **Locked tests exist before implementation**: An `implement` attempt MUST NOT be requested until the locked tests and their signed manifest exist for the slice. A build-zone stage MUST NOT be able to modify them.
+- **Disputes are raised, not resolved**: Where an agent judges a locked test to be wrong, the outcome is a dispute recorded for a human. A locked test is never edited by the stage it constrains.
+- **Rework feedback is bounded**: Feedback into a rework attempt carries the gate's structured output — failing test identities and messages — never test source. For a holdout, feedback carries no more than the failing requirement identities.
+- **Network access is the profile's and the sandbox's**: A stage attempt's network reachability is declared by the network profile in its stage contract and enforced at the sandbox boundary, deny-by-default. CogWorks does not filter an agent's tool list at run time, because the agent does not run in CogWorks.
+- **Attempt limits come from the stage contract**: The attempt and rework limits for a stage are declared by its resolved contract, not by repository-level configuration. Exceeding either is an escalation, never a silent pass.
 
 ---
 

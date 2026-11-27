@@ -3,11 +3,11 @@
 **Architectural Layer**: Domain trait definitions (in `pipeline`) + Infrastructure stubs (`github`, `listener`)
 **Module Paths**:
 
-- `crates/pipeline/src/github.rs` — `EventSource`, `IssueTracker`, `PullRequestManager`, `CodeRepository`, `ProjectBoard` + data types
+- `crates/pipeline/src/github.rs` — `EventSource`, `IssueTracker`, `PullRequestManager`, `CodeRepository`, `CheckRunReader` + data types
 - `crates/pipeline/src/templates.rs` — `TemplateEngine`
 - `crates/pipeline/src/audit.rs` — `AuditStore`, `AuditEvent`, `PipelineSummary`
 - `crates/github/src/lib.rs` — `GithubClient` implementing all GitHub traits + `AuditStore`
-- `crates/listener/src/lib.rs` — `GitHubWebhookEventSource`, `QueueEventSource` implementing `EventSource`
+- `crates/listener/src/lib.rs` — `QueueEventSource` implementing `EventSource`
 
 **Specification Version**: PR 3
 
@@ -20,14 +20,13 @@ This document specifies all traits and supporting data types that connect the
 
 ```
 pipeline (trait definitions)
-    EventSource ←──────── GitHubWebhookEventSource  (listener)
-                 ←──────── QueueEventSource           (listener)
+    EventSource ←──────── QueueEventSource            (listener)
     IssueTracker ←──────── GithubClient               (github)
     PullRequestManager ←── GithubClient               (github)
-    CodeRepository ←─────── GithubClient               (github)
-    ProjectBoard ←────────── GithubClient               (github)
+    CodeRepository ←─────── GithubClient               (github)   [read-only]
+    CheckRunReader ←─────── GithubClient               (github)   [read-only]
     AuditStore ←──────────── GithubClient               (github)
-    TemplateEngine ←───────── (implemented in PR 10)
+    TemplateEngine ←───────── HandlebarsTemplateEngine
 ```
 
 **Architectural rules** (from `docs/spec/constraints.md`):
@@ -117,22 +116,8 @@ pub enum EventSourceError {
 | `Timeout` | Yes (loop again) | Not an error; callers treat `Ok(None)` and `Timeout` identically |
 | `ConnectionLost` | Yes (after back-off) | Implementation should reconnect internally first |
 | `ParseError` | No (drop event) | Log raw payload to audit; dead-letter message |
-| `AuthError` | No | Operator intervention required (wrong HMAC secret or queue credential) |
+| `AuthError` | No | Operator intervention required (queue credential) |
 | `QueueError` | Depends | Log and retry up to `max_retry_attempts` |
-
----
-
-### WebhookConfig
-
-Configuration for `GitHubWebhookEventSource`.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `bind_address` | `std::net::SocketAddr` | Local address to bind the HTTP server |
-| `path_prefix` | `String` | URL path prefix (e.g. `"/hooks"`) |
-
-The webhook secret is resolved separately through the Credential Provider at
-listener construction and is not stored in `WebhookConfig`.
 
 ---
 
@@ -170,11 +155,25 @@ pub trait EventSource: Send {
 
 **Implementations**:
 
-| Struct | Crate | Mode |
-| -------- | ------- | ------ |
-| `GitHubWebhookEventSource` | `listener` | Webhook (direct or smee.io) |
-| `QueueEventSource` | `listener` | Azure Service Bus / AWS SQS |
-| synthesised one-shot event | `cli` | Manual CLI invocation |
+| Struct | Crate | Mode | Level |
+| -------- | ------- | ------ | ----- |
+| synthesised one-shot event | `cli` | `cogworks run --issue <n>` | L1 |
+| `QueueEventSource` | `listener` | Consumes the factory's event queue | L2 |
+
+**CogWorks does not receive GitHub webhooks.** Webhook ingress, HMAC
+verification and normalisation belong to the factory's webhook ingress service,
+which routes normalised events onto durable queues. CogWorks consumes those
+queues. There is one place in the factory where an inbound signature is checked,
+and it is not here.
+
+A consumed event carries the actor-trust field the ingress service established.
+A run starts only on the human-only trigger label, and an event from an external
+actor that would start agent work is ignored (REQ-EXEC-004).
+
+An event is a **prompt to read GitHub**, never a source of truth. Every decision
+is made from GitHub state re-read at the start of the step, so a lost, duplicated
+or out-of-order event cannot corrupt a run — it can only delay or repeat a
+re-read.
 
 ---
 
@@ -298,6 +297,8 @@ pub trait IssueTracker: Send + Sync {
     async fn add_typed_link(&self, source: WorkItemId, target: WorkItemId, kind: TypedLinkKind) -> Result<TypedLink, GitHubOperationError>;
     async fn get_typed_links(&self, id: WorkItemId) -> Result<Vec<TypedLink>, GitHubOperationError>;
     async fn get_labels(&self, id: WorkItemId) -> Result<Vec<Label>, GitHubOperationError>;
+    /// Hidden structured comments carrying signed attestations (L3+).
+    async fn list_signed_comments(&self, id: WorkItemId) -> Result<Vec<SignedComment>, GitHubOperationError>;
     async fn add_label(&self, id: WorkItemId, label: &Label) -> Result<(), GitHubOperationError>;
     async fn remove_label(&self, id: WorkItemId, label: &Label) -> Result<(), GitHubOperationError>;
     async fn post_comment(&self, id: WorkItemId, body: &str) -> Result<(), GitHubOperationError>;
@@ -438,23 +439,109 @@ pub trait CodeRepository: Send + Sync {
 }
 ```
 
-**Read-only**: no write methods. All reads are at a specific `git_ref`
-(commit SHA or branch name). Writing to the repository is done via git
-CLI operations in the `nodes` crate.
+**Read-only, and that is a boundary rather than a convenience.** All reads are at
+a specific `git_ref` (commit SHA or branch name).
+
+CogWorks does not write to a target repository and holds no credential that
+could. Commits are produced inside a stage attempt and pushed by the stage runner
+under the stage's identity role, within the mount plan that attempt was given.
+There is deliberately no `write_file`, `create_branch` or `commit_changes` on this
+trait: adding one would require a `contents:write` credential in this process,
+which `docs/spec/constraints.md` §Security forbids.
+
+Reads are lightweight and API-based. CogWorks keeps no working copy; a working
+copy belongs to the sandbox running the attempt.
 
 ---
 
-### ProjectBoard
+### CheckRun, CheckConclusion, GateOutput
 
 ```rust
-#[async_trait]
-pub trait ProjectBoard: Send + Sync {
-    async fn sync_item_status(&self, work_item_id: WorkItemId, status: &str) -> Result<(), GitHubOperationError>;
-    async fn sync_custom_field(&self, work_item_id: WorkItemId, field_name: &str, value: &serde_json::Value) -> Result<(), GitHubOperationError>;
+pub struct CheckRun {
+    pub id: CheckRunId,
+    pub name: String,
+    pub head_sha: CommitSha,
+    /// Numeric identity of the App that authored this check run.
+    pub app_id: u64,
+    pub conclusion: Option<CheckConclusion>,
+    pub output: Option<GateOutput>,
+}
+
+pub enum CheckConclusion {
+    Success,
+    Failure,
+    Neutral,
+    Cancelled,
+    TimedOut,
+    ActionRequired,
+}
+
+pub struct GateOutput {
+    pub title: String,
+    pub summary: String,
+    /// Machine-readable gate detail. For a holdout run this carries only the
+    /// failing requirement identities — never test names, assertions or diffs.
+    pub structured: Option<serde_json::Value>,
 }
 ```
 
-**Non-blocking**: failures must be logged at `WARN` but must not halt the pipeline.
+`conclusion` is `None` while a check run is still in progress. That is a distinct
+state from any conclusion and must not be collapsed into a failure.
+
+---
+
+### CheckRunReader
+
+```rust
+#[async_trait]
+pub trait CheckRunReader: Send + Sync {
+    /// Check runs for a commit, filtered to the configured gate service identity.
+    async fn check_runs_for(
+        &self,
+        repository: &RepositoryId,
+        sha: &CommitSha,
+    ) -> Result<Vec<CheckRun>, GitHubOperationError>;
+}
+```
+
+**This is CogWorks' only source of pass or fail.**
+
+**Read-only, and that is a boundary.** There is no method to create or update a
+check run, and CogWorks holds no credential that could. Verdicts are authored by
+the gate service alone, which recomputes them from a commit SHA in its own
+sandbox under its own identity.
+
+**Author filtering happens in the adapter.** The implementation discards every
+check run whose `app_id` does not match the configured gate service identity
+before returning. Business logic therefore cannot act on a check run from an
+unexpected author even by mistake, and `app_id` is retained on the returned type
+so an assertion can prove the filter ran.
+
+A check run whose `head_sha` differs from the attempt's SHA is treated by callers
+as absent, not as a verdict for that attempt.
+
+---
+
+### SignedComment, AttestationVerification
+
+```rust
+pub struct SignedComment {
+    pub comment_id: u64,
+    pub author_id: u64,
+    /// The structured attestation payload carried by the hidden comment.
+    pub payload: serde_json::Value,
+    /// The detached signature over `payload`.
+    pub signature: Vec<u8>,
+}
+```
+
+Used from L3 to consume upstream services' signed conclusions.
+
+The work-item interface **transports** these comments and does not interpret
+their cryptographic content; verification is the attestation provider's. A
+required attestation that is missing, unsigned, signed by an unexpected identity,
+or mismatched against the content it describes **fails closed** — see
+`docs/adr/ADR-0014-upstream-attestations-are-verified-not-recomputed.md`.
 
 ---
 
@@ -486,7 +573,7 @@ pub trait TemplateEngine: Send + Sync {
 **Variable naming convention**: snake_case keys (e.g. `work_item_id`, `pr_url`).
 All values are `String`; the template engine performs further formatting.
 
-Templates are pre-loaded at startup from `.cogworks/templates/`. The infrastructure
+Templates are pre-loaded at startup from the pinned harness. The infrastructure
 implementation validates all templates at startup and rejects startup if any
 template has a syntax error.
 
@@ -626,8 +713,11 @@ be implemented in PR 10. Until those additions land, the `github` crate returns
 | `CodeRepository::read_tree` | GitHub Trees API (recursive) | `GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=1` |
 
 **Already covered by existing SDK**: issue CRUD, labels, comments, PR CRUD
-(non-filter), Projects V2, branch ops, rate limiting, auth, pagination,
-webhook HMAC verification.
+(non-filter), rate limiting, auth, pagination.
+
+**Deliberately not used**: the SDK's branch and content write operations, and its
+check-run write operations. CogWorks holds no credential for either; commits come
+from the stage runner and verdicts from the gate service.
 
 ---
 
@@ -643,31 +733,12 @@ impl GithubClient {
 impl IssueTracker for GithubClient { ... }
 impl PullRequestManager for GithubClient { ... }
 impl CodeRepository for GithubClient { ... }
-impl ProjectBoard for GithubClient { ... }
+impl CheckRunReader for GithubClient { ... }
 impl AuditStore for GithubClient { ... }
 ```
 
 Constructed once in `cli` and shared as `Arc<GithubClient>` across all nodes.
 Rate limiting is delegated to the SDK's built-in handling.
-
----
-
-### GitHubWebhookEventSource (`listener` crate)
-
-```rust
-pub struct GitHubWebhookEventSource { config: WebhookConfig, /* server handle — PR 10 */ }
-impl GitHubWebhookEventSource {
-    pub fn new(config: WebhookConfig) -> Self;
-}
-impl EventSource for GitHubWebhookEventSource { ... }
-```
-
-Binds an HTTP server on `config.bind_address`. Validates every POST with
-HMAC-SHA256 using `github-bot-sdk`'s webhook responder. Forwards parsed
-events via an internal channel to `next_event`.
-
-**Development proxy**: Use smee.io — run `smee --url <channel> --port <port>`
-and set `bind_address` to the local port.
 
 ---
 
@@ -681,9 +752,13 @@ impl QueueEventSource {
 impl EventSource for QueueEventSource { ... }
 ```
 
-Consumers from Azure Service Bus (default) or AWS SQS (planned in
-`queue-runtime`). Each message body is a JSON-encoded GitHub webhook payload.
-Session ordering keyed on `WorkItemId` when `use_session_ordering = true`.
+Consumes the factory's durable event queue through the `queue-runtime`
+abstraction, with no cloud-specific dependency in CogWorks: a deployment
+configures its provider, on-premises or in any cloud. Each message body is a
+normalised event published by the webhook ingress service, carrying the
+actor-trust field it established. Session ordering keyed on `WorkItemId` when
+`use_session_ordering = true`, so events for one work item are processed in
+order.
 
 ---
 

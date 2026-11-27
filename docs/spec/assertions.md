@@ -27,12 +27,12 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 - **Then**: The step function exits without advancing; `cogworks:awaiting-review` label is present
 - **Traces to**: REQ-PIPE-006
 
-### ASSERT-PSM-004: Safety-critical work item forces human gates
+### ASSERT-PSM-004: A higher tier forces human gates
 
-- **Given**: A work item classified as safety-affecting, with auto-proceed configured for node N (a code-producing node)
+- **Given**: A work item whose derived tier requires a human gate at node N, with auto-proceed configured for N
 - **When**: The step function evaluates the gate for node N
 - **Then**: The gate behaves as human-gated regardless of configuration
-- **Traces to**: REQ-PIPE-006, REQ-CLASS-002
+- **Traces to**: REQ-PIPE-006, REQ-TIER-003
 
 ### ASSERT-PSM-005: Processing lock prevents concurrent processing
 
@@ -55,12 +55,13 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 - **Then**: A status comment is posted on the work item issue with the node name and summary
 - **Traces to**: REQ-PIPE-005
 
-### ASSERT-PSM-008: Default linear pipeline used when no configuration exists
+### ASSERT-PSM-008: No stage graph for the tier and discipline halts
 
-- **Given**: A repository with no `.cogworks/pipeline.toml` file
-- **When**: The pipeline executor loads the pipeline configuration
-- **Then**: The default 7-node linear pipeline (Intake → Architecture → Interface Design → Planning → Code Generation → Review → Integration) is used
-- **Traces to**: REQ-GRAPH-003, REQ-PIPE-003
+- **Given**: A repository whose pin resolves, but whose `(tier, discipline)` pair has no stage graph in the resolved harness
+- **When**: The pipeline executor resolves the stage graph
+- **Then**: The run halts with an error naming the tier and discipline
+- **And**: No default or built-in graph is substituted, and no stage executes
+- **Traces to**: REQ-GRAPH-001, REQ-HARNESS-003
 
 ### ASSERT-PSM-009: Pipeline resumes from failed node on re-trigger
 
@@ -115,19 +116,35 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 - **Then**: The output matches the classification schema (type, affected_modules, estimated_scope, safety_affecting, rationale)
 - **Traces to**: REQ-CLASS-001
 
-### ASSERT-CLASS-002: Safety override applies when registry matches
+### ASSERT-CLASS-002: Tier is the maximum over affected paths
 
-- **Given**: An LLM classification that says `safety_affecting: false`, but one affected module is in the safety-critical registry
-- **When**: The classification is cross-validated
-- **Then**: The final classification has `safety_affecting: true`
-- **Traces to**: REQ-CLASS-002
+- **Given**: A risk map mapping `src/crypto/**` to T2 and `docs/**` to T0, and a work item affecting one path under each
+- **When**: `derive_tier` runs
+- **Then**: The derived tier is T2
+- **Traces to**: REQ-TIER-001
 
-### ASSERT-CLASS-003: Safety override does not apply when no registry match
+### ASSERT-CLASS-003: Tier derivation never lowers a recorded tier
 
-- **Given**: An LLM classification that says `safety_affecting: false`, and no affected modules are in the safety-critical registry
-- **When**: The classification is cross-validated
-- **Then**: The final classification has `safety_affecting: false`
-- **Traces to**: REQ-CLASS-002
+- **Given**: A work item with a recorded tier of T2, and a later derivation over a narrower path set that would yield T1
+- **When**: `derive_tier` runs with the recorded tier
+- **Then**: The derived tier is T2
+- **And**: No configuration, label or model output can produce a lower result
+- **Traces to**: REQ-TIER-002
+
+### ASSERT-CLASS-005: A label is never a source of tier
+
+- **Given**: A work item carrying a label naming a tier lower than the risk map derives
+- **When**: `derive_tier` runs
+- **Then**: The label is ignored entirely and the derived tier is the risk map's
+- **Traces to**: REQ-TIER-001, REQ-LABEL-002
+
+### ASSERT-CLASS-006: A missing risk map halts rather than defaulting
+
+- **Given**: A target repository with no `risk-map.yaml`, or one that does not parse
+- **When**: The intake step derives the tier
+- **Then**: The run halts with an error naming the file
+- **And**: The tier does not default to T0, because that would apply the least rigour to unassessed work
+- **Traces to**: REQ-TIER-004
 
 ### ASSERT-CLASS-004: Scope exceeding threshold triggers escalation
 
@@ -273,128 +290,45 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 
 ---
 
-## Scenario Validation
+## Assurance Review
 
-### ASSERT-SCEN-001: Applicable scenarios are selected
+**Level: L4.** A review stage produces findings. Whether a finding blocks is
+decided by the gate service, so there are deliberately no assertions here about a
+review outcome gating a change.
 
-- **Given**: A sub-work-item that implements interfaces I1 and I2, where scenarios S1, S2, and S3 cover I1, and scenario S4 covers I2
-- **When**: Scenario validation begins
-- **Then**: Scenarios S1, S2, S3, and S4 are selected for execution; other scenarios are not run
-- **Traces to**: REQ-SCEN-007
+### ASSERT-ASSURE-001: A review stage has no writable paths
 
-### ASSERT-SCEN-002: Scenario specifications excluded from code generation context
+- **Given**: A resolved profile for `review-semantic` or `review-security`
+- **When**: Its stage contract is inspected
+- **Then**: The contract declares no writable path, and the mount plan obtained
+  for the attempt makes nothing writable
+- **Traces to**: REQ-ASSURE-001, REQ-ASSURE-002
 
-- **Given**: Context assembly for code generation node
-- **When**: The context package is built
-- **Then**: No scenario specification files are included, even if they are relevant to the affected modules
-- **Traces to**: REQ-SCEN-002 (holdout principle)
+### ASSERT-ASSURE-002: Review output is findings only
 
-### ASSERT-SCEN-003: Multiple trajectories executed per scenario
+- **Given**: A completed `review-security` attempt
+- **When**: Its output is validated against the harness-declared output schema
+- **Then**: The output contains a structured finding set and no artifact changes;
+  an attempt that produced file changes fails the stage
+- **Traces to**: REQ-ASSURE-002
 
-- **Given**: Scenario S with configuration for 10 trajectories
-- **When**: Scenario validation executes scenario S
-- **Then**: Exactly 10 independent trajectory executions occur, each with fresh state
-- **Traces to**: REQ-SCEN-003
+### ASSERT-ASSURE-003: CogWorks does not aggregate findings into a decision
 
-### ASSERT-SCEN-004: Satisfaction score computed correctly
+- **Given**: A finding set containing findings marked `Blocking`
+- **When**: The stage completes
+- **Then**: CogWorks records and attaches the findings and reads the gate
+  service's verdict; it computes no proceed, remediate or escalate decision of
+  its own, and a `Blocking` severity by itself blocks nothing
+- **Traces to**: REQ-ASSURE-003, REQ-VERDICT-001
 
-- **Given**: Scenario S with 10 trajectories where 9 satisfy acceptance criteria and 1 does not
-- **When**: Satisfaction scoring occurs
-- **Then**: The satisfaction score for scenario S is 0.9
-- **Traces to**: REQ-SCEN-004
+### ASSERT-ASSURE-004: Finding text is scanned before prompt reuse
 
-### ASSERT-SCEN-005: Threshold enforcement
-
-- **Given**: Overall satisfaction score of 0.96 with threshold configured at 0.95
-- **When**: Scenario validation decision is made
-- **Then**: Validation passes
-- **Traces to**: REQ-SCEN-004
-
-### ASSERT-SCEN-006: Below-threshold score triggers remediation
-
-- **Given**: Overall satisfaction score of 0.92 with threshold configured at 0.95
-- **When**: Scenario validation decision is made
-- **Then**: Validation fails, and failing scenario details are fed back to Code Generator
-- **Traces to**: REQ-SCEN-006
-
-### ASSERT-SCEN-007: Explicit failure criterion overrides score
-
-- **Given**: Overall satisfaction score of 0.98 (above threshold), but one trajectory triggered an explicit failure criterion
-- **When**: Scenario validation decision is made
-- **Then**: Validation fails immediately
-- **Traces to**: REQ-SCEN-004
-
-### ASSERT-SCEN-008: No applicable scenarios skips validation
-
-- **Given**: A sub-work-item with no applicable scenarios
-- **When**: Scenario validation node is reached
-- **Then**: Validation is skipped (not failed), and the pipeline proceeds to review gate
-- **Traces to**: REQ-SCEN-007
-
-### ASSERT-SCEN-009: Twin provisioning for scenarios
-
-- **Given**: Scenario S requires Digital Twin T, and T is registered
-- **When**: Scenario S is executed
-- **Then**: Twin T is started before execution and stopped after execution
-- **Traces to**: REQ-DTU-005
-
-### ASSERT-SCEN-010: Scenario results in audit trail
-
-- **Given**: Scenario validation completes
-- **When**: Audit trail is written
-- **Then**: Overall satisfaction score, per-scenario scores, trajectory count, and any failure details are included
-- **Traces to**: REQ-SCEN-009
-
----
-
-## Review Gate
-
-### ASSERT-REVIEW-001: Blocking finding prevents PR creation
-
-- **Given**: A review pass that produces at least one `blocking` finding
-- **When**: Review results are aggregated
-- **Then**: The aggregate result is `remediate` (not `proceed`)
-- **And**: PR creation does not occur
-- **Traces to**: REQ-REVIEW-004
-
-### ASSERT-REVIEW-002: Non-blocking findings are preserved
-
-- **Given**: Review passes with only `warning` and `informational` findings
-- **When**: Review results are aggregated
-- **Then**: The aggregate result is `proceed`
-- **And**: All non-blocking findings are collected for PR comments
-- **Traces to**: REQ-REVIEW-004
-
-### ASSERT-REVIEW-003: All four review passes execute
-
-- **Given**: Generated artifacts ready for review
-- **When**: The review gate runs
-- **Then**: Cross-domain constraint validation, code quality, architecture compliance, and security reviews all execute
-- **And**: Results from all four are included in the aggregate
-- **Traces to**: REQ-REVIEW-002, REQ-XVAL-001
-
-### ASSERT-REVIEW-004: Blocking finding feeds back to code generation
-
-- **Given**: A blocking review finding
-- **When**: The review result is processed
-- **Then**: The finding (file, line, severity, explanation) is fed back to the Code Generator for remediation
-- **Traces to**: REQ-REVIEW-005
-
-### ASSERT-REVIEW-005: Unresolved finding triggers escalation
-
-- **Given**: A blocking finding that persists after the maximum number of remediation cycles
-- **When**: The remediation cycle count is checked
-- **Then**: Escalation is triggered
-- **Traces to**: REQ-REVIEW-005
-
-### ASSERT-REVIEW-006: Safety-critical PR requires human approval
-
-- **Given**: A sub-work-item PR for a safety-affecting work item
-- **When**: The PR is created
-- **Then**: The system does NOT auto-approve; human approval is required before merge
-- **Traces to**: REQ-REVIEW-006
-
----
+- **Given**: A finding whose description contains text structured as an
+  instruction
+- **When**: That finding is carried into a rework attempt's bundle
+- **Then**: The text is scanned by `detect_injection` before reuse, and a
+  detection is recorded
+- **Traces to**: REQ-ASSURE-004, REQ-CONST-004
 
 ## Idempotency
 
@@ -435,7 +369,7 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 - **Given**: A review gate that passed with warning and informational findings
 - **When**: The PR is created
 - **Then**: Each non-blocking finding is posted as an inline review comment at the relevant file and line
-- **Traces to**: REQ-REVIEW-004, REQ-INT-001
+- **Traces to**: REQ-ASSURE-003, REQ-INT-001
 
 ### ASSERT-INT-003: Code PRs are never merged by CogWorks
 
@@ -609,20 +543,19 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 - **Then**: The stricter threshold (0.99) is applied
 - **Traces to**: REQ-CPACK-004
 
-### ASSERT-CPACK-005: Missing required artefact is a blocking finding
+### ASSERT-CPACK-005: A pack reaches an attempt only through the bundle
 
-- **Given**: Pack P declares required artefact "unsafe usage justification" and the generated output does not contain it
-- **When**: The Review node runs required artefact checking
-- **Then**: A blocking finding is produced identifying pack P and the missing artefact
-- **And**: PR creation does not occur
-- **Traces to**: REQ-CPACK-006, REQ-REVIEW-004
+- **Given**: Pack P matches a stage's triggers, and the stage contract's input allowlist does not admit Context Packs
+- **When**: The context bundle is assembled
+- **Then**: Pack P's content is absent from the bundle
+- **Traces to**: REQ-CPACK-002, REQ-BUNDLE-001
 
-### ASSERT-CPACK-006: Present required artefact is not a finding
+### ASSERT-CPACK-006: Pack content is covered by the bundle hash
 
-- **Given**: Pack P declares required artefact A and the generated output contains A
-- **When**: The Review node runs required artefact checking
-- **Then**: No finding is produced for this artefact
-- **Traces to**: REQ-CPACK-006
+- **Given**: Two assemblies for the same stage that differ only in the resolved pack content
+- **When**: Each bundle is hashed
+- **Then**: The two hashes differ
+- **Traces to**: REQ-CPACK-002, REQ-BUNDLE-003
 
 ### ASSERT-CPACK-007: Pack content included in context from Architecture node onward
 
@@ -684,7 +617,7 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 
 ### ASSERT-CONST-007: Protected path violation fails pre-PR validation
 
-- **Given**: Generated artifacts include a file matching a protected path pattern (e.g., `.cogworks/constitutional-rules.md`)
+- **Given**: Generated artifacts include a file matching a protected path pattern (e.g., `.factory/pin.yaml`)
 - **When**: Pre-PR validation runs scope enforcement
 - **Then**: A `PROTECTED_PATH_VIOLATION` event is emitted
 - **And**: PR creation does not occur
@@ -740,13 +673,13 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 - **And**: On the next Review failure, the rework edge is NOT taken (max reached) and the overflow action (escalate) is triggered
 - **Traces to**: REQ-EDGE-003
 
-### ASSERT-GRAPH-005: Cycle without termination condition is rejected at configuration load
+### ASSERT-GRAPH-005: Cycle without termination condition is rejected at graph load
 
-- **Given**: A pipeline configuration with node A→B→A (cycle) but no `max_traversals` on any edge in the cycle
-- **When**: The Pipeline Configuration Manager validates the graph
+- **Given**: A resolved stage graph with node A→B→A (cycle) but no `max_traversals` on any edge in the cycle
+- **When**: The graph is validated at load
 - **Then**: Validation fails with an error identifying the unterminated cycle
-- **And**: The pipeline does not start
-- **Traces to**: REQ-GRAPH-001, REQ-GRAPH-004
+- **And**: The run does not start
+- **Traces to**: REQ-GRAPH-001, REQ-GRAPH-002
 
 ### ASSERT-GRAPH-006: LLM-evaluated edge condition falls back on LLM failure
 
@@ -778,19 +711,20 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 - **Then**: The full pipeline state (active/completed/pending/failed nodes, traversal counts, cumulative cost) is written as a JSON document to a GitHub comment
 - **Traces to**: REQ-EXEC-002
 
-### ASSERT-GRAPH-010: Spawning node is non-blocking
+### ASSERT-GRAPH-010: An unknown stage type fails graph validation
 
-- **Given**: A spawning node S in the pipeline graph with a downstream edge to node T
-- **When**: Spawning node S completes (whether issues were created or not)
-- **Then**: Downstream node T is activated; spawning node completion does not depend on created issue outcomes
-- **Traces to**: REQ-NODE-004
+- **Given**: A resolved stage graph containing a node whose declared stage type is absent from the harness stage-type registry
+- **When**: The graph is validated at load
+- **Then**: Validation fails with an error naming the node and its stage type
+- **And**: No stage is dispatched
+- **Traces to**: REQ-STAGE-002, REQ-GRAPH-002
 
-### ASSERT-GRAPH-011: Pipeline configuration selects named pipeline from classification
+### ASSERT-GRAPH-011: The stage graph comes from the harness, not the repository
 
-- **Given**: Pipeline configuration defines pipelines named "standard" and "hotfix", and intake classification outputs `pipeline: "hotfix"`
-- **When**: The Pipeline Configuration Manager selects the pipeline
-- **Then**: The "hotfix" pipeline graph is used for the remainder of the run
-- **Traces to**: REQ-GRAPH-004
+- **Given**: A target repository containing a file that declares a stage graph
+- **When**: The executor resolves the graph for the run
+- **Then**: The resolved graph is the harness's for the run's `(tier, discipline)` pair, and the repository file has no effect
+- **Traces to**: REQ-GRAPH-001, REQ-HARNESS-002
 
 ### ASSERT-GRAPH-012: Partial parallel failure continues other nodes
 
@@ -831,14 +765,6 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 
 ## Context Assembly
 
-### ASSERT-CTX-001: Reference exemplar files loaded from external repository
-
-- **Given**: The architecture specification declares reference exemplar files from an external repository
-- **When**: Context assembly prepares the context package for code generation
-- **Then**: The specified exemplar files are fetched from the external repository
-- **And**: Exemplar files are included in the context package at the appropriate pyramid summary level (Level 2 for distant references, Level 3 for closely related references)
-- **And**: Exemplar files are read-only context — CogWorks does not modify files in referenced repositories
-- **Traces to**: REQ-CTX-001
 
 ---
 
@@ -970,306 +896,6 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 
 ---
 
-## Tool Scoping and Enforcement Assertions
-
-### ASSERT-TOOL-001: Unscoped tools are invisible to LLM
-
-- **Given**: A pipeline node with a tool profile that includes `fs.read`, `fs.list`, and `search.code` but NOT `fs.write`
-- **When**: The LLM call is constructed for this node
-- **Then**: The tool list in the LLM request contains only `fs.read`, `fs.list`, and `search.code`
-- **And**: `fs.write` does not appear in any form (not in tool list, not in descriptions, not referenced)
-- **Traces to**: REQ-TOOL-002, REQ-ENFORCE-001
-
-### ASSERT-TOOL-002: Scope enforcement rejects out-of-scope path
-
-- **Given**: A Code Generation node with `allowed_write_paths` set to `["src/modules/auth/**"]`
-- **When**: The LLM invokes `fs.write` with path `src/modules/payment/handler.rs`
-- **Then**: The tool rejects the invocation with a structured error explaining the path constraint
-- **And**: A `SCOPE_VIOLATION` event is recorded in the audit trail
-- **And**: The file is NOT modified
-- **Traces to**: REQ-TOOL-011, REQ-ENFORCE-002, REQ-TOOL-AUDIT-002
-
-### ASSERT-TOOL-003: Protected path enforcement at tool level
-
-- **Given**: A Code Generation node whose `allowed_write_paths` glob pattern would technically include `.cogworks/constitutional-rules.md`
-- **When**: The LLM invokes `fs.write` targeting `.cogworks/constitutional-rules.md`
-- **Then**: The tool rejects the invocation regardless of the profile's path configuration
-- **And**: A `PROTECTED_PATH_VIOLATION` event is recorded in the audit trail
-- **Traces to**: REQ-TOOL-011, THREAT-017
-
-### ASSERT-TOOL-004: Tool profile resolution with template variables
-
-- **Given**: A tool profile with `allowed_write_paths = ["src/{{affected_modules}}/**"]` and pipeline state containing `affected_modules = "inventory"`
-- **When**: The profile is resolved at node activation time
-- **Then**: The effective `allowed_write_paths` is `["src/inventory/**"]`
-- **And**: The resolved profile is recorded in the audit trail
-- **Traces to**: REQ-PROFILE-002
-
-### ASSERT-TOOL-005: Unresolvable template variable prevents node activation
-
-- **Given**: A tool profile with `allowed_write_paths = ["src/{{affected_modules}}/**"]` but pipeline state does NOT contain `affected_modules`
-- **When**: Profile resolution is attempted at node activation time
-- **Then**: Node activation fails with a structured error identifying the unresolvable variable
-- **And**: No LLM call is made for this node
-- **Traces to**: REQ-PROFILE-002
-
-### ASSERT-TOOL-006: Default profiles applied when no configuration exists
-
-- **Given**: A repository with no `.cogworks/pipeline.toml` file (or a file without `[tool_profiles]`)
-- **When**: The pipeline executes
-- **Then**: Each core node uses its built-in default tool profile
-- **And**: Code Generation has write access; all other nodes are read-only
-- **Traces to**: REQ-PROFILE-003
-
-### ASSERT-TOOL-007: Tool invocation recorded in audit trail
-
-- **Given**: An LLM node that invokes `fs.read` and `domain.validate` during execution
-- **When**: The node completes
-- **Then**: The audit trail contains entries for both invocations with: tool name, parameters, scope parameters, result, and duration
-- **Traces to**: REQ-TOOL-AUDIT-001
-
-### ASSERT-TOOL-008: Scope violation threshold triggers warning
-
-- **Given**: A node with scope violation threshold of 5
-- **When**: The LLM makes 5 tool invocations that are scope violations within a single node execution
-- **Then**: An audit warning is emitted after the 5th violation
-- **And**: The warning includes the violation count and calling node identity
-- **Traces to**: REQ-ENFORCE-002
-
-### ASSERT-TOOL-009: Tool usage report in pipeline summary
-
-- **Given**: A completed pipeline run where Code Generation invoked `fs.write` 12 times, `domain.validate` 3 times, `skill.run` 2 times, and had 1 scope violation
-- **When**: The pipeline completion summary is generated
-- **Then**: The tool usage report shows per-tool counts, 1 scope violation, and invocation type breakdown (12 raw + 3 raw + 2 skill)
-- **Traces to**: REQ-TOOL-AUDIT-003
-
----
-
-## Skill Assertions
-
-### ASSERT-SKILL-001: Skill scope enforcement
-
-- **Given**: A skill that internally calls `fs.write` to a path outside the calling node's `allowed_write_paths`
-- **When**: `skill.run` is invoked by the LLM
-- **Then**: The skill execution fails with a structured error identifying the violating tool call
-- **And**: The scope violation is recorded in the audit trail
-- **And**: No files are modified by the violating call
-- **Traces to**: REQ-SKILL-004
-
-### ASSERT-SKILL-002: Only active skills are invocable
-
-- **Given**: Four skills — one Active, one Proposed, one Reviewed, one Retired
-- **When**: The LLM calls `skill.list`
-- **Then**: Only the Active skill appears in the list
-- **And**: Attempting `skill.run` on the Proposed, Reviewed, or Retired skill returns a structured error stating the skill is not available
-- **And**: The error does NOT reveal whether the skill exists (to prevent information leakage about unapproved skills)
-- **Traces to**: REQ-SKILL-005, THREAT-020
-
-### ASSERT-SKILL-003: Deprecated skill invocation produces warning
-
-- **Given**: A skill with lifecycle state `Deprecated` and a specified alternative skill
-- **When**: The LLM invokes `skill.run` on the deprecated skill
-- **Then**: The skill executes but a warning is returned to the LLM referencing the preferred alternative
-- **And**: The deprecation warning is recorded in the audit trail
-- **Traces to**: REQ-SKILL-005
-
-### ASSERT-SKILL-004: Skill auto-deprecation on low success rate
-
-- **Given**: A skill with success rate tracking. The skill has failed 3 of its last 20 invocations (85% success rate, below the default 90% threshold).
-- **When**: The orchestrator evaluates skill health
-- **Then**: The skill's lifecycle state changes to Deprecated with reason `success_rate_below_threshold`
-- **And**: The state change is recorded in the audit trail
-- **Traces to**: REQ-SKILL-006
-
-### ASSERT-SKILL-005: Skill parameter validation
-
-- **Given**: A skill that declares parameters `{module: string, target: string required}` and the LLM invokes `skill.run` without providing `target`
-- **When**: The skill executor validates parameters
-- **Then**: Execution is rejected with a structured error identifying the missing required parameter
-- **And**: No tool calls from the skill are executed
-- **Traces to**: REQ-SKILL-001
-
-### ASSERT-SKILL-006: Proposed-to-Active transition requires review
-
-- **Given**: A skill in Proposed state
-- **When**: An operator attempts to activate it directly (skipping the Reviewed state)
-- **Then**: The activation is rejected with a structured error indicating review is required
-- **And**: The skill remains in Proposed state
-- **Traces to**: REQ-SKILL-005, THREAT-020
-
-### ASSERT-SKILL-007: Reviewed skill can be rejected or abandoned
-
-- **Given**: A skill in Reviewed state
-- **When**: An operator invokes `cogworks skill rework` (reject/rework) or `cogworks skill retire` (abandon)
-- **Then**: The skill transitions to Proposed (rework) or Retired (abandon) respectively
-- **And**: The state change is recorded in the audit trail with the operator's reason
-- **Traces to**: REQ-SKILL-005
-
----
-
-## Progressive Discovery Assertions
-
-### ASSERT-DISC-001: Progressive discovery activates at or above threshold
-
-- **Given**: A node with 15 tools in its resolved profile (at the default threshold of 15)
-- **When**: The LLM call is prepared
-- **Then**: The tool list contains the compact index (name + one-line description) instead of full schemas
-- **And**: Meta-tools `tools.search`, `tools.schema`, `tools.call` are available
-- **Traces to**: REQ-DISC-001, REQ-DISC-002
-
-### ASSERT-DISC-002: Progressive discovery not active below threshold
-
-- **Given**: A node with 10 tools in its resolved profile (below the default threshold of 15)
-- **When**: The LLM call is prepared
-- **Then**: Full tool schemas are included in the tool list as normal
-- **And**: Meta-tools are NOT added
-- **Traces to**: REQ-DISC-001
-
-### ASSERT-DISC-003: Skills rank above raw tools in search
-
-- **Given**: A progressive discovery search query "validate code" that matches both a skill named "validate-rust-module" and a raw tool `domain.validate`
-- **When**: `tools.search` returns results
-- **Then**: The skill appears before the raw tool in the result list
-- **Traces to**: REQ-DISC-004
-
-### ASSERT-DISC-004: tools.call enforces scope identically to direct invocation
-
-- **Given**: A Code Generation node with `allowed_write_paths` set to `["src/modules/auth/**"]` and progressive discovery active
-- **When**: The LLM invokes `tools.call` with tool name `fs.write` and path `src/modules/payment/handler.rs`
-- **Then**: The scope enforcer rejects the invocation with the same structured error as a direct `fs.write` call would produce
-- **And**: A `SCOPE_VIOLATION` event is recorded in the audit trail
-- **And**: The file is NOT modified
-- **Traces to**: REQ-DISC-002, REQ-ENFORCE-002
-
----
-
-## Adapter Generation Assertions
-
-### ASSERT-ADAPT-001: OpenAPI adapter generation produces valid tool definitions
-
-- **Given**: An OpenAPI 3.1 specification with 5 endpoints
-- **When**: The adapter generator CLI command is run
-- **Then**: 5 TOML tool definition files are generated in `.cogworks/adapters/<name>/`
-- **And**: Each file conforms to the tool definition schema
-- **And**: Tool names are namespaced (e.g., `inventree.stock.list`)
-- **Traces to**: REQ-ADAPT-001, REQ-ADAPT-002
-
-### ASSERT-ADAPT-002: Adapter tools participate in scope enforcement
-
-- **Given**: An adapter-generated tool `inventree.stock.list` registered in the tool registry, and a node profile that includes this tool with scope parameter `allowed_urls = ["https://inventory.example.com"]`
-- **When**: The LLM invokes `inventree.stock.list` targeting a different URL
-- **Then**: The scope enforcer rejects the invocation
-- **And**: A `SCOPE_VIOLATION` event is recorded
-- **Traces to**: REQ-ADAPT-003, REQ-ENFORCE-002
-
-### ASSERT-ADAPT-003: Drift detection identifies removed endpoint
-
-- **Given**: A generated adapter set based on a specification with 5 endpoints, but the source specification has been updated to remove one endpoint
-- **When**: The drift detection CLI command is run
-- **Then**: The report identifies the removed endpoint and the adapter tool definition that no longer has a source
-- **Traces to**: REQ-ADAPT-005
-
----
-
-## Per-Category Tool Assertions
-
-### ASSERT-TOOL-010: Filesystem read respects read scope
-
-- **Given**: A node with `allowed_read_paths = ["src/**"]` and `denied_read_paths = ["src/secrets/**"]`
-- **When**: The LLM invokes `fs.read` targeting `src/secrets/config.toml`
-- **Then**: The tool rejects the read with a structured error (denied path takes precedence)
-- **And**: A `SCOPE_VIOLATION` event is recorded
-- **Traces to**: REQ-TOOL-010, REQ-TOOL-013
-
-### ASSERT-TOOL-020: Git commit respects branch pattern
-
-- **Given**: A Code Generation node with `branch_pattern = "cogworks/swi-.*"`
-- **When**: The LLM invokes `git.commit` on branch `main`
-- **Then**: The commit is rejected with a structured error explaining the branch constraint
-- **And**: No commit is created
-- **And**: A `SCOPE_VIOLATION` event is recorded
-- **Traces to**: REQ-TOOL-020, REQ-ENFORCE-002
-
-### ASSERT-TOOL-030: Domain service tool respects service scope
-
-- **Given**: A node with `allowed_services = ["rust"]`
-- **When**: The LLM invokes `domain.validate` specifying service `kicad`
-- **Then**: The invocation is rejected with a structured error identifying the service scope violation
-- **And**: A `SCOPE_VIOLATION` event is recorded
-- **Traces to**: REQ-TOOL-030, REQ-ENFORCE-002
-
-### ASSERT-TOOL-040: Shell tool restricts to allowed commands
-
-- **Given**: A node with `allowed_commands = ["cargo build", "cargo test"]`
-- **When**: The LLM invokes `shell.run_restricted` with command `rm -rf /`
-- **Then**: The command is rejected with a structured error (command not in allowlist)
-- **And**: The command is NOT executed
-- **And**: A `SCOPE_VIOLATION` event is recorded
-- **Traces to**: REQ-TOOL-040, REQ-ENFORCE-002
-
-### ASSERT-TOOL-050: Network tool restricts to allowed URLs
-
-- **Given**: A node with `net.fetch` enabled and `allowed_urls = ["https://docs.example.com"]`
-- **When**: The LLM invokes `net.fetch` targeting `https://evil.example.com/exfiltrate`
-- **Then**: The fetch is rejected with a structured error (URL not in allowlist)
-- **And**: No network request is made
-- **And**: A `SCOPE_VIOLATION` event is recorded
-- **Traces to**: REQ-TOOL-051, REQ-ENFORCE-002
-
----
-
-## LLM Rate Limiting
-
-### ASSERT-LLM-001: Rate limit headers are respected
-
-- **Given**: An LLM API response includes rate limit headers indicating 5 remaining requests and a reset time 30 seconds in the future
-- **When**: The LLM Gateway processes the response
-- **Then**: The rate limit state is updated with the remaining count and reset time
-- **And**: Subsequent requests are paced so that the remaining budget is not exhausted before the reset time
-- **Traces to**: REQ-LLM-001
-
-### ASSERT-LLM-002: Proactive throttling delays requests before 429
-
-- **Given**: The LLM Gateway rate limit state shows 2 remaining requests with a reset time 60 seconds in the future
-- **When**: A pipeline node requests an LLM call
-- **Then**: The request is delayed (throttled) to spread remaining capacity across the window
-- **And**: No HTTP 429 response is received
-- **Traces to**: REQ-LLM-001, REQ-LLM-002
-
-### ASSERT-LLM-003: Reactive backoff on 429 response
-
-- **Given**: The LLM API returns an HTTP 429 response with a `Retry-After` header of 10 seconds
-- **When**: The LLM Gateway receives this response
-- **Then**: The request is retried after at least 10 seconds
-- **And**: Other queued requests are paused until the retry succeeds
-- **Traces to**: REQ-LLM-001
-
-### ASSERT-LLM-004: Parallel nodes share a single rate limit budget
-
-- **Given**: Two pipeline nodes executing in parallel, both requesting LLM calls
-- **When**: The shared rate limit state shows 1 remaining request
-- **Then**: Only one node's request proceeds; the other is queued until the rate limit resets
-- **And**: No race condition causes both requests to fire simultaneously
-- **Traces to**: REQ-LLM-002
-
-### ASSERT-LLM-005: Halt threshold triggers pipeline abort
-
-- **Given**: The LLM API has been continuously rate-limited (all requests throttled or returning 429) for 30 minutes (default threshold)
-- **When**: The halt-threshold timer expires
-- **Then**: The pipeline is aborted with a clear error indicating prolonged rate limiting
-- **And**: The abort reason is recorded in the audit trail
-- **And**: The work item is updated with the abort status
-- **Traces to**: REQ-LLM-003
-
-### ASSERT-LLM-006: Rate limit events are logged with visibility
-
-- **Given**: An LLM API response triggers a rate limit state change (remaining count drops below 20% of window capacity)
-- **When**: The LLM Gateway updates its state
-- **Then**: A structured log entry is emitted at warning level containing: remaining count, reset time, throttle delay applied
-- **Traces to**: REQ-LLM-004
-
----
-
 ## Label Configuration
 
 ### ASSERT-LABEL-001: Pipeline-internal labels are always prefixed and not configurable
@@ -1302,33 +928,6 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 - **Then**: The configuration is rejected with a clear error identifying the conflict with the named pipeline-internal label
 - **And**: The pipeline refuses to start
 - **Traces to**: REQ-LABEL-003
-
----
-
-## GitHub Projects Integration
-
-### ASSERT-PROJECT-001: Status is synced to project board on node transition
-
-- **Given**: A work item configured with a GitHub Projects V2 board, and the pipeline moves the item from node A to node B
-- **When**: The node transition completes
-- **Then**: The project board item's status field is updated to reflect the new node
-- **Traces to**: REQ-PROJECT-001, REQ-PROJECT-003
-
-### ASSERT-PROJECT-002: Project board failure does not block pipeline
-
-- **Given**: The GitHub Projects V2 API is unavailable (returns HTTP 500)
-- **When**: CogWorks attempts to sync a work item status to the project board
-- **Then**: The failure is logged at warning level
-- **And**: The pipeline continues execution without delay
-- **Traces to**: REQ-PROJECT-002
-
-### ASSERT-PROJECT-003: No project board calls when not configured
-
-- **Given**: The `config.toml` does not contain a `[github_project]` section
-- **When**: A pipeline run executes
-- **Then**: No GitHub Projects V2 API calls are made
-- **And**: No errors or warnings are logged about project board integration
-- **Traces to**: REQ-PROJECT-001
 
 ---
 
@@ -1404,6 +1003,319 @@ This document defines testable behavioral assertions for CogWorks. Each assertio
 - **Then**: A warning is emitted noting that stalling detection cannot fire for this node (threshold 5 > retry budget 3)
 - **And**: Stalling detection is treated as disabled for that node (pipeline still starts — this is a warning, not an error)
 - **Traces to**: REQ-CODE-006
+
+---
+
+## Harness Resolution and Profile Selection
+
+### ASSERT-HARNESS-001: A missing pin halts
+
+- **Given**: A target repository with no `.factory/pin.yaml`, or one that does not parse
+- **When**: `run_step` begins
+- **Then**: The run halts with an error naming the pin file
+- **And**: No harness version is substituted and no stage executes
+- **Traces to**: REQ-HARNESS-001
+
+### ASSERT-HARNESS-002: Unverified harness content halts
+
+- **Given**: A pin that resolves, but whose resolved content does not match what the pin names
+- **When**: The harness loader verifies the resolution
+- **Then**: The run halts, and the constitutional rules are not used
+- **Traces to**: REQ-HARNESS-001, REQ-CONST-001
+
+### ASSERT-HARNESS-003: The resolved version is stable across a run
+
+- **Given**: A run whose first invocation resolves harness version V, and a harness whose referenced content changes before the next invocation
+- **When**: The next invocation resolves the graph and compares the recorded graph hash
+- **Then**: The drift is detected and the run escalates rather than continuing against different content
+- **Traces to**: REQ-HARNESS-004, REQ-EXEC-007
+
+### ASSERT-PROFILE-001: Identical inputs resolve identically
+
+- **Given**: Two resolutions of `(stage type, discipline, toolchain, tier)` with identical values at the same pin
+- **When**: `resolve_profile` runs for each
+- **Then**: Both return the same profile reference and the same stage contract
+- **Traces to**: REQ-PROFSEL-001
+
+### ASSERT-PROFILE-002: No model participates in profile selection
+
+- **Given**: A stage awaiting profile resolution
+- **When**: `resolve_profile` runs
+- **Then**: No model call is made, and no model output is an input to the resolution
+- **Traces to**: REQ-PROFSEL-002
+
+### ASSERT-PROFILE-003: No matching profile halts rather than defaulting
+
+- **Given**: A resolution key for which the resolved harness defines no profile
+- **When**: `resolve_profile` runs
+- **Then**: The run halts with an error naming the key
+- **And**: No default or nearest-match profile is substituted
+- **Traces to**: REQ-PROFSEL-003
+
+### ASSERT-PROFILE-004: The resolved profile is recorded in the attestation
+
+- **Given**: A completed stage attempt
+- **When**: Its attestation is written
+- **Then**: The attestation names the resolved profile and the harness version it came from
+- **Traces to**: REQ-PROFSEL-004, REQ-ATTEST-001
+
+---
+
+## Context Bundles
+
+### ASSERT-BUNDLE-001: A non-allowlisted input is absent, not deprioritised
+
+- **Given**: A stage contract whose input allowlist does not name holdout content, and a repository containing holdout content
+- **When**: The bundle is assembled with a token budget large enough to include everything
+- **Then**: The holdout content is absent from the bundle
+- **And**: Its absence does not depend on the token budget
+- **Traces to**: REQ-BUNDLE-001
+
+### ASSERT-BUNDLE-002: The stage contract is never in its own bundle
+
+- **Given**: Any resolved stage contract
+- **When**: The bundle for that stage is assembled
+- **Then**: No bundle item contains the contract's allowlist, writable paths, limits or identity role
+- **Traces to**: REQ-BUNDLE-002
+
+### ASSERT-BUNDLE-003: The hash is recorded before the attempt is requested
+
+- **Given**: An assembled bundle
+- **When**: A stage attempt is requested
+- **Then**: The bundle hash has already been computed and recorded
+- **And**: An attempt whose bundle was not hashed is never requested
+- **Traces to**: REQ-BUNDLE-003
+
+### ASSERT-BUNDLE-004: Identical content hashes identically
+
+- **Given**: Two assemblies producing the same items in the same order
+- **When**: Each is hashed through the canonical serialisation
+- **Then**: The two hashes are equal
+- **Traces to**: REQ-BUNDLE-003
+
+### ASSERT-BUNDLE-005: Mandatory inputs are never silently truncated
+
+- **Given**: A stage whose allowlist marks the specification mandatory, and a token budget smaller than the specification alone
+- **When**: The bundle is assembled
+- **Then**: Assembly reports a structured error and the run escalates
+- **And**: No attempt is requested with the specification missing
+- **Traces to**: REQ-BUNDLE-004
+
+---
+
+## Oracle Separation
+
+### ASSERT-ORACLE-001: Implementation does not start before the manifest is sealed
+
+- **Given**: A slice whose locked tests exist but whose manifest is unsigned or absent
+- **When**: The executor considers the `implement` stage
+- **Then**: No `implement` attempt is requested
+- **Traces to**: REQ-ORACLE-001
+
+### ASSERT-ORACLE-002: The build identity cannot write locked-test paths
+
+- **Given**: A resolved `implement` stage contract
+- **When**: The mount plan is obtained for its identity role
+- **Then**: The locked-test paths are not writable in the plan
+- **And**: CogWorks is not the only enforcement point: the commit-range scope check rejects commits reaching those paths
+- **Traces to**: REQ-ORACLE-002, REQ-SANDBOX-003
+
+### ASSERT-ORACLE-003: Oracle and implement run under different identities
+
+- **Given**: Resolved contracts for `unit-oracle` and `implement` on the same slice
+- **When**: Their identity roles are compared
+- **Then**: The two roles differ
+- **Traces to**: REQ-ORACLE-003
+
+### ASSERT-ORACLE-004: The oracle never sees implementation source
+
+- **Given**: A repository containing implementation source under `src/`
+- **When**: The bundle for a `unit-oracle` stage is assembled
+- **Then**: No bundle item derives from `src/`
+- **Traces to**: REQ-ORACLE-004, REQ-BUNDLE-001
+
+### ASSERT-ORACLE-005: A dispute is raised, never resolved by editing
+
+- **Given**: An `implement` attempt that judges a locked test to be wrong
+- **When**: The stage completes
+- **Then**: A dispute is recorded for a human, and the locked test is unchanged
+- **Traces to**: REQ-ORACLE-005
+
+### ASSERT-ORACLE-006: Rework feedback carries no test source
+
+- **Given**: A gate verdict failing three locked tests
+- **When**: Rework feedback is composed for the next attempt
+- **Then**: The feedback carries the failing test identities and messages, and no test source
+- **Traces to**: REQ-ORACLE-006, REQ-REWORK-002
+
+### ASSERT-ORACLE-007: Holdout feedback carries only requirement identities
+
+- **Given**: A holdout verdict failing two requirements
+- **When**: Rework feedback is composed
+- **Then**: The feedback carries only the two failing requirement identities — no test names, assertions or diffs
+- **Traces to**: REQ-VERDICT-005, REQ-REWORK-002
+
+---
+
+## Gate Verdicts
+
+### ASSERT-VERDICT-001: CogWorks authors no check run
+
+- **Given**: Any completed stage attempt, passing or failing its own checks
+- **When**: The run proceeds
+- **Then**: No check run is created or updated by CogWorks
+- **And**: The configured GitHub credential carries no `checks:write`
+- **Traces to**: REQ-VERDICT-001, REQ-BOUND-009
+
+### ASSERT-VERDICT-002: A check run from an unexpected author is ignored
+
+- **Given**: A commit SHA carrying a successful check run authored by an App other than the gate service
+- **When**: The verdict is read for that SHA
+- **Then**: That check run is discarded at the adapter boundary and does not contribute to the verdict
+- **And**: The verdict state is absent, not passing
+- **Traces to**: REQ-VERDICT-002
+
+### ASSERT-VERDICT-003: A pending verdict waits
+
+- **Given**: A commit SHA whose gate check run is in progress
+- **When**: The verdict is read
+- **Then**: `run_step` returns a waiting result
+- **And**: The stage neither advances nor fails
+- **Traces to**: REQ-VERDICT-003
+
+### ASSERT-VERDICT-004: A verdict on a stale SHA is treated as absent
+
+- **Given**: A gate check run bound to the previous attempt's SHA, and a new attempt with a new SHA
+- **When**: The verdict is read for the new SHA
+- **Then**: The older check run does not satisfy it
+- **Traces to**: REQ-VERDICT-003
+
+### ASSERT-VERDICT-005: An alignment result is not a verdict
+
+- **Given**: A stage attempt that passes every CogWorks alignment and constraint check
+- **When**: The stage is evaluated for advancement
+- **Then**: The gate service's verdict is still required before the stage advances
+- **And**: The alignment result is not published as a check run
+- **Traces to**: REQ-VERDICT-004, REQ-ALIGN-021
+
+---
+
+## Stage Attempts
+
+### ASSERT-SANDBOX-001: One fresh sandbox per attempt
+
+- **Given**: A stage whose first attempt failed and is being retried
+- **When**: The retry is requested
+- **Then**: A new stage-attempt request is issued, and no sandbox is reused from the previous attempt
+- **Traces to**: REQ-SANDBOX-001
+
+### ASSERT-SANDBOX-002: Every attempt carries a mount plan
+
+- **Given**: Any stage attempt request
+- **When**: The request is inspected
+- **Then**: It carries a mount plan obtained from the mount-plan provider for the contract's identity role
+- **Traces to**: REQ-SANDBOX-003
+
+### ASSERT-SANDBOX-003: CogWorks pushes no commits
+
+- **Given**: A completed stage attempt whose commits are on the expected branch
+- **When**: The push authorship is inspected
+- **Then**: The commits were pushed by the stage runner under the stage's identity role
+- **And**: The configured GitHub credential carries no `contents:write`
+- **Traces to**: REQ-SANDBOX-002, REQ-BOUND-007
+
+### ASSERT-SANDBOX-004: Completion is observed through GitHub state
+
+- **Given**: A stage attempt in flight, and a CogWorks process restarted since the request
+- **When**: The next invocation runs
+- **Then**: Completion is determined from the branch contents and output record, with no in-memory state and no queue event required
+- **Traces to**: REQ-SANDBOX-005, REQ-EXEC-005
+
+### ASSERT-SANDBOX-005: No agent runs in CogWorks' process
+
+- **Given**: Any agent-backed stage
+- **When**: The stage executes
+- **Then**: No agent turn is made from CogWorks' process, and no model API key is reachable from it
+- **Traces to**: REQ-SANDBOX-004, REQ-BOUND-007
+
+---
+
+## Rework and Escalation
+
+### ASSERT-REWORK-001: Invalid output retries, valid output reworks
+
+- **Given**: An attempt whose output failed output-schema validation, and a second attempt whose output was valid but failed its gate
+- **When**: Each disposition is computed
+- **Then**: The first is a retry with the same context; the second is a rework carrying the gate's structured feedback
+- **Traces to**: REQ-REWORK-001
+
+### ASSERT-REWORK-002: A repeating failure class escalates early
+
+- **Given**: Three consecutive attempts failing with the same failure class, and a contract whose attempt limit is five
+- **When**: The disposition is computed for the third failure
+- **Then**: The run escalates without consuming the remaining attempts
+- **Traces to**: REQ-REWORK-003
+
+### ASSERT-REWORK-003: Exhausting a budget escalates, never passes
+
+- **Given**: A stage that has reached its contract's rework limit with a failing verdict
+- **When**: The disposition is computed
+- **Then**: The run escalates with a dossier, and the stage does not advance
+- **Traces to**: REQ-REWORK-001, REQ-REWORK-003
+
+### ASSERT-REWORK-004: Retry and rework budgets are independent
+
+- **Given**: A stage that has exhausted its retry budget but has rework budget remaining
+- **When**: A valid-but-misaligned output is produced
+- **Then**: The rework proceeds, and the exhausted retry budget does not prevent it
+- **Traces to**: REQ-REWORK-001
+
+### ASSERT-REWORK-005: An unrecoverable condition halts rather than retrying
+
+- **Given**: A run whose pin cannot be verified
+- **When**: The disposition is computed
+- **Then**: The run halts, and no attempt is retried
+- **Traces to**: REQ-HARNESS-001, REQ-REWORK-001
+
+### ASSERT-REWORK-006: Escalation produces a dossier
+
+- **Given**: A stage that escalates after exhausting its attempts
+- **When**: The escalation is written
+- **Then**: An escalation issue is created carrying the attempt history, the failure classes seen, and the bundle hashes
+- **Traces to**: REQ-REWORK-003
+
+---
+
+## Attestations
+
+### ASSERT-ATTEST-001: Each attempt produces a signed attestation
+
+- **Given**: A completed stage attempt
+- **When**: The attestation is written
+- **Then**: It is signed, and carries the stage type, resolved profile, harness version, bundle hash, identity role and the verdicts read
+- **Traces to**: REQ-ATTEST-001
+
+### ASSERT-ATTEST-002: A required upstream attestation failing verification halts
+
+- **Given**: A work item whose trust policy requires an intake approval, and an approval comment whose signature does not verify
+- **When**: The intake step runs
+- **Then**: The run halts, and no stage executes
+- **And**: The same holds when the attestation is absent entirely
+- **Traces to**: REQ-ATTEST-003
+
+### ASSERT-ATTEST-003: Attestations are evidence, not state
+
+- **Given**: A run whose attestation write failed on the previous invocation
+- **When**: The next invocation reconstructs its position
+- **Then**: The position is reconstructed from GitHub state without reading any attestation, and the run continues
+- **Traces to**: REQ-ATTEST-004, REQ-EXEC-005
+
+### ASSERT-ATTEST-004: Prose is never parsed for an upstream decision
+
+- **Given**: An upstream triage comment whose prose summary and machine-readable block disagree
+- **When**: The intake step reads the triage conclusion
+- **Then**: The machine-readable block is used and the prose is not parsed
+- **Traces to**: REQ-ATTEST-002
 
 ---
 

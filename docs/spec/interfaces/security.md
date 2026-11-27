@@ -85,7 +85,7 @@ The loaded, unvalidated constitutional rules document.
 pub struct ConstitutionalRules {
     pub content: String,
     pub source_hash: String,
-    pub source_branch: BranchName,
+    pub harness_version: HarnessVersion,
 }
 ```
 
@@ -94,16 +94,17 @@ pub struct ConstitutionalRules {
 - `content` — raw text, verbatim. Prepended to every LLM system prompt.
 - `source_hash` — SHA-256 hex digest of `content`. Validated at prompt-assembly
   time to detect tampering between load and use.
-- `source_branch` — the branch from which the rules were loaded. Only the
-  repository's default branch (or an explicit approved list) is accepted.
-  Feature branches and forks are rejected with
-  `ConstitutionalError::InvalidSourceBranch`.
+- `harness_version` — the harness version the rules were resolved at. Rules come
+  from the pinned harness, never from a branch of the repository being worked on,
+  so a repository cannot supply the rules that govern its own runs. A resolution
+  that fails verification is rejected with
+  `ConstitutionalError::UnverifiedProvenance`.
 
 **Invariants**:
 
 - `content` must be non-empty.
 - `source_hash` must be a 64-character lowercase hex string (SHA-256).
-- `source_branch` must match the approved-branch list checked during validation.
+- `harness_version` must match the version the pin resolved to, as asserted by `HarnessPinProvenance`.
 
 ### ConstitutionalValidationResult
 
@@ -170,7 +171,7 @@ Errors from constitutional prompt validation. All variants are `NonRetryable`.
 ```rust
 pub enum ConstitutionalError {
     MissingRules { missing: Vec<RequiredRule> },
-    InvalidSourceBranch { branch: BranchName },
+    UnverifiedProvenance { harness_version: HarnessVersion },
     HashMismatch { expected: String, computed: String },
 }
 ```
@@ -178,43 +179,48 @@ pub enum ConstitutionalError {
 | Variant | When produced |
 |---------|--------------|
 | `MissingRules { missing }` | One or more `RequiredRule` variants not found in the document text |
-| `InvalidSourceBranch { branch }` | `source_branch` is not on the approved list |
+| `UnverifiedProvenance { harness_version }` | The resolved rules content did not match what the pin names |
 | `HashMismatch { expected, computed }` | SHA-256 of loaded content differs from `source_hash` |
 
 On any of these errors the pipeline must halt. Human investigation is required
 before resuming.
 
-### ApprovedBranches
+### HarnessPinProvenance
 
-The set of repository branches from which constitutional rules may be loaded.
+Where the constitutional rules came from, and the assertion that they are what the
+pin names.
 
 ```rust
-pub struct ApprovedBranches(Vec<BranchName>);
-
-impl ApprovedBranches {
-    pub fn new(branches: Vec<BranchName>) -> Self { ... }
-    pub fn contains(&self, branch: &BranchName) -> bool { ... }
-}
-
-impl Default for ApprovedBranches {
-    fn default() -> Self { /* ["main", "master"] */ }
+pub struct HarnessPinProvenance {
+    pub harness_version: HarnessVersion,
+    /// Digest of the rules content as resolved at that version.
+    pub content_digest: String,
+    /// True only when the resolved content's digest matched what the pin names.
+    pub verified: bool,
 }
 ```
 
-**Purpose**: Carries the operator-configured list of approved branch names.
-Passed to `validate_constitutional_prompt` as a separate parameter so that
-configuration is decoupled from the `ConstitutionalRules` content.
+**Purpose**: rules are resolved from the pinned harness, not from a branch of the
+repository being worked on. A repository cannot supply the rules that govern its
+own runs — which matters because CogWorks operates on its own repository, and an
+agent working there would otherwise be able to edit its own constraints.
 
-| Constructor | Behaviour |
-|-------------|----------|
-| `ApprovedBranches::default()` | Accepts `"main"` and `"master"` |
-| `ApprovedBranches::new(branches)` | Accepts exactly the provided list |
-| `ApprovedBranches::new(vec![])` | Rejects every branch (no approvals) |
+Provenance is passed to `validate_constitutional_prompt` as a separate parameter,
+so configuration stays decoupled from `ConstitutionalRules` content.
 
-**Security note**: An empty list (`ApprovedBranches::new(vec![])`) causes every
-call to `validate_constitutional_prompt` to return
-`ConstitutionalError::InvalidSourceBranch`, which halts the pipeline. This is
-the intended fail-safe — never configure an empty list in production.
+| State | Behaviour |
+|-------|-----------|
+| `verified: true` | Rules may be used |
+| `verified: false` | Every call to `validate_constitutional_prompt` returns `ConstitutionalError::UnverifiedProvenance`, halting the run |
+
+**Security note**: unverified provenance **halts**. There is deliberately no
+configuration option to proceed with rules that failed verification, and no
+fallback to a default rule set: running an agent under rules nobody vouched for
+is worse than not running it.
+
+**Change control**: rules change by reviewed pull request in the harness, and a
+repository adopts the change by moving its pin. The verification above is what
+makes the pin meaningful rather than advisory.
 
 ### fn validate_constitutional_prompt
 
@@ -222,14 +228,15 @@ the intended fail-safe — never configure an empty list in production.
 pub fn validate_constitutional_prompt(
     rules: &ConstitutionalRules,
     prompt: PromptAssembly,
-    approved_branches: &ApprovedBranches,
+    provenance: &HarnessPinProvenance,
 ) -> Result<ValidatedPrompt, ConstitutionalError>
 ```
 
 **Steps (in order)**:
 
-1. Verify `rules.source_branch` is in `approved_branches`.
-   → `Err(ConstitutionalError::InvalidSourceBranch)` if not found.
+1. Verify `provenance.verified` is `true` and `provenance.harness_version`
+   matches `rules.harness_version`.
+   → `Err(ConstitutionalError::UnverifiedProvenance)` otherwise.
 
 2. Compute SHA-256 of `rules.content`; compare to `rules.source_hash`.
    → `Err(ConstitutionalError::HashMismatch)` on mismatch.
@@ -254,7 +261,7 @@ pub fn validate_constitutional_prompt(
 | | `validate_constitutional_prompt` | `assemble_constitutional_prompt` |
 |---|---|---|
 | Crate | `pipeline` | `nodes` |
-| Input | `ConstitutionalRules` + `PromptAssembly` + `ApprovedBranches` | `ConstitutionalRules` + `system_prompt: &str` (uses `ApprovedBranches::default()` internally) |
+| Input | `ConstitutionalRules` + `PromptAssembly` + `HarnessPinProvenance` | `ConstitutionalRules` + `system_prompt: &str` (carries the provenance it was constructed with) |
 | Output | `Result<ValidatedPrompt, ConstitutionalError>` | `Result<ConstitutionallyWrappedPrompt, ConstitutionalError>` |
 | Purpose | Validates rules are intact and complete | Validates (via calling `validate_constitutional_prompt`) **and** packages for LLM dispatch |
 
@@ -371,9 +378,9 @@ pub enum ScopeViolationKind {
 | Variant | When produced | Produced by |
 |---------|---------------|--------------|
 | `ScopeUnderspecified` | `ApprovedScope.artifact_patterns` is empty | `validate_scope` |
-| `ScopeAmbiguous` | A path matches both an allow-pattern and a prohibit-pattern | `validate_tool_scope` (reserved in `validate_scope` for future `prohibited_artifact_patterns` on `ApprovedScope`) |
+| `ScopeAmbiguous` | A path matches both an allow-pattern and a prohibit-pattern | Reserved in `validate_scope` for future `prohibited_artifact_patterns` on `ApprovedScope` |
 | `ProtectedPathViolation` | Artifact matches a `ProtectedPath`; overrides all allow rules | `validate_scope` |
-| `UnauthorizedCapability` | Artifact does not match any approved pattern | `validate_scope`, `validate_tool_scope` |
+| `UnauthorizedCapability` | Artifact does not match any approved pattern | `validate_scope` |
 
 ### ScopeViolation
 
@@ -543,67 +550,56 @@ begins.
 
 ---
 
-## Part 4 — Tool Parameter Scope
+## Part 4 — Trust Zones and Identity Roles
 
-### ToolParams
+### TrustZone
 
 ```rust
-pub struct ToolParams {
-    pub params: IndexMap<String, serde_json::Value>,
+pub enum TrustZone {
+    /// specify, architect, contract, plan — writes specification paths only.
+    Design,
+    /// unit-oracle, acceptance-oracle — never sees implementation source.
+    Oracle,
+    /// implement, refactor, debt-fix — never sees holdouts or acceptance source.
+    Build,
+    /// review-semantic, review-security — read-only, emits findings only.
+    Review,
 }
 ```
 
-Untyped map of tool invocation parameters as provided by the LLM or skill
-sequencer before validation. `String` keys are parameter names;
-`serde_json::Value` values are the raw parameter values.
+A stage's zone is a property of its resolved profile, not of the node that
+declares it. The zone determines which barriers apply during bundle assembly and
+which identity role the attempt runs under.
 
-**Ordering guarantee**: `params` is an `IndexMap` that preserves **insertion
-order**. `validate_tool_scope` iterates parameters in the same order as they
-were inserted, matching the order the LLM produced them. This makes violation
-reports and audit log entries deterministic and reproducible across runs.
-
-**Requires**: `indexmap` workspace dependency (`indexmap = { version = "1",
-features = ["serde"] }` in `[workspace.dependencies]`).
-
-Constructor: `ToolParams::empty()` — creates an empty map.
-
-### ToolScopeViolation
+### IdentityRole
 
 ```rust
-pub struct ToolScopeViolation {
-    pub tool: ToolName,
-    pub parameter_name: String,
-    pub violated_constraint: String,
-}
+pub struct IdentityRole(String);
 ```
 
-- `tool` — the tool whose invocation was rejected.
-- `parameter_name` — the specific parameter that violated a constraint.
-- `violated_constraint` — human-readable description of the constraint.
+The identity an attempt's commits are pushed under. **CogWorks never holds the
+credential for any identity role** — the stage runner does, and it performs the
+push.
 
-### fn validate_tool_scope
+The oracle and build zones MUST run under different identity roles. This is what
+makes the oracle unforgeable by its author: the build identity cannot write the
+locked-test paths, enforced by the mount plan the attempt runs under and the
+commit-range scope check applied to what it produced.
 
-```rust
-pub fn validate_tool_scope(
-    tool: &ToolName,
-    params: &ToolParams,
-    scope: &ScopeParameters,
-) -> Result<(), ToolScopeViolation>
-```
+### Why there is no tool-scope validation here
 
-**Checks performed (in order)**:
+An agent's tool allowlist is part of its profile in the harness, and the boundary
+that enforces it is the sandbox the attempt runs in — a read-only root filesystem,
+a non-root user, no secrets, and deny-by-default egress reaching only the model
+gateway and a curated dependency proxy.
 
-1. For each `String`-valued parameter: treat its value as a file path and check
-   it against `scope.allowed_artifact_patterns` and
-   `scope.prohibited_artifact_patterns`. Prohibited patterns take precedence.
-2. For parameters named `"count"` or `"limit"` with numeric values: check
-   against `scope.max_file_changes` when set.
+CogWorks cannot filter an agent's tool calls, because the agent does not run in
+CogWorks. Attempting to would be security theatre: a check in a process the agent
+never passes through.
 
-Returns on the **first violation** (unlike `validate_scope` which collects all).
-
-**Side effects**: None. Pure function.
-
----
+What CogWorks does provide is the mount plan request and the scope check's
+inputs. Both are enforced elsewhere, which is the point — CogWorks is never the
+only thing standing between an agent and a path it should not touch.
 
 ## Error Handling Summary
 
@@ -614,7 +610,6 @@ Returns on the **first violation** (unlike `validate_scope` which collects all).
 | `validate_scope` | `Vec<ScopeViolation>` | `NonRetryable` |
 | `is_protected` | infallible | N/A |
 | `validate_protected_paths` | `Vec<InvalidGlobPattern>` | `NonRetryable` |
-| `validate_tool_scope` | `ToolScopeViolation` | `NonRetryable` |
 
 ---
 
@@ -670,9 +665,9 @@ validate_scope(&proposed_paths, &scope, &config.protected_paths)?;
 - All pattern matching (glob) is deferred to the implementation phase; stubs
   use `todo!()`. The glob crate (or similar) will be added to
   `crates/pipeline/Cargo.toml` at implementation time.
-- The `source_branch` approved-list check currently accepts only `"master"` and
-  `"main"`. A configurable list will be introduced when configuration loading is
-  implemented in PR 6.
+- Provenance verification compares the resolved rules content against what the
+  pin names. A resolution that cannot be verified halts the run; there is no
+  configuration option to proceed without verification.
 - `format_missing_rules` is a private helper; it is not part of the public API.
 - `ValidatedPrompt` fields are all private. The public accessor methods
   supply everything `nodes::LlmGateway` needs. The private fields make it
