@@ -4,6 +4,272 @@ This document defines the precise meaning of every domain concept in CogWorks. T
 
 ---
 
+## Factory Concepts
+
+CogWorks is one service in a larger system. These are the concepts that cross its boundary. The
+system-level definitions live in the [`brightsmiths/handbook`](https://github.com/brightsmiths/handbook)
+repository under `docs/`; what follows is how each appears to CogWorks.
+
+### Stage Type
+
+The kind of work a graph node does, named rather than described: `specify`, `architect`,
+`contract`, `plan`, `unit-oracle`, `implement`, `refactor`, `acceptance-oracle`,
+`review-semantic`, `review-security`, `drift-scan`, `debt-fix`.
+
+- Source: the stage-type registry in the resolved harness. No stage-type name is compiled into
+  CogWorks
+- Validated: every node's stage type is checked against the registry when the graph is loaded,
+  before any dispatch
+- Distinct from a node: a node is an instance with a position in the graph; a stage type is the
+  kind of work that selects its profile. Several nodes may share one stage type
+- Not a persona: a stage type names work, not a character. The persona is in the profile
+
+### Stage Attempt
+
+One execution of one stage, in one sandbox, producing one outcome.
+
+- Granularity: a retry is a **new attempt**, with a new sandbox and a new bundle hash
+- Bounded by: the attempt and rework limits its stage contract declares
+- Observed: through GitHub state — the expected branch carries its commits and its output record
+  is present
+- Never reused: no sandbox, no working copy and no cached artifact carries from one attempt to the
+  next except through GitHub
+
+### Agent Profile
+
+Everything that determines what an agent is for one stage: persona, skills, tool allowlist,
+identity role, and the stage contract.
+
+- Source: the harness, at the version the target repository pins
+- Resolved by: `(stage type, discipline, language or toolchain, tier)`, deterministically
+- Recorded: in the stage attestation, so the choice is evidence rather than an implementation
+  detail
+- Not selected by a model: selection is a routing decision, and routing is code
+- No fallback: no matching profile halts the run. An approximately-right profile means an agent
+  operating under a contract nobody chose for it
+
+### Stage Contract
+
+The machine-readable terms a stage attempt runs under.
+
+- Contains: input allowlist, output schema, writable paths, network profile, token and cost
+  budget, attempt and rework limits, identity role
+- Part of: the agent profile
+- **Never visible to the agent it governs.** An agent that can read its own allowlist, limits and
+  checked paths can reason about them; the constraints are for the machine
+
+### Harness
+
+The repository holding everything that shapes an agent: stage graphs per `(tier, discipline)`,
+agent profiles, stage contracts, prompt templates, output schemas, Context Packs and
+constitutional rules.
+
+- Read-only to CogWorks. There is no write path, and a harness source configured with write
+  credentials is a misconfiguration
+- Not writable by any agent or any repository CogWorks operates on — which is the point: the
+  agents it configures are exactly the ones it must constrain
+- Versioned, reviewed and canary-rolled, and treated at product tier
+
+### Harness Pin
+
+The harness version a target repository is governed by, recorded in `.factory/pin.yaml`.
+
+- Human-owned, and a protected path: no mount plan makes it writable
+- The unit of adoption: a harness change cannot alter a repository's behaviour until someone moves
+  its pin
+- Verified: resolved content is checked against what the pin names, and a mismatch halts
+- Stable within a run: the resolved version is fixed for the whole run, so content cannot change
+  underneath it
+- Absent, malformed or naming a withdrawn version: a halt, never a default
+
+### Discipline and Discipline Pack
+
+A **discipline** is a field of engineering work — software, firmware, electrical. A **discipline
+pack** is the part of the harness carrying that discipline's profiles, graphs, Context Packs and
+checks.
+
+CogWorks is discipline-neutral: it contains code for no specific discipline, and adding one adds a
+pack to the harness rather than changing this service.
+
+### Trust Zone
+
+Which class of work a stage does, and therefore what it may see and where it may write.
+
+| Zone | Stage types | Writes | Must not see |
+|------|-------------|--------|--------------|
+| Design | `specify`, `architect`, `contract`, `plan` | specification paths only | implementation source |
+| Oracle | `unit-oracle`, `acceptance-oracle` | locked test paths | implementation source |
+| Build | `implement`, `refactor`, `debt-fix` | `src/` and its own tests | holdout content, acceptance source |
+| Review | `review-semantic`, `review-security` | nothing | — |
+
+The oracle barrier matters as much as the build barrier and is easier to forget: an oracle that
+can see the implementation writes tests describing what was built rather than what was asked for.
+
+### Identity Role
+
+The identity a stage attempt's commits are pushed under.
+
+- Held by: the stage runner, never by CogWorks
+- Declared by: the stage contract
+- Distinct per zone: the oracle and build zones MUST run under different roles, which is what
+  makes the oracle unforgeable by its author
+
+### Context Bundle and Bundle Hash
+
+The **context bundle** is the allowlisted, hashed set of inputs one stage attempt may see. The
+**bundle hash** is a SHA-256 over its canonical serialisation.
+
+- Allowlist, not denylist: an input the allowlist does not name is **absent**, not ranked lower
+- Hashed before use: an attempt whose bundle was not hashed is never requested
+- Recorded: the hash goes into the attestation, which is what makes an attempt reproducible
+
+### Oracle
+
+A stage whose output judges another stage's work: `unit-oracle` and `acceptance-oracle`.
+
+Its value rests on one property: it was not written, chosen or adjusted by whatever produced the
+code it measures.
+
+### Locked Test and Oracle Manifest
+
+A **locked test** is a test produced by an oracle stage and sealed before implementation begins.
+The **oracle manifest** is the signed record that seals a slice's locked tests.
+
+- Written by: the oracle identity
+- Read-only to: the build identity, enforced by the mount plan and the commit-range scope check
+- Sealed before implementation: no `implement` attempt is requested until a valid manifest exists
+- A protected path: no mount plan makes a locked test writable by a build stage
+
+### Dispute
+
+A build stage's recorded assertion that a locked test is wrong, raised for a human.
+
+- The only path by which a locked test changes in response to a build stage
+- Never resolved by editing: an escape hatch permitting a justified edit is indistinguishable from
+  one permitting the deletion of an inconvenient test, because the justification comes from the
+  party that benefits
+
+### Holdout
+
+An acceptance test the implementation was produced without knowledge of.
+
+- Location: outside the implementation repository at the product tier, so the barrier rests on
+  repository access rather than on allowlist correctness
+- Executed by: the gate service, which can reach the acceptance repository
+- Feedback: **failing requirement identities only** — never test names, assertions or diffs.
+  Feedback rich enough to fix a holdout failure directly is feedback rich enough to overfit to it
+
+### Visible Set
+
+The acceptance tests an implementation stage may see, as distinct from the holdout set. Both are
+produced by `acceptance-oracle`; only the visible set reaches a build-zone bundle.
+
+### Seam
+
+An interface boundary a refactor must preserve. A `refactor` stage that changes a seam, or changes
+a locked test, fails: refactoring is behaviour-preserving by definition, and a changed seam means
+the behaviour other code depends on has changed.
+
+### Tier
+
+How much it matters if this work is wrong: T0 prototype, T1 internal, T2 product, T3
+safety/security-critical.
+
+- Derived from: path globs in a human-owned `risk-map.yaml` over the paths the work affects —
+  the **maximum** over those paths
+- **Raise-only**: a newly derived tier may exceed a recorded one but never lower it
+- **Never read from a label.** A label edit must not be able to reduce the rigour applied to a
+  piece of work
+- Selects: the stage graph, the profiles, the thresholds and the human gates
+- Missing or malformed risk map: a halt, never a default to the lowest tier
+
+### Risk Map
+
+The human-owned `risk-map.yaml` in a target repository, mapping path globs to tiers.
+
+CogWorks reads it and never writes it. The `architect` stage may propose a patch, which a human
+reviews and merges like any other change.
+
+### Gate
+
+An independently recomputed pass-or-fail check, owned by the gate service.
+
+- Recomputed from a commit SHA, in a clean sandbox, under the gate service's own identity
+- Reads its configuration from the default branch, never from the branch under judgement
+- The only permitted source of required checks
+- Distinct from a **node gate**, which decides whether the graph advances and is not a verdict
+
+### Check-Run Verdict
+
+The pass-or-fail state CogWorks derives from the gate service's check runs on a commit SHA.
+
+- States: passing, failing, **pending**, **absent**
+- Trust anchor: only check runs authored by the gate service identity are considered. A check run
+  from any other author is ignored entirely, not weighted
+- Pending or absent means **wait**, never assume
+- Bound to a SHA: a verdict on any other SHA is treated as absent, so an old pass cannot be
+  replayed against new work
+
+### Mount Plan
+
+The set of paths a stage attempt may write, obtained from the write-scope service for the stage's
+identity role.
+
+CogWorks passes it into the attempt request and is **never the only enforcement point** for a
+write boundary.
+
+### Stage Attestation
+
+The signed record of one stage attempt: stage type, resolved profile, harness version, bundle
+hash, identity role, mount plan, the verdicts read and their authoring identity, and the outcome.
+
+- **Evidence, never workflow state.** A run's position is always reconstructable from GitHub
+  without reading one, which keeps the evidence store off the critical path
+
+### Escalation Dossier
+
+The issue CogWorks creates when a stage exhausts its budget or hits a repeating failure class,
+carrying the attempt history, the failure classes seen and the bundle hashes.
+
+A human inherits the context rather than reconstructing it.
+
+### Model Gateway
+
+The service holding model provider credentials, through which every model call in the factory
+passes.
+
+- Holds: the provider API keys. CogWorks holds none, and neither does any sandbox
+- Enforces: provider rate limits, because it is the only component that sees all factory traffic
+- Resolves: a logical model name to a concrete provider model, so no provider name appears in
+  CogWorks
+
+### Specification Pull Request
+
+The pull request a design-zone stage produces, which a human approves by review.
+
+- Produced by: `specify`, `architect`, `contract` and `plan`
+- Gated by: the gate service, running the specification gates on that pull request
+- The human approval is a real gate: a plan's sub-issues are not created until the plan is
+  approved
+
+### Trigger Label
+
+The label whose application starts a run.
+
+- **Human-only.** CogWorks ignores it when applied by any other actor
+- Named in configuration, never in this specification: the factory's label namespaces are
+  harmonised across services in the handbook, and hardcoding a name here would mean changing it
+  twice
+
+### Actor Trust
+
+The field on a normalised event recording who caused it, established by the factory's ingress
+service.
+
+CogWorks uses it to ignore events from external actors that would otherwise start agent work.
+
+---
+
 ## Pipeline Concepts
 
 ### Pipeline
